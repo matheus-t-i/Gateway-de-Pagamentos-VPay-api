@@ -14,12 +14,12 @@ NestJS dual entry: HTTP API + BullMQ Worker (mesmo repositório).
 ```bash
 cd Gateway-de-Pagamentos-VPay-api
 docker compose up -d
-npx pnpm@9.15.0 install
-npx pnpm@9.15.0 db:generate
-npx pnpm@9.15.0 exec prisma migrate dev --name init
-npx pnpm@9.15.0 db:seed
-npx pnpm@9.15.0 dev:api      # :3001
-npx pnpm@9.15.0 dev:worker
+npm install
+npm run db:generate
+npx prisma migrate dev --name init
+npm run db:seed
+npm run dev:api      # :3001
+npm run dev:worker
 ```
 
 Admin seed: `admin@vpay.local` / `Admin@123456`
