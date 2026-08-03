@@ -1,0 +1,14 @@
+---
+description: Segurança obrigatória de webhooks PIX por adquirente
+alwaysApply: true
+globs: "**/providers/**,**/webhooks/**,*webhook*"
+---
+
+# PIX Webhook Security
+
+1. **Camada 1 (obrigatória):** antes de creditar saldo ou marcar situação terminal, consultar `getStatus` na liquidante. Se não confirmar → `throw` (job failed no Bull Board).
+2. **Camada 2 (obrigatória):** validar IP allowlist (`ips_permitidos_webhook_provedor`) e/ou assinatura `x-key` cadastrada no provedor.
+3. **Provedor inativo/suspenso:** não atualizar transação nem saldo — abortar/no-op com erro explícito.
+4. **Correlação cruzada:** ID externo + `conta_provedor`/`provedor` do evento devem bater com a transação local. Mismatch → rejeitar (nunca atualizar venda de Y com evento de X).
+5. **Controller por adquirente:** cada provedor tem rota exclusiva em `apps/api/src/providers/{codigo}/`.
+6. **Filas genéricas:** enfileirar apenas nas filas compartilhadas com `provider` no payload — nunca criar fila por adquirente.

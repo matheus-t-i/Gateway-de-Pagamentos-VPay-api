@@ -1,0 +1,26 @@
+---
+description: Nomes e payload das filas BullMQ genéricas do Gateway VPay
+alwaysApply: true
+globs: "**/*queue*,**/*processor*,**/bull*,**/worker/**"
+---
+
+# PIX Queues
+
+Constantes centralizadas em `@vpay/shared` (`QUEUE_NAMES`). Nomes EXATOS:
+
+| Constante | Nome |
+|-----------|------|
+| PIX_WEBHOOK_RECEIVED | `1-pix-webhook-received` |
+| PIX_WEBHOOK_SEND | `2-pix-webhook-send` |
+| PIX_WEBHOOK_RECEIVED_CASHOUT | `3-pix-webhook-received-cashout` |
+| PIX_CASH_OUT | `4-pix-cash-out` |
+| OUTBOX_PUBLISHER | `5-outbox-publisher` |
+| LIBERACAO_SALDO | `6-liberacao-saldo` |
+| CONCILIACAO | `7-conciliacao` |
+
+Payload mínimo PIX: `{ provider, contaProvedorId?, payload, webhookRecebidoId?, identificadorRastreio }`.
+
+- API só enfileira; Worker só processa.
+- Bull Board em `/admin/queues` com guard `ADMINISTRADOR`.
+- Webhooks: `attempts > 1` + backoff exponencial.
+- Nunca inventar fila por adquirente.

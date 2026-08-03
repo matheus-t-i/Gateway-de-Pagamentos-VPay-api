@@ -1,0 +1,1368 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================
+// ENUMS
+// =========================================================
+
+enum TipoPessoa {
+  PF
+  PJ
+}
+
+enum TemaPreferido {
+  PADRAO
+  CLARO
+  ESCURO
+}
+
+enum SituacaoUsuario {
+  PENDENTE
+  EM_ANALISE
+  ATIVO
+  REPROVADO
+  SUSPENSO
+  BLOQUEADO
+  ENCERRADO
+}
+
+enum SituacaoEmpresa {
+  PENDENTE
+  EM_ANALISE
+  ATIVA
+  REPROVADA
+  SUSPENSA
+  BLOQUEADA
+  ENCERRADA
+}
+
+enum SituacaoDocumento {
+  PENDENTE
+  VALIDO
+  INVALIDO
+  EXPIRADO
+}
+
+enum SituacaoAnalise {
+  PENDENTE
+  EM_ANALISE
+  APROVADA
+  REPROVADA
+}
+
+enum SituacaoProvedor {
+  ATIVO
+  INATIVO
+  SUSPENSO
+}
+
+enum DirecaoTransacao {
+  ENTRADA
+  SAIDA
+}
+
+enum OrigemConfiguracao {
+  USUARIO
+  EMPRESA
+  MISTA
+}
+
+enum SituacaoTransacao {
+  PENDENTE
+  PROCESSANDO
+  AGUARDANDO_PAGAMENTO
+  LIQUIDADA
+  CONCLUIDA
+  FALHA
+  CANCELADA
+  DEVOLVIDA
+}
+
+enum TipoSaldo {
+  DISPONIVEL
+  PENDENTE_LIBERACAO
+  RESERVADO
+  BLOQUEADO_MED
+}
+
+enum TipoMovimento {
+  CREDITO
+  DEBITO
+}
+
+enum NaturezaMovimentacao {
+  RECEBIMENTO
+  TARIFA
+  RESERVA
+  LIBERACAO
+  SAIDA
+  DEVOLUCAO_PIX
+  BLOQUEIO_MED
+  DESBLOQUEIO_MED
+  DEBITO_MED
+  AJUSTE
+}
+
+enum ModoTratamentoMed {
+  BLOQUEAR_SALDO
+  DEBITAR_IMEDIATAMENTE
+  ANALISE_MANUAL
+}
+
+enum BaseCalculoReserva {
+  VALOR_BRUTO
+  VALOR_LIQUIDO_EMPRESA
+}
+
+enum TipoLiberacao {
+  SALDO_PRINCIPAL
+  RESERVA
+}
+
+enum SituacaoLiberacao {
+  AGENDADA
+  PROCESSANDO
+  LIBERADA
+  CANCELADA
+  BLOQUEADA_MED
+  FALHA
+}
+
+// =========================================================
+// USUARIOS / EMPRESAS / RBAC
+// =========================================================
+
+model Usuario {
+  id                         BigInt         @id @default(autoincrement())
+  idPublico                  String         @unique @default(uuid()) @map("id_publico") @db.Uuid
+  tipoPessoa                 TipoPessoa     @map("tipo_pessoa")
+  cpfCnpj                    String         @unique @map("cpf_cnpj") @db.VarChar(14)
+  nomeRazaoSocial            String         @map("nome_razao_social") @db.VarChar(255)
+  nomeFantasia               String?        @map("nome_fantasia") @db.VarChar(255)
+  /// Responsável pessoa física pela conta. Para PJ vem do cadastro; para PF
+  /// espelha o próprio titular (consulta uniforme no admin).
+  cpfResponsavel             String?        @map("cpf_responsavel") @db.VarChar(14)
+  nomeResponsavel            String?        @map("nome_responsavel") @db.VarChar(255)
+  email                      String         @unique @db.VarChar(255)
+  telefone                   String?        @db.VarChar(20)
+  senhaHash                  String         @map("senha_hash") @db.VarChar(255)
+  situacao                   SituacaoUsuario @default(PENDENTE)
+  contaBloqueada             Boolean        @default(false) @map("conta_bloqueada")
+  forcarTrocaSenha           Boolean        @default(false) @map("forcar_troca_senha")
+  temaPreferido              TemaPreferido  @default(PADRAO) @map("tema_preferido")
+  segredoTotpCriptografado   String?        @map("segredo_totp_criptografado")
+  totpHabilitado             Boolean        @default(false) @map("totp_habilitado")
+  totpAtivadoEm              DateTime?      @map("totp_ativado_em") @db.Timestamptz
+  ultimoAcessoEm             DateTime?      @map("ultimo_acesso_em") @db.Timestamptz
+  ativadoPorUsuarioId        BigInt?        @map("ativado_por_usuario_id")
+  ativadoEm                  DateTime?      @map("ativado_em") @db.Timestamptz
+  motivoReprovacao           String?        @map("motivo_reprovacao")
+  /// Endereço completo do titular (cep, logradouro, numero, complemento, bairro, cidade, uf)
+  endereco                   Json?
+  /// Média de faturamento mensal declarada no cadastro
+  faturamentoMensalMedio     Decimal?       @map("faturamento_mensal_medio") @db.Decimal(15, 2)
+  metadados                  Json           @default("{}")
+  criadoEm                   DateTime       @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm               DateTime       @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  ativadoPor                 Usuario?       @relation("UsuarioAtivacao", fields: [ativadoPorUsuarioId], references: [id])
+  ativados                   Usuario[]      @relation("UsuarioAtivacao")
+  empresasProprietario       Empresa[]      @relation("EmpresaProprietario")
+  empresasAtivadas           Empresa[]      @relation("EmpresaAtivacao")
+  empresasCriadas            Empresa[]      @relation("EmpresaCriacao")
+  documentos                 DocumentoUsuario[]
+  analises                   AnaliseCadastroUsuario[]
+  historicosSituacao         HistoricoSituacaoUsuario[]
+  papeis                     UsuarioPapel[]
+  tokensRedefinicao          TokenRedefinicaoSenha[]
+  auditoriasAcesso           AuditoriaAcesso[]
+  credenciaisApi             CredencialApi[] @relation("CredencialTitular")
+  configuracaoPix            ConfiguracaoPixUsuario?
+  contasProvedor             ContaProvedor[]
+  aceitesLegais              AceiteDocumentoLegal[]
+  chavesPixAprovadas         ChavePixEmpresa[] @relation("ChavePixAprovacao")
+
+  @@map("usuarios")
+}
+
+/// Assinatura eletrônica dos documentos legais no cadastro (IP + user-agent,
+/// geolocalização opcional quando autorizada no app mobile).
+model AceiteDocumentoLegal {
+  id            BigInt   @id @default(autoincrement())
+  usuarioId     BigInt   @map("usuario_id")
+  documento     String   @db.VarChar(80)
+  versao        String   @db.VarChar(20)
+  enderecoIp    String?  @map("endereco_ip") @db.VarChar(45)
+  agenteUsuario String?  @map("agente_usuario")
+  latitude      Decimal? @db.Decimal(9, 6)
+  longitude     Decimal? @db.Decimal(9, 6)
+  aceitoEm      DateTime @default(now()) @map("aceito_em") @db.Timestamptz
+
+  usuario       Usuario  @relation(fields: [usuarioId], references: [id])
+
+  @@index([usuarioId])
+  @@map("aceites_documentos_legais")
+}
+
+enum SituacaoChavePix {
+  PENDENTE
+  APROVADA
+  REPROVADA
+  INATIVA
+}
+
+enum TipoChavePix {
+  CPF
+  CNPJ
+  EMAIL
+  TELEFONE
+  ALEATORIA
+}
+
+/// Chave PIX de destino para saque. Saque pelo PAINEL só é permitido para
+/// chave APROVADA por um ADMINISTRADOR — o cliente cadastra, o gestor libera.
+model ChavePixEmpresa {
+  id                   BigInt           @id @default(autoincrement())
+  idPublico            String           @unique @default(uuid()) @map("id_publico") @db.Uuid
+  empresaId            BigInt           @map("empresa_id")
+  apelido              String?          @db.VarChar(100)
+  chave                String           @db.VarChar(255)
+  tipoChave            TipoChavePix     @map("tipo_chave")
+  /// Titular da chave, conferido pelo analista contra os documentos do cadastro.
+  nomeTitular          String?          @map("nome_titular") @db.VarChar(255)
+  documentoTitular     String?          @map("documento_titular") @db.VarChar(14)
+  situacao             SituacaoChavePix @default(PENDENTE)
+  motivoReprovacao     String?          @map("motivo_reprovacao")
+  aprovadaPorUsuarioId BigInt?          @map("aprovada_por_usuario_id")
+  aprovadaEm           DateTime?        @map("aprovada_em") @db.Timestamptz
+  criadoPorUsuarioId   BigInt?          @map("criado_por_usuario_id")
+  criadoEm             DateTime         @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm         DateTime         @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  empresa              Empresa          @relation(fields: [empresaId], references: [id])
+  aprovadaPor          Usuario?         @relation("ChavePixAprovacao", fields: [aprovadaPorUsuarioId], references: [id])
+
+  @@unique([empresaId, chave])
+  @@index([empresaId, situacao])
+  @@map("chaves_pix_empresas")
+}
+
+model Empresa {
+  id                     BigInt          @id @default(autoincrement())
+  idPublico              String          @unique @default(uuid()) @map("id_publico") @db.Uuid
+  usuarioProprietarioId  BigInt          @map("usuario_proprietario_id")
+  /// Documento da empresa. PJ = CNPJ (14, alfanumérico no novo padrão da Receita);
+  /// PF = CPF do titular (11), pois a 1ª empresa é a própria pessoa.
+  cnpj                   String          @unique @db.VarChar(14)
+  /// Espelha o tipo do proprietário: define quais documentos a empresa exige.
+  tipoPessoa             TipoPessoa      @default(PJ) @map("tipo_pessoa")
+  razaoSocial            String          @map("razao_social") @db.VarChar(255)
+  nomeFantasia           String?         @map("nome_fantasia") @db.VarChar(255)
+  email                  String?         @db.VarChar(255)
+  telefone               String?         @db.VarChar(20)
+  situacao               SituacaoEmpresa @default(PENDENTE)
+  motivoReprovacao       String?         @map("motivo_reprovacao")
+  ativadaPorUsuarioId    BigInt?         @map("ativada_por_usuario_id")
+  ativadaEm              DateTime?       @map("ativada_em") @db.Timestamptz
+  metadados              Json            @default("{}")
+  criadoPorUsuarioId     BigInt?         @map("criado_por_usuario_id")
+  criadoEm               DateTime        @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm           DateTime        @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  usuarioProprietario    Usuario         @relation("EmpresaProprietario", fields: [usuarioProprietarioId], references: [id])
+  ativadaPor             Usuario?        @relation("EmpresaAtivacao", fields: [ativadaPorUsuarioId], references: [id])
+  criadoPor              Usuario?        @relation("EmpresaCriacao", fields: [criadoPorUsuarioId], references: [id])
+  documentos             DocumentoEmpresa[]
+  analises               AnaliseCadastroEmpresa[]
+  historicosSituacao     HistoricoSituacaoEmpresa[]
+  credenciaisApi         CredencialApi[]
+  credenciaisDoProprietario CredencialApi[] @relation("CredencialEmpresaProprietario")
+  configuracaoPix        ConfiguracaoPixEmpresa?
+  saldo                  SaldoEmpresa?
+  transacoes             Transacao[]
+  contasProvedor         ContaProvedor[]
+  chavesPix              ChavePixEmpresa[]
+  casosMed               CasoMed[]
+
+  @@unique([id, usuarioProprietarioId])
+  @@index([usuarioProprietarioId])
+  @@index([situacao])
+  @@map("empresas")
+}
+
+model DocumentoEmpresa {
+  id                   BigInt            @id @default(autoincrement())
+  empresaId            BigInt            @map("empresa_id")
+  tipoDocumento        String            @map("tipo_documento") @db.VarChar(60)
+  nomeArquivo          String            @map("nome_arquivo") @db.VarChar(255)
+  caminhoArquivo       String            @map("caminho_arquivo") @db.VarChar(500)
+  tipoMime             String?           @map("tipo_mime") @db.VarChar(100)
+  tamanhoBytes         BigInt?           @map("tamanho_bytes")
+  hashArquivo          String?           @map("hash_arquivo") @db.VarChar(128)
+  situacao             SituacaoDocumento @default(PENDENTE)
+  motivoInvalidacao    String?           @map("motivo_invalidacao")
+  enviadoEm            DateTime          @default(now()) @map("enviado_em") @db.Timestamptz
+  validadoPorUsuarioId BigInt?           @map("validado_por_usuario_id")
+  validadoEm           DateTime?         @map("validado_em") @db.Timestamptz
+
+  empresa              Empresa           @relation(fields: [empresaId], references: [id])
+
+  @@index([empresaId])
+  @@map("documentos_empresas")
+}
+
+model AnaliseCadastroEmpresa {
+  id                     BigInt         @id @default(autoincrement())
+  empresaId              BigInt         @map("empresa_id")
+  situacao               SituacaoAnalise @default(PENDENTE)
+  observacoes            String?
+  analisadoPorUsuarioId  BigInt?        @map("analisado_por_usuario_id")
+  analisadoEm            DateTime?      @map("analisado_em") @db.Timestamptz
+  criadoEm               DateTime       @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm           DateTime       @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  empresa                Empresa        @relation(fields: [empresaId], references: [id])
+
+  @@map("analises_cadastro_empresas")
+}
+
+model HistoricoSituacaoEmpresa {
+  id               BigInt   @id @default(autoincrement())
+  empresaId        BigInt   @map("empresa_id")
+  situacaoAnterior String?  @map("situacao_anterior") @db.VarChar(30)
+  novaSituacao     String   @map("nova_situacao") @db.VarChar(30)
+  motivo           String?
+  usuarioAtorId    BigInt?  @map("usuario_ator_id")
+  enderecoIp       String?  @map("endereco_ip") @db.VarChar(45)
+  criadoEm         DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  empresa          Empresa  @relation(fields: [empresaId], references: [id])
+
+  @@index([empresaId])
+  @@map("historicos_situacoes_empresas")
+}
+
+model DocumentoUsuario {
+  id                   BigInt            @id @default(autoincrement())
+  usuarioId            BigInt            @map("usuario_id")
+  tipoDocumento        String            @map("tipo_documento") @db.VarChar(60)
+  nomeArquivo          String            @map("nome_arquivo") @db.VarChar(255)
+  caminhoArquivo       String            @map("caminho_arquivo") @db.VarChar(500)
+  tipoMime             String?           @map("tipo_mime") @db.VarChar(100)
+  tamanhoBytes         BigInt?           @map("tamanho_bytes")
+  hashArquivo          String?           @map("hash_arquivo") @db.VarChar(128)
+  situacao             SituacaoDocumento @default(PENDENTE)
+  motivoInvalidacao    String?           @map("motivo_invalidacao")
+  enviadoEm            DateTime          @default(now()) @map("enviado_em") @db.Timestamptz
+  validadoPorUsuarioId BigInt?           @map("validado_por_usuario_id")
+  validadoEm           DateTime?         @map("validado_em") @db.Timestamptz
+
+  usuario              Usuario           @relation(fields: [usuarioId], references: [id])
+
+  @@index([usuarioId])
+  @@map("documentos_usuarios")
+}
+
+model AnaliseCadastroUsuario {
+  id                    BigInt          @id @default(autoincrement())
+  usuarioId             BigInt          @map("usuario_id")
+  situacao              SituacaoAnalise @default(PENDENTE)
+  observacoes           String?
+  analisadoPorUsuarioId BigInt?         @map("analisado_por_usuario_id")
+  analisadoEm           DateTime?       @map("analisado_em") @db.Timestamptz
+  criadoEm              DateTime        @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm          DateTime        @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  usuario               Usuario         @relation(fields: [usuarioId], references: [id])
+
+  @@map("analises_cadastro_usuarios")
+}
+
+model HistoricoSituacaoUsuario {
+  id               BigInt   @id @default(autoincrement())
+  usuarioId        BigInt   @map("usuario_id")
+  situacaoAnterior String?  @map("situacao_anterior") @db.VarChar(30)
+  novaSituacao     String   @map("nova_situacao") @db.VarChar(30)
+  motivo           String?
+  usuarioAtorId    BigInt?  @map("usuario_ator_id")
+  enderecoIp       String?  @map("endereco_ip") @db.VarChar(45)
+  criadoEm         DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  usuario          Usuario  @relation(fields: [usuarioId], references: [id])
+
+  @@index([usuarioId])
+  @@map("historicos_situacoes_usuarios")
+}
+
+model Papel {
+  id           BigInt   @id @default(autoincrement())
+  nome         String   @unique @db.VarChar(100)
+  descricao    String?  @db.VarChar(255)
+  ativo        Boolean  @default(true)
+  criadoEm     DateTime @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  usuarios     UsuarioPapel[]
+  permissoes   PapelPermissao[]
+
+  @@map("papeis")
+}
+
+model Permissao {
+  id        BigInt   @id @default(autoincrement())
+  codigo    String   @unique @db.VarChar(100)
+  descricao String   @db.VarChar(255)
+  criadoEm  DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  papeis    PapelPermissao[]
+
+  @@map("permissoes")
+}
+
+model UsuarioPapel {
+  usuarioId BigInt   @map("usuario_id")
+  papelId   BigInt   @map("papel_id")
+  criadoEm  DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id])
+  papel     Papel    @relation(fields: [papelId], references: [id])
+
+  @@id([usuarioId, papelId])
+  @@map("usuarios_papeis")
+}
+
+model PapelPermissao {
+  papelId     BigInt   @map("papel_id")
+  permissaoId BigInt   @map("permissao_id")
+  criadoEm    DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  papel       Papel     @relation(fields: [papelId], references: [id])
+  permissao   Permissao @relation(fields: [permissaoId], references: [id])
+
+  @@id([papelId, permissaoId])
+  @@map("papeis_permissoes")
+}
+
+model TokenRedefinicaoSenha {
+  id        BigInt    @id @default(autoincrement())
+  usuarioId BigInt    @map("usuario_id")
+  tokenHash String    @unique @map("token_hash") @db.VarChar(255)
+  expiraEm  DateTime  @map("expira_em") @db.Timestamptz
+  usadoEm   DateTime? @map("usado_em") @db.Timestamptz
+  criadoEm  DateTime  @default(now()) @map("criado_em") @db.Timestamptz
+
+  usuario   Usuario   @relation(fields: [usuarioId], references: [id])
+
+  @@map("tokens_redefinicao_senha")
+}
+
+/// Índice crítico: o lockout de login faz count() nesta tabela a CADA senha
+/// errada; sem índice é seq scan numa tabela que só cresce.
+model AuditoriaAcesso {
+  id             BigInt   @id @default(autoincrement())
+  usuarioId      BigInt?  @map("usuario_id")
+  emailInformado String?  @map("email_informado") @db.VarChar(255)
+  enderecoIp     String?  @map("endereco_ip") @db.VarChar(45)
+  agenteUsuario  String?  @map("agente_usuario")
+  sucesso        Boolean
+  motivo         String?
+  ocorridoEm     DateTime @default(now()) @map("ocorrido_em") @db.Timestamptz
+
+  usuario        Usuario? @relation(fields: [usuarioId], references: [id])
+
+  @@index([usuarioId, sucesso, ocorridoEm])
+  @@map("auditorias_acesso")
+}
+
+// =========================================================
+// CREDENCIAIS API
+// =========================================================
+
+model CredencialApi {
+  id                BigInt    @id @default(autoincrement())
+  usuarioId         BigInt    @map("usuario_id")
+  empresaId         BigInt    @map("empresa_id")
+  criadoPorUsuarioId BigInt?  @map("criado_por_usuario_id")
+  nome              String    @db.VarChar(100)
+  chavePublica      String    @unique @map("chave_publica") @db.VarChar(150)
+  segredoHash       String    @map("segredo_hash") @db.VarChar(255)
+  escopos           Json      @default("[]")
+  ativo             Boolean   @default(true)
+  expiraEm          DateTime? @map("expira_em") @db.Timestamptz
+  revogadoEm        DateTime? @map("revogado_em") @db.Timestamptz
+  criadoEm          DateTime  @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm      DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  usuario           Usuario   @relation("CredencialTitular", fields: [usuarioId], references: [id])
+  empresa           Empresa   @relation(fields: [empresaId], references: [id])
+  /// Invariante de segurança: a credencial pertence ao MESMO usuário dono da
+  /// empresa. Declarada aqui (e não como SQL manual) porque toda execução de
+  /// `prisma migrate dev` dropava a constraint criada à mão.
+  empresaDoProprietario Empresa @relation("CredencialEmpresaProprietario", fields: [empresaId, usuarioId], references: [id, usuarioProprietarioId], map: "credenciais_api_empresa_usuario_fk")
+  ipsPermitidos     IpPermitidoApi[]
+  registrosAcesso   RegistroAcessoApi[]
+  transacoes        Transacao[]
+  chavesIdempotencia ChaveIdempotencia[]
+
+  @@unique([empresaId, nome])
+  @@index([empresaId])
+  @@map("credenciais_api")
+}
+
+model IpPermitidoApi {
+  id              BigInt   @id @default(autoincrement())
+  credencialApiId BigInt   @map("credencial_api_id")
+  ipOuCidr        String   @map("ip_ou_cidr") @db.VarChar(50)
+  criadoEm        DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  credencial      CredencialApi @relation(fields: [credencialApiId], references: [id])
+
+  @@unique([credencialApiId, ipOuCidr])
+  @@map("ips_permitidos_api")
+}
+
+model RegistroAcessoApi {
+  id                   BigInt   @id @default(autoincrement())
+  usuarioId            BigInt?  @map("usuario_id")
+  empresaId            BigInt?  @map("empresa_id")
+  credencialApiId      BigInt?  @map("credencial_api_id")
+  enderecoIp           String?  @map("endereco_ip") @db.VarChar(45)
+  metodo               String   @db.VarChar(10)
+  caminho              String   @db.VarChar(500)
+  statusHttp           Int      @map("status_http")
+  latenciaMs           Int?     @map("latencia_ms")
+  identificadorRastreio String? @map("identificador_rastreio") @db.VarChar(100)
+  criadoEm             DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  credencial           CredencialApi? @relation(fields: [credencialApiId], references: [id])
+
+  @@map("registros_acesso_api")
+}
+
+// =========================================================
+// PROVEDORES / CONFIG PIX
+// =========================================================
+
+model ProvedorPagamento {
+  id                       BigInt           @id @default(autoincrement())
+  codigo                   String           @unique @db.VarChar(50)
+  nome                     String           @db.VarChar(255)
+  situacao                 SituacaoProvedor @default(ATIVO)
+  permitePixEntrada        Boolean          @default(false) @map("permite_pix_entrada")
+  permitePixSaida          Boolean          @default(false) @map("permite_pix_saida")
+  exigeAssinaturaWebhook   Boolean          @default(false) @map("exige_assinatura_webhook")
+  segredoWebhookHash       String?          @map("segredo_webhook_hash")
+  criadoEm                 DateTime         @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm             DateTime         @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  contas                   ContaProvedor[]
+  ipsWebhook               IpPermitidoWebhookProvedor[]
+  webhooksRecebidos        WebhookRecebidoProvedor[]
+
+  @@map("provedores_pagamento")
+}
+
+model IpPermitidoWebhookProvedor {
+  id                   BigInt   @id @default(autoincrement())
+  provedorPagamentoId  BigInt   @map("provedor_pagamento_id")
+  ipOuCidr             String   @map("ip_ou_cidr") @db.VarChar(50)
+  criadoEm             DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  provedor             ProvedorPagamento @relation(fields: [provedorPagamentoId], references: [id])
+
+  @@unique([provedorPagamentoId, ipOuCidr])
+  @@map("ips_permitidos_webhook_provedor")
+}
+
+model ContaProvedor {
+  id                         BigInt           @id @default(autoincrement())
+  provedorPagamentoId        BigInt           @map("provedor_pagamento_id")
+  usuarioId                  BigInt?          @map("usuario_id")
+  empresaId                  BigInt?          @map("empresa_id")
+  nome                       String           @db.VarChar(100)
+  identificadorContaExterna  String?          @map("identificador_conta_externa") @db.VarChar(255)
+  chaveUnicaConta            String           @unique @map("chave_unica_conta") @db.VarChar(500)
+  credenciaisCriptografadas  String           @map("credenciais_criptografadas")
+  pixEntradaHabilitado       Boolean          @default(false) @map("pix_entrada_habilitado")
+  pixSaidaHabilitado         Boolean          @default(false) @map("pix_saida_habilitado")
+  ticketMinimoPixEntrada     Decimal          @default(0) @map("ticket_minimo_pix_entrada") @db.Decimal(19, 2)
+  ticketMaximoPixEntrada     Decimal?         @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
+  ticketMinimoPixSaida       Decimal          @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
+  ticketMaximoPixSaida       Decimal?         @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
+  situacao                   SituacaoProvedor @default(ATIVO)
+  metadados                  Json             @default("{}")
+  criadoEm                   DateTime         @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm               DateTime         @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  provedor                   ProvedorPagamento @relation(fields: [provedorPagamentoId], references: [id])
+  usuario                    Usuario?          @relation(fields: [usuarioId], references: [id])
+  empresa                    Empresa?          @relation(fields: [empresaId], references: [id])
+  custoPix                   CustoPixContaProvedor?
+  configsPadraoEntrada       ConfiguracaoPadraoPixUsuario[] @relation("PadraoEntrada")
+  configsPadraoSaida         ConfiguracaoPadraoPixUsuario[] @relation("PadraoSaida")
+  configsUsuarioEntrada      ConfiguracaoPixUsuario[] @relation("UsuarioEntrada")
+  configsUsuarioSaida        ConfiguracaoPixUsuario[] @relation("UsuarioSaida")
+  configsEmpresaEntrada      ConfiguracaoPixEmpresa[] @relation("EmpresaEntrada")
+  configsEmpresaSaida        ConfiguracaoPixEmpresa[] @relation("EmpresaSaida")
+  transacoes                 Transacao[]
+  tentativas                 TentativaTransacao[]
+  saldo                      SaldoAdquirente?
+  gatilhosSaque              GatilhoSaqueAdquirente[]
+  execucoesGatilho           ExecucaoGatilhoSaque[]
+
+  @@index([provedorPagamentoId])
+  @@map("contas_provedor")
+}
+
+model CustoPixContaProvedor {
+  contaProvedorId            BigInt   @id @map("conta_provedor_id")
+  custoPixEntradaPercentual  Decimal  @default(0) @map("custo_pix_entrada_percentual") @db.Decimal(7, 4)
+  custoPixEntradaFixo        Decimal  @default(0) @map("custo_pix_entrada_fixo") @db.Decimal(19, 4)
+  custoPixSaidaPercentual    Decimal  @default(0) @map("custo_pix_saida_percentual") @db.Decimal(7, 4)
+  custoPixSaidaFixo          Decimal  @default(0) @map("custo_pix_saida_fixo") @db.Decimal(19, 4)
+  atualizadoPorUsuarioId     BigInt?  @map("atualizado_por_usuario_id")
+  criadoEm                   DateTime @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm               DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  contaProvedor              ContaProvedor @relation(fields: [contaProvedorId], references: [id])
+
+  @@map("custos_pix_contas_provedor")
+}
+
+model ConfiguracaoPadraoPixUsuario {
+  id                          BigInt              @id @default(autoincrement())
+  nome                        String              @unique @db.VarChar(120)
+  descricao                   String?
+  tipoPessoa                  TipoPessoa?         @map("tipo_pessoa")
+  padraoSistema               Boolean             @default(false) @map("padrao_sistema")
+  ativo                       Boolean             @default(true)
+  contaProvedorPixEntradaId   BigInt              @map("conta_provedor_pix_entrada_id")
+  contaProvedorPixSaidaId     BigInt              @map("conta_provedor_pix_saida_id")
+  taxaPixEntradaPercentual    Decimal             @default(0) @map("taxa_pix_entrada_percentual") @db.Decimal(7, 4)
+  taxaPixEntradaFixa          Decimal             @default(0) @map("taxa_pix_entrada_fixa") @db.Decimal(19, 4)
+  taxaPixSaidaPercentual      Decimal             @default(0) @map("taxa_pix_saida_percentual") @db.Decimal(7, 4)
+  taxaPixSaidaFixa            Decimal             @default(0) @map("taxa_pix_saida_fixa") @db.Decimal(19, 4)
+  ticketMinimoPixEntrada      Decimal             @default(0) @map("ticket_minimo_pix_entrada") @db.Decimal(19, 2)
+  ticketMaximoPixEntrada      Decimal             @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
+  ticketMinimoPixSaida        Decimal             @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
+  ticketMaximoPixSaida        Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
+  permitirPixSaidaViaApi      Boolean             @default(false) @map("permitir_pix_saida_via_api")
+  diasLiberacaoSaldo          Int                 @default(0) @map("dias_liberacao_saldo")
+  percentualReserva           Decimal             @default(0) @map("percentual_reserva") @db.Decimal(7, 4)
+  baseCalculoReserva          BaseCalculoReserva  @default(VALOR_LIQUIDO_EMPRESA) @map("base_calculo_reserva")
+  diasRetencaoReserva         Int                 @default(0) @map("dias_retencao_reserva")
+  modoTratamentoMed           ModoTratamentoMed   @default(BLOQUEAR_SALDO) @map("modo_tratamento_med")
+  permiteSaldoNegativo        Boolean             @default(false) @map("permite_saldo_negativo")
+  criadoEm                    DateTime            @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm                DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  contaEntrada                ContaProvedor       @relation("PadraoEntrada", fields: [contaProvedorPixEntradaId], references: [id])
+  contaSaida                  ContaProvedor       @relation("PadraoSaida", fields: [contaProvedorPixSaidaId], references: [id])
+  configsUsuario              ConfiguracaoPixUsuario[]
+
+  @@map("configuracoes_padrao_pix_usuarios")
+}
+
+model ConfiguracaoPixUsuario {
+  usuarioId                   BigInt              @id @map("usuario_id")
+  configuracaoPadraoOrigemId  BigInt?             @map("configuracao_padrao_origem_id")
+  contaProvedorPixEntradaId   BigInt              @map("conta_provedor_pix_entrada_id")
+  contaProvedorPixSaidaId     BigInt              @map("conta_provedor_pix_saida_id")
+  taxaPixEntradaPercentual    Decimal             @default(0) @map("taxa_pix_entrada_percentual") @db.Decimal(7, 4)
+  taxaPixEntradaFixa          Decimal             @default(0) @map("taxa_pix_entrada_fixa") @db.Decimal(19, 4)
+  taxaPixSaidaPercentual      Decimal             @default(0) @map("taxa_pix_saida_percentual") @db.Decimal(7, 4)
+  taxaPixSaidaFixa            Decimal             @default(0) @map("taxa_pix_saida_fixa") @db.Decimal(19, 4)
+  ticketMinimoPixEntrada      Decimal             @default(0) @map("ticket_minimo_pix_entrada") @db.Decimal(19, 2)
+  ticketMaximoPixEntrada      Decimal             @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
+  ticketMinimoPixSaida        Decimal             @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
+  ticketMaximoPixSaida        Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
+  permitirPixSaidaViaApi      Boolean             @default(false) @map("permitir_pix_saida_via_api")
+  diasLiberacaoSaldo          Int                 @default(0) @map("dias_liberacao_saldo")
+  percentualReserva           Decimal             @default(0) @map("percentual_reserva") @db.Decimal(7, 4)
+  baseCalculoReserva          BaseCalculoReserva  @default(VALOR_LIQUIDO_EMPRESA) @map("base_calculo_reserva")
+  diasRetencaoReserva         Int                 @default(0) @map("dias_retencao_reserva")
+  modoTratamentoMed           ModoTratamentoMed   @default(BLOQUEAR_SALDO) @map("modo_tratamento_med")
+  permiteSaldoNegativo        Boolean             @default(false) @map("permite_saldo_negativo")
+  atualizadoPorUsuarioId      BigInt?             @map("atualizado_por_usuario_id")
+  criadoEm                    DateTime            @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm                DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  usuario                     Usuario             @relation(fields: [usuarioId], references: [id])
+  padraoOrigem                ConfiguracaoPadraoPixUsuario? @relation(fields: [configuracaoPadraoOrigemId], references: [id])
+  contaEntrada                ContaProvedor       @relation("UsuarioEntrada", fields: [contaProvedorPixEntradaId], references: [id])
+  contaSaida                  ContaProvedor       @relation("UsuarioSaida", fields: [contaProvedorPixSaidaId], references: [id])
+
+  @@map("configuracoes_pix_usuarios")
+}
+
+model ConfiguracaoPixEmpresa {
+  empresaId                   BigInt              @id @map("empresa_id")
+  contaProvedorPixEntradaId   BigInt?             @map("conta_provedor_pix_entrada_id")
+  contaProvedorPixSaidaId     BigInt?             @map("conta_provedor_pix_saida_id")
+  taxaPixEntradaPercentual    Decimal?            @map("taxa_pix_entrada_percentual") @db.Decimal(7, 4)
+  taxaPixEntradaFixa          Decimal?            @map("taxa_pix_entrada_fixa") @db.Decimal(19, 4)
+  taxaPixSaidaPercentual      Decimal?            @map("taxa_pix_saida_percentual") @db.Decimal(7, 4)
+  taxaPixSaidaFixa            Decimal?            @map("taxa_pix_saida_fixa") @db.Decimal(19, 4)
+  ticketMinimoPixEntrada      Decimal?            @map("ticket_minimo_pix_entrada") @db.Decimal(19, 2)
+  ticketMaximoPixEntrada      Decimal?            @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
+  ticketMinimoPixSaida        Decimal?            @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
+  ticketMaximoPixSaida        Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
+  permitirPixSaidaViaApi      Boolean?            @map("permitir_pix_saida_via_api")
+  diasLiberacaoSaldo          Int?                @map("dias_liberacao_saldo")
+  percentualReserva           Decimal?            @map("percentual_reserva") @db.Decimal(7, 4)
+  baseCalculoReserva          BaseCalculoReserva? @map("base_calculo_reserva")
+  diasRetencaoReserva         Int?                @map("dias_retencao_reserva")
+  modoTratamentoMed           ModoTratamentoMed?  @map("modo_tratamento_med")
+  permiteSaldoNegativo        Boolean?            @map("permite_saldo_negativo")
+  atualizadoPorUsuarioId      BigInt?             @map("atualizado_por_usuario_id")
+  criadoEm                    DateTime            @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm                DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  empresa                     Empresa             @relation(fields: [empresaId], references: [id])
+  contaEntrada                ContaProvedor?      @relation("EmpresaEntrada", fields: [contaProvedorPixEntradaId], references: [id])
+  contaSaida                  ContaProvedor?      @relation("EmpresaSaida", fields: [contaProvedorPixSaidaId], references: [id])
+
+  @@map("configuracoes_pix_empresas")
+}
+
+// =========================================================
+// TRANSACOES
+// =========================================================
+
+model Transacao {
+  id                                  BigInt              @id @default(autoincrement())
+  idTransacaoPublico                  String              @unique @default(uuid()) @map("id_transacao_publico") @db.Uuid
+  idTransacaoPrivado                  String              @unique @default(uuid()) @map("id_transacao_privado") @db.Uuid
+  empresaId                           BigInt              @map("empresa_id")
+  usuarioSolicitanteId                BigInt?             @map("usuario_solicitante_id")
+  credencialApiId                     BigInt?             @map("credencial_api_id")
+  contaProvedorId                     BigInt?             @map("conta_provedor_id")
+  transacaoOrigemId                   BigInt?             @map("transacao_origem_id")
+  referenciaExterna                   String?             @map("referencia_externa") @db.VarChar(255)
+  /// Callback informado NA CRIAÇÃO desta operação (equivale ao `postbackUrl`).
+  /// Recebe os mesmos eventos dos webhooks do painel; se a URL for igual à de
+  /// um webhook cadastrado, a entrega acontece uma única vez.
+  urlCallback                         String?             @map("url_callback")
+  direcao                             DirecaoTransacao
+  origemConfiguracao                  OrigemConfiguracao  @default(USUARIO) @map("origem_configuracao")
+  moeda                               String              @default("BRL") @db.VarChar(3)
+  valorBruto                          Decimal             @map("valor_bruto") @db.Decimal(19, 2)
+  tarifaPixPercentualAplicada         Decimal             @default(0) @map("tarifa_pix_percentual_aplicada") @db.Decimal(7, 4)
+  tarifaPixFixaAplicada               Decimal             @default(0) @map("tarifa_pix_fixa_aplicada") @db.Decimal(19, 4)
+  valorTarifaPix                      Decimal             @default(0) @map("valor_tarifa_pix") @db.Decimal(19, 2)
+  custoPixProvedorPercentualAplicado  Decimal             @default(0) @map("custo_pix_provedor_percentual_aplicado") @db.Decimal(7, 4)
+  custoPixProvedorFixoAplicado        Decimal             @default(0) @map("custo_pix_provedor_fixo_aplicado") @db.Decimal(19, 4)
+  valorCustoPixProvedor               Decimal             @default(0) @map("valor_custo_pix_provedor") @db.Decimal(19, 2)
+  valorLiquidacaoEmpresa              Decimal             @map("valor_liquidacao_empresa") @db.Decimal(19, 2)
+  valorReserva                        Decimal             @default(0) @map("valor_reserva") @db.Decimal(19, 2)
+  valorDisponivelPrevisto             Decimal             @default(0) @map("valor_disponivel_previsto") @db.Decimal(19, 2)
+  valorMargemBruta                    Decimal             @default(0) @map("valor_margem_bruta") @db.Decimal(19, 2)
+  modoCobrancaTarifaAplicado          String              @default("AUTOMATICO_POR_DIRECAO") @map("modo_cobranca_tarifa_aplicado") @db.VarChar(40)
+  diasLiberacaoSaldoAplicado          Int                 @default(0) @map("dias_liberacao_saldo_aplicado")
+  percentualReservaAplicado           Decimal             @default(0) @map("percentual_reserva_aplicado") @db.Decimal(7, 4)
+  baseCalculoReservaAplicada          BaseCalculoReserva  @default(VALOR_LIQUIDO_EMPRESA) @map("base_calculo_reserva_aplicada")
+  diasRetencaoReservaAplicado         Int                 @default(0) @map("dias_retencao_reserva_aplicado")
+  liberarSaldoEm                      DateTime?           @map("liberar_saldo_em") @db.Timestamptz
+  liberarReservaEm                    DateTime?           @map("liberar_reserva_em") @db.Timestamptz
+  situacao                            SituacaoTransacao   @default(PENDENTE)
+  metadados                           Json                @default("{}")
+  liquidadoEm                         DateTime?           @map("liquidado_em") @db.Timestamptz
+  concluidoEm                         DateTime?           @map("concluido_em") @db.Timestamptz
+  primeiroMedRecebidoEm               DateTime?           @map("primeiro_med_recebido_em") @db.Timestamptz
+  falhouEm                            DateTime?           @map("falhou_em") @db.Timestamptz
+  criadoEm                            DateTime            @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm                        DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  empresa                             Empresa             @relation(fields: [empresaId], references: [id])
+  credencialApi                       CredencialApi?      @relation(fields: [credencialApiId], references: [id])
+  contaProvedor                       ContaProvedor?      @relation(fields: [contaProvedorId], references: [id])
+  transacaoOrigem                     Transacao?          @relation("TransacaoDerivada", fields: [transacaoOrigemId], references: [id])
+  derivadas                           Transacao[]         @relation("TransacaoDerivada")
+  pix                                 TransacaoPix?
+  itens                               ItemCobranca[]
+  tentativas                          TentativaTransacao[]
+  historicosSituacao                  HistoricoSituacaoTransacao[]
+  movimentacoes                       MovimentacaoSaldo[]
+  liberacoes                          LiberacaoSaldo[]
+  casosMed                            CasoMed[]
+  devolucoes                          DevolucaoPix[]
+  chavesIdempotencia                  ChaveIdempotencia[]
+
+  @@unique([empresaId, referenciaExterna])
+  @@index([empresaId])
+  @@index([situacao])
+  @@index([criadoEm])
+  @@index([empresaId, criadoEm])
+  @@map("transacoes")
+}
+
+model TransacaoPix {
+  transacaoId               BigInt    @id @map("transacao_id")
+  txid                      String?   @db.VarChar(35)
+  identificadorFimAFim      String?   @map("identificador_fim_a_fim") @db.VarChar(255)
+  nomePagador               String?   @map("nome_pagador") @db.VarChar(255)
+  documentoPagador          String?   @map("documento_pagador") @db.VarChar(20)
+  emailPagador              String?   @map("email_pagador") @db.VarChar(255)
+  telefonePagador           String?   @map("telefone_pagador") @db.VarChar(20)
+  nomeBeneficiario          String?   @map("nome_beneficiario") @db.VarChar(255)
+  documentoBeneficiario     String?   @map("documento_beneficiario") @db.VarChar(20)
+  /// Endereço do pagador (logradouro, numero, complemento, cep, bairro,
+  /// cidade, uf, pais). Obrigatório na cobrança quando algum item é TANGÍVEL —
+  /// produto físico precisa de entrega. JSON pelo mesmo motivo de
+  /// `Usuario.endereco`: é um bloco lido inteiro, nunca filtrado por campo.
+  enderecoPagador           Json?     @map("endereco_pagador")
+  chavePix                  String?   @map("chave_pix") @db.VarChar(255)
+  tipoChavePix              String?   @map("tipo_chave_pix") @db.VarChar(20)
+  pixCopiaCola              String?   @map("pix_copia_cola")
+  urlCheckout               String?   @map("url_checkout")
+  expiraEm                  DateTime? @map("expira_em") @db.Timestamptz
+  criadoEm                  DateTime  @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm              DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  transacao                 Transacao @relation(fields: [transacaoId], references: [id])
+
+  @@index([txid])
+  @@index([identificadorFimAFim])
+  @@map("transacoes_pix")
+}
+
+/// Itens (produtos/serviços) da cobrança. Obrigatórios na API pública de
+/// cobrança — é o que o lojista está vendendo, e sem isso o relatório de
+/// cash-in só sabe mostrar a `referenciaExterna`.
+///
+/// Os valores são PERSISTIDOS por item (não recalculados na leitura): mudança
+/// de preço no catálogo do lojista não pode reescrever o histórico da venda.
+model ItemCobranca {
+  id             BigInt   @id @default(autoincrement())
+  transacaoId    BigInt   @map("transacao_id")
+  titulo         String   @db.VarChar(255)
+  quantidade     Int
+  valorUnitario  Decimal  @map("valor_unitario") @db.Decimal(19, 2)
+  /// quantidade × valorUnitario no momento da venda.
+  valorTotal     Decimal  @map("valor_total") @db.Decimal(19, 2)
+  /// Produto físico (exige endereço de entrega) x digital/serviço.
+  tangivel       Boolean
+  criadoEm       DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  transacao      Transacao @relation(fields: [transacaoId], references: [id])
+
+  @@index([transacaoId])
+  @@map("itens_cobranca")
+}
+
+model TentativaTransacao {
+  id                      BigInt   @id @default(autoincrement())
+  transacaoId             BigInt   @map("transacao_id")
+  contaProvedorId         BigInt   @map("conta_provedor_id")
+  numeroTentativa         Int      @map("numero_tentativa")
+  situacao                String   @db.VarChar(30)
+  idTransacaoLiquidante   String?  @map("id_transacao_liquidante") @db.VarChar(255)
+  statusHttp              Int?     @map("status_http")
+  codigoErro              String?  @map("codigo_erro") @db.VarChar(100)
+  mensagemErro            String?  @map("mensagem_erro")
+  dadosRequisicao         Json?    @map("dados_requisicao")
+  dadosResposta           Json?    @map("dados_resposta")
+  latenciaMs              Int?     @map("latencia_ms")
+  iniciadoEm              DateTime @default(now()) @map("iniciado_em") @db.Timestamptz
+  concluidoEm             DateTime? @map("concluido_em") @db.Timestamptz
+  criadoEm                DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  transacao               Transacao @relation(fields: [transacaoId], references: [id])
+  contaProvedor           ContaProvedor @relation(fields: [contaProvedorId], references: [id])
+
+  @@unique([transacaoId, numeroTentativa])
+  @@index([idTransacaoLiquidante])
+  @@map("tentativas_transacoes")
+}
+
+model HistoricoSituacaoTransacao {
+  id               BigInt   @id @default(autoincrement())
+  transacaoId      BigInt   @map("transacao_id")
+  situacaoAnterior String?  @map("situacao_anterior") @db.VarChar(40)
+  novaSituacao     String   @map("nova_situacao") @db.VarChar(40)
+  origem           String   @db.VarChar(30)
+  motivo           String?
+  metadados        Json     @default("{}")
+  criadoEm         DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  transacao        Transacao @relation(fields: [transacaoId], references: [id])
+
+  @@index([transacaoId])
+  @@map("historicos_situacoes_transacoes")
+}
+
+model ChaveIdempotencia {
+  id                BigInt    @id @default(autoincrement())
+  empresaId         BigInt    @map("empresa_id")
+  credencialApiId   BigInt?   @map("credencial_api_id")
+  chaveIdempotencia String    @map("chave_idempotencia") @db.VarChar(255)
+  hashRequisicao    String    @map("hash_requisicao") @db.VarChar(255)
+  transacaoId       BigInt?   @map("transacao_id")
+  statusResposta    Int?      @map("status_resposta")
+  corpoResposta     Json?     @map("corpo_resposta")
+  expiraEm          DateTime  @map("expira_em") @db.Timestamptz
+  criadoEm          DateTime  @default(now()) @map("criado_em") @db.Timestamptz
+
+  credencialApi     CredencialApi? @relation(fields: [credencialApiId], references: [id])
+  transacao         Transacao?     @relation(fields: [transacaoId], references: [id])
+
+  @@unique([empresaId, chaveIdempotencia])
+  @@map("chaves_idempotencia")
+}
+
+model DevolucaoPix {
+  id                            BigInt   @id @default(autoincrement())
+  idDevolucaoPublico            String   @unique @default(uuid()) @map("id_devolucao_publico") @db.Uuid
+  transacaoId                   BigInt   @map("transacao_id")
+  casoMedId                     BigInt?  @map("caso_med_id")
+  solicitadoPorUsuarioId        BigInt?  @map("solicitado_por_usuario_id")
+  referenciaExterna             String?  @map("referencia_externa") @db.VarChar(255)
+  identificadorDevolucaoProvedor String? @map("identificador_devolucao_provedor") @db.VarChar(255)
+  valor                         Decimal  @db.Decimal(19, 2)
+  motivo                        String?
+  situacao                      String   @default("PENDENTE") @db.VarChar(30)
+  metadados                     Json     @default("{}")
+  criadoEm                      DateTime @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm                  DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  transacao                     Transacao @relation(fields: [transacaoId], references: [id])
+  casoMed                       CasoMed?  @relation(fields: [casoMedId], references: [id])
+  movimentacoes                 MovimentacaoSaldo[]
+
+  @@map("devolucoes_pix")
+}
+
+// =========================================================
+// LEDGER
+// =========================================================
+
+model SaldoEmpresa {
+  empresaId               BigInt   @id @map("empresa_id")
+  saldoDisponivel         Decimal  @default(0) @map("saldo_disponivel") @db.Decimal(19, 2)
+  saldoPendenteLiberacao  Decimal  @default(0) @map("saldo_pendente_liberacao") @db.Decimal(19, 2)
+  saldoReservado          Decimal  @default(0) @map("saldo_reservado") @db.Decimal(19, 2)
+  saldoBloqueadoMed       Decimal  @default(0) @map("saldo_bloqueado_med") @db.Decimal(19, 2)
+  atualizadoEm            DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  empresa                 Empresa  @relation(fields: [empresaId], references: [id])
+
+  @@map("saldos_empresas")
+}
+
+model MovimentacaoSaldo {
+  id                         BigInt               @id @default(autoincrement())
+  idPublico                  String               @unique @default(uuid()) @map("id_publico") @db.Uuid
+  empresaId                  BigInt               @map("empresa_id")
+  transacaoId                BigInt?              @map("transacao_id")
+  devolucaoPixId             BigInt?              @map("devolucao_pix_id")
+  casoMedId                  BigInt?              @map("caso_med_id")
+  movimentacaoRelacionadaId  BigInt?              @map("movimentacao_relacionada_id")
+  chaveIdempotencia          String               @unique @map("chave_idempotencia") @db.VarChar(255)
+  tipoSaldo                  TipoSaldo            @map("tipo_saldo")
+  tipoMovimento              TipoMovimento        @map("tipo_movimento")
+  natureza                   NaturezaMovimentacao
+  valor                      Decimal              @db.Decimal(19, 2)
+  saldoApos                  Decimal              @map("saldo_apos") @db.Decimal(19, 2)
+  descricao                  String?              @db.VarChar(500)
+  metadados                  Json                 @default("{}")
+  ocorridoEm                 DateTime             @default(now()) @map("ocorrido_em") @db.Timestamptz
+  criadoEm                   DateTime             @default(now()) @map("criado_em") @db.Timestamptz
+
+  transacao                  Transacao?           @relation(fields: [transacaoId], references: [id])
+  devolucaoPix               DevolucaoPix?        @relation(fields: [devolucaoPixId], references: [id])
+  casoMed                    CasoMed?             @relation(fields: [casoMedId], references: [id])
+  relacionada                MovimentacaoSaldo?   @relation("MovRelacionada", fields: [movimentacaoRelacionadaId], references: [id])
+  relacionadas               MovimentacaoSaldo[]  @relation("MovRelacionada")
+  liberacoes                 LiberacaoSaldo[]
+
+  @@index([empresaId])
+  @@index([transacaoId])
+  @@index([ocorridoEm])
+  @@map("movimentacoes_saldo")
+}
+
+model LiberacaoSaldo {
+  id                      BigInt            @id @default(autoincrement())
+  empresaId               BigInt            @map("empresa_id")
+  transacaoId             BigInt            @map("transacao_id")
+  tipoLiberacao           TipoLiberacao     @map("tipo_liberacao")
+  valor                   Decimal           @db.Decimal(19, 2)
+  liberarEm               DateTime          @map("liberar_em") @db.Timestamptz
+  situacao                SituacaoLiberacao @default(AGENDADA)
+  movimentacaoLiberacaoId BigInt?           @map("movimentacao_liberacao_id")
+  quantidadeTentativas    Int               @default(0) @map("quantidade_tentativas")
+  ultimoErro              String?           @map("ultimo_erro")
+  processadoEm            DateTime?         @map("processado_em") @db.Timestamptz
+  criadoEm                DateTime          @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm            DateTime          @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  transacao               Transacao         @relation(fields: [transacaoId], references: [id])
+  movimentacao            MovimentacaoSaldo? @relation(fields: [movimentacaoLiberacaoId], references: [id])
+
+  @@unique([transacaoId, tipoLiberacao])
+  @@index([situacao, liberarEm])
+  @@map("liberacoes_saldo")
+}
+
+model BloqueioSaldo {
+  id                  BigInt   @id @default(autoincrement())
+  idPublico           String   @unique @default(uuid()) @map("id_publico") @db.Uuid
+  empresaId           BigInt   @map("empresa_id")
+  casoMedId           BigInt?  @map("caso_med_id")
+  tipo                String   @db.VarChar(30)
+  valorSolicitado     Decimal  @map("valor_solicitado") @db.Decimal(19, 2)
+  valorBloqueado      Decimal  @default(0) @map("valor_bloqueado") @db.Decimal(19, 2)
+  valorNaoCoberto     Decimal  @default(0) @map("valor_nao_coberto") @db.Decimal(19, 2)
+  motivo              String?
+  situacao            String   @default("ATIVO") @db.VarChar(30)
+  criadoPorUsuarioId  BigInt?  @map("criado_por_usuario_id")
+  bloqueadoEm         DateTime @default(now()) @map("bloqueado_em") @db.Timestamptz
+  encerradoEm         DateTime? @map("encerrado_em") @db.Timestamptz
+  criadoEm            DateTime @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm        DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  casoMed             CasoMed? @relation(fields: [casoMedId], references: [id])
+
+  @@map("bloqueios_saldo")
+}
+
+// =========================================================
+// MED
+// =========================================================
+
+model CasoMed {
+  id                        BigInt            @id @default(autoincrement())
+  idPublico                 String            @unique @default(uuid()) @map("id_publico") @db.Uuid
+  empresaId                 BigInt            @map("empresa_id")
+  transacaoId               BigInt            @map("transacao_id")
+  contaProvedorId           BigInt?           @map("conta_provedor_id")
+  webhookRecebidoId         BigInt?           @map("webhook_recebido_id")
+  identificadorMedProvedor  String?           @map("identificador_med_provedor") @db.VarChar(255)
+  chaveIdempotencia         String            @unique @map("chave_idempotencia") @db.VarChar(255)
+  valorSolicitado           Decimal           @map("valor_solicitado") @db.Decimal(19, 2)
+  modoTratamentoAplicado    ModoTratamentoMed @map("modo_tratamento_aplicado")
+  valorBloqueado            Decimal           @default(0) @map("valor_bloqueado") @db.Decimal(19, 2)
+  valorDebitado             Decimal           @default(0) @map("valor_debitado") @db.Decimal(19, 2)
+  valorNaoCoberto           Decimal           @default(0) @map("valor_nao_coberto") @db.Decimal(19, 2)
+  situacao                  String            @default("RECEBIDO") @db.VarChar(40)
+  motivo                    String?
+  prazoRespostaEm           DateTime?         @map("prazo_resposta_em") @db.Timestamptz
+  recebidoEm                DateTime          @default(now()) @map("recebido_em") @db.Timestamptz
+  decididoEm                DateTime?         @map("decidido_em") @db.Timestamptz
+  decididoPorUsuarioId      BigInt?           @map("decidido_por_usuario_id")
+  encerradoEm               DateTime?         @map("encerrado_em") @db.Timestamptz
+  criadoEm                  DateTime          @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm              DateTime          @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  empresa                   Empresa           @relation(fields: [empresaId], references: [id])
+  transacao                 Transacao         @relation(fields: [transacaoId], references: [id])
+  webhookRecebido           WebhookRecebidoProvedor? @relation(fields: [webhookRecebidoId], references: [id])
+  historicos                HistoricoCasoMed[]
+  bloqueios                 BloqueioSaldo[]
+  movimentacoes             MovimentacaoSaldo[]
+  devolucoes                DevolucaoPix[]
+
+  @@index([transacaoId])
+  @@index([situacao])
+  @@map("casos_med")
+}
+
+model HistoricoCasoMed {
+  id               BigInt   @id @default(autoincrement())
+  casoMedId        BigInt   @map("caso_med_id")
+  situacaoAnterior String?  @map("situacao_anterior") @db.VarChar(40)
+  novaSituacao     String   @map("nova_situacao") @db.VarChar(40)
+  acao             String   @db.VarChar(100)
+  usuarioAtorId    BigInt?  @map("usuario_ator_id")
+  origem           String   @db.VarChar(30)
+  enderecoIp       String?  @map("endereco_ip") @db.VarChar(45)
+  motivo           String?
+  dados            Json     @default("{}")
+  criadoEm         DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  casoMed          CasoMed  @relation(fields: [casoMedId], references: [id])
+
+  @@index([casoMedId])
+  @@map("historicos_casos_med")
+}
+
+// =========================================================
+// WEBHOOKS / OUTBOX
+// =========================================================
+
+model ConfiguracaoWebhookEmpresa {
+  id                     BigInt   @id @default(autoincrement())
+  empresaId              BigInt   @map("empresa_id")
+  nome                   String   @db.VarChar(100)
+  urlDestino             String   @map("url_destino")
+  /// Header que o lojista quer receber para conferir a origem do callback
+  /// (ex.: `x-key-token`). O valor vai em `segredoCriptografado`.
+  nomeHeaderAutenticacao String?  @map("nome_header_autenticacao") @db.VarChar(100)
+  /// Valor do header acima. Guardado cifrado e NUNCA devolvido pela API — o
+  /// lojista escolhe o segredo, então quem precisa dele já o conhece.
+  segredoCriptografado   String?  @map("segredo_criptografado")
+  tiposEvento            Json     @default("[]") @map("tipos_evento")
+  cabecalhosCriptografados Json   @default("{}") @map("cabecalhos_criptografados")
+  ativo                  Boolean  @default(true)
+  criadoEm               DateTime @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm           DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  entregas               EntregaWebhook[]
+
+  @@map("configuracoes_webhook_empresa")
+}
+
+model WebhookRecebidoProvedor {
+  id                        BigInt   @id @default(autoincrement())
+  provedorPagamentoId       BigInt   @map("provedor_pagamento_id")
+  contaProvedorId           BigInt?  @map("conta_provedor_id")
+  empresaId                 BigInt?  @map("empresa_id")
+  identificadorEventoExterno String? @map("identificador_evento_externo") @db.VarChar(255)
+  chaveIdempotencia         String   @unique @map("chave_idempotencia") @db.VarChar(255)
+  tipoEvento                String   @map("tipo_evento") @db.VarChar(100)
+  assinatura                String?  @db.VarChar(500)
+  conteudo                  Json
+  situacao                  String   @default("RECEBIDO") @db.VarChar(30)
+  mensagemErro              String?  @map("mensagem_erro")
+  recebidoEm                DateTime @default(now()) @map("recebido_em") @db.Timestamptz
+  processadoEm              DateTime? @map("processado_em") @db.Timestamptz
+
+  provedor                  ProvedorPagamento @relation(fields: [provedorPagamentoId], references: [id])
+  casosMed                  CasoMed[]
+
+  @@map("webhooks_recebidos_provedor")
+}
+
+model EventoOutbox {
+  id                            BigInt    @id @default(autoincrement())
+  eventoUuid                    String    @unique @default(uuid()) @map("evento_uuid") @db.Uuid
+  empresaId                     BigInt?   @map("empresa_id")
+  tipoAgregado                  String    @map("tipo_agregado") @db.VarChar(100)
+  identificadorAgregado         String    @map("identificador_agregado") @db.VarChar(100)
+  tipoEvento                    String    @map("tipo_evento") @db.VarChar(150)
+  conteudo                      Json
+  ocorridoEm                    DateTime  @default(now()) @map("ocorrido_em") @db.Timestamptz
+  publicadoRedisEm              DateTime? @map("publicado_redis_em") @db.Timestamptz
+  quantidadeTentativasPublicacao Int      @default(0) @map("quantidade_tentativas_publicacao")
+  ultimoErroPublicacao          String?   @map("ultimo_erro_publicacao")
+  criadoEm                      DateTime  @default(now()) @map("criado_em") @db.Timestamptz
+
+  entregas                      EntregaWebhook[]
+
+  @@index([publicadoRedisEm])
+  @@map("eventos_outbox")
+}
+
+model EntregaWebhook {
+  id                     BigInt    @id @default(autoincrement())
+  eventoOutboxId         BigInt    @map("evento_outbox_id")
+  /// Nulo quando a entrega foi para o `urlCallback` da própria operação, que
+  /// não tem cadastro no painel.
+  configuracaoWebhookId  BigInt?   @map("configuracao_webhook_id")
+  /// URL efetivamente chamada — a config pode ser editada depois e o histórico
+  /// precisa dizer para onde a entrega foi de fato.
+  urlDestino             String?   @map("url_destino")
+  empresaId              BigInt    @map("empresa_id")
+  numeroTentativa        Int       @map("numero_tentativa")
+  situacao               String    @db.VarChar(30)
+  statusHttp             Int?      @map("status_http")
+  corpoResposta          String?   @map("corpo_resposta")
+  mensagemErro           String?   @map("mensagem_erro")
+  latenciaMs             Int?      @map("latencia_ms")
+  solicitadoEm           DateTime  @default(now()) @map("solicitado_em") @db.Timestamptz
+  enviadoEm              DateTime? @map("enviado_em") @db.Timestamptz
+  proximaTentativaEm     DateTime? @map("proxima_tentativa_em") @db.Timestamptz
+  criadoEm               DateTime  @default(now()) @map("criado_em") @db.Timestamptz
+
+  eventoOutbox           EventoOutbox @relation(fields: [eventoOutboxId], references: [id])
+  configuracao           ConfiguracaoWebhookEmpresa? @relation(fields: [configuracaoWebhookId], references: [id])
+
+  @@unique([eventoOutboxId, configuracaoWebhookId, numeroTentativa])
+  @@map("entregas_webhook")
+}
+
+// =========================================================
+// AUDITORIA / SEGURANCA
+// =========================================================
+
+model RegistroAuditoria {
+  id                      BigInt   @id @default(autoincrement())
+  usuarioAfetadoId        BigInt?  @map("usuario_afetado_id")
+  empresaAfetadaId        BigInt?  @map("empresa_afetada_id")
+  usuarioAtorId           BigInt?  @map("usuario_ator_id")
+  credencialApiId         BigInt?  @map("credencial_api_id")
+  origem                  String   @db.VarChar(30)
+  operacao                String   @db.VarChar(20)
+  nomeTabela              String?  @map("nome_tabela") @db.VarChar(100)
+  chaveRegistro           String?  @map("chave_registro") @db.VarChar(255)
+  acao                    String   @db.VarChar(150)
+  dadosAnteriores         Json?    @map("dados_anteriores")
+  dadosNovos              Json?    @map("dados_novos")
+  camposAlterados         Json?    @map("campos_alterados")
+  enderecoIp              String?  @map("endereco_ip") @db.VarChar(45)
+  agenteUsuario           String?  @map("agente_usuario")
+  metodoHttp              String?  @map("metodo_http") @db.VarChar(10)
+  caminhoRequisicao       String?  @map("caminho_requisicao") @db.VarChar(500)
+  identificadorRequisicao String?  @map("identificador_requisicao") @db.VarChar(100)
+  identificadorRastreio   String?  @map("identificador_rastreio") @db.VarChar(100)
+  sucesso                 Boolean  @default(true)
+  mensagemErro            String?  @map("mensagem_erro")
+  criadoEm                DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  @@index([criadoEm])
+  @@map("registros_auditoria")
+}
+
+model PoliticaLimiteRequisicoes {
+  id                      BigInt   @id @default(autoincrement())
+  usuarioId               BigInt?  @map("usuario_id")
+  empresaId               BigInt?  @map("empresa_id")
+  escopo                  String   @db.VarChar(30)
+  caminhoRota             String?  @map("caminho_rota") @db.VarChar(500)
+  quantidadeMaxima        Int      @map("quantidade_maxima")
+  janelaSegundos          Int      @map("janela_segundos")
+  duracaoBloqueioSegundos Int      @map("duracao_bloqueio_segundos")
+  ativo                   Boolean  @default(true)
+  criadoEm                DateTime @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm            DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  @@map("politicas_limite_requisicoes")
+}
+
+model BloqueioAcesso {
+  id                 BigInt    @id @default(autoincrement())
+  usuarioId          BigInt?   @map("usuario_id")
+  empresaId          BigInt?   @map("empresa_id")
+  credencialApiId    BigInt?   @map("credencial_api_id")
+  tipoAlvo           String    @map("tipo_alvo") @db.VarChar(30)
+  valorAlvo          String    @map("valor_alvo") @db.VarChar(255)
+  motivo             String    @db.VarChar(500)
+  origem             String    @db.VarChar(30)
+  ativo              Boolean   @default(true)
+  bloqueadoEm        DateTime  @default(now()) @map("bloqueado_em") @db.Timestamptz
+  expiraEm           DateTime? @map("expira_em") @db.Timestamptz
+  desbloqueadoEm     DateTime? @map("desbloqueado_em") @db.Timestamptz
+  criadoPorUsuarioId BigInt?   @map("criado_por_usuario_id")
+  criadoEm           DateTime  @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm       DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  @@map("bloqueios_acesso")
+}
+
+model EventoSeguranca {
+  id                  BigInt   @id @default(autoincrement())
+  usuarioId           BigInt?  @map("usuario_id")
+  empresaId           BigInt?  @map("empresa_id")
+  credencialApiId     BigInt?  @map("credencial_api_id")
+  tipoEvento          String   @map("tipo_evento") @db.VarChar(50)
+  severidade          String   @db.VarChar(20)
+  enderecoIp          String?  @map("endereco_ip") @db.VarChar(45)
+  caminho             String?  @db.VarChar(500)
+  quantidadeDetectada Int?     @map("quantidade_detectada")
+  janelaSegundos      Int?     @map("janela_segundos")
+  acaoAplicada        String?  @map("acao_aplicada") @db.VarChar(100)
+  dados               Json     @default("{}")
+  ocorridoEm          DateTime @default(now()) @map("ocorrido_em") @db.Timestamptz
+
+  @@index([ocorridoEm])
+  @@map("eventos_seguranca")
+}
+
+// =========================================================
+// SALDO NA ADQUIRENTE + SAQUE AUTOMATICO (TESOURARIA)
+// =========================================================
+
+/// Último saldo conhecido da NOSSA conta em cada adquirente. O valor é da
+/// adquirente (consulta na API dela), não do ledger do lojista — por isso vive
+/// fora de `saldos_empresas`. É um cache/snapshot: a fonte de verdade continua
+/// sendo a adquirente, e cada consulta faz upsert aqui.
+model SaldoAdquirente {
+  contaProvedorId  BigInt   @id @map("conta_provedor_id")
+  moeda            String   @default("BRL") @db.VarChar(3)
+  saldoDisponivel  Decimal  @default(0) @map("saldo_disponivel") @db.Decimal(19, 2)
+  saldoBloqueado   Decimal  @default(0) @map("saldo_bloqueado") @db.Decimal(19, 2)
+  /// Última consulta bem-sucedida à adquirente.
+  consultadoEm     DateTime @default(now()) @map("consultado_em") @db.Timestamptz
+  /// Preenchido quando a última consulta falhou (o saldo acima fica velho).
+  erroUltimaConsulta String? @map("erro_ultima_consulta")
+  criadoEm         DateTime @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm     DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  contaProvedor    ContaProvedor @relation(fields: [contaProvedorId], references: [id])
+
+  @@map("saldos_adquirentes")
+}
+
+/// Regra de saque automático do dinheiro parado na adquirente para uma chave
+/// PIX nossa. Uma conta pode ter VÁRIOS gatilhos (avaliados por `ordem`); o
+/// primeiro elegível na rodada dispara e os demais só na próxima.
+model GatilhoSaqueAdquirente {
+  id                     BigInt       @id @default(autoincrement())
+  idPublico              String       @unique @default(uuid()) @map("id_publico") @db.Uuid
+  contaProvedorId        BigInt       @map("conta_provedor_id")
+  nome                   String       @db.VarChar(120)
+  ativo                  Boolean      @default(true)
+  /// Ordem de avaliação quando há mais de um gatilho na mesma conta.
+  ordem                  Int          @default(0)
+  /// Dispara quando o saldo disponível na adquirente atinge este valor.
+  valorGatilho           Decimal      @map("valor_gatilho") @db.Decimal(19, 2)
+  /// Valor que NUNCA sai da conta na adquirente (float operacional).
+  valorReserva           Decimal      @default(0) @map("valor_reserva") @db.Decimal(19, 2)
+  /// Piso/teto do payout: abaixo do mínimo não saca; acima do máximo saca o máximo.
+  valorMinimoPayout      Decimal      @default(0) @map("valor_minimo_payout") @db.Decimal(19, 2)
+  valorMaximoPayout      Decimal?     @map("valor_maximo_payout") @db.Decimal(19, 2)
+  chavePix               String       @map("chave_pix") @db.VarChar(255)
+  tipoChavePix           TipoChavePix @map("tipo_chave_pix")
+  nomeTitular            String?      @map("nome_titular") @db.VarChar(255)
+  documentoTitular       String?      @map("documento_titular") @db.VarChar(20)
+  /// Janela mínima entre dois disparos do MESMO gatilho (anti-flood).
+  intervaloMinimoMinutos Int          @default(60) @map("intervalo_minimo_minutos")
+  ultimaExecucaoEm       DateTime?    @map("ultima_execucao_em") @db.Timestamptz
+  criadoPorUsuarioId     BigInt?      @map("criado_por_usuario_id")
+  atualizadoPorUsuarioId BigInt?      @map("atualizado_por_usuario_id")
+  criadoEm               DateTime     @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm           DateTime     @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  contaProvedor          ContaProvedor          @relation(fields: [contaProvedorId], references: [id])
+  execucoes              ExecucaoGatilhoSaque[]
+
+  @@index([contaProvedorId, ativo])
+  @@map("gatilhos_saque_adquirente")
+}
+
+/// Histórico de cada disparo (automático ou manual) de um gatilho. É o registro
+/// do saque de TESOURARIA — não é `Transacao`, que é sempre dinheiro de lojista.
+model ExecucaoGatilhoSaque {
+  id                    BigInt   @id @default(autoincrement())
+  idPublico             String   @unique @default(uuid()) @map("id_publico") @db.Uuid
+  gatilhoId             BigInt   @map("gatilho_id")
+  contaProvedorId       BigInt   @map("conta_provedor_id")
+  /// Impede disparo duplicado na mesma janela quando o tick roda concorrente.
+  chaveIdempotencia     String   @unique @map("chave_idempotencia") @db.VarChar(255)
+  /// AUTOMATICO (tick da fila) ou MANUAL (botão do admin).
+  origem                String   @default("AUTOMATICO") @db.VarChar(20)
+  saldoObservado        Decimal  @map("saldo_observado") @db.Decimal(19, 2)
+  valorSolicitado       Decimal  @map("valor_solicitado") @db.Decimal(19, 2)
+  situacao              String   @default("PENDENTE") @db.VarChar(30)
+  idTransacaoLiquidante String?  @map("id_transacao_liquidante") @db.VarChar(255)
+  mensagemErro          String?  @map("mensagem_erro")
+  solicitadoPorUsuarioId BigInt? @map("solicitado_por_usuario_id")
+  metadados             Json     @default("{}")
+  concluidoEm           DateTime? @map("concluido_em") @db.Timestamptz
+  criadoEm              DateTime @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm          DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  gatilho               GatilhoSaqueAdquirente @relation(fields: [gatilhoId], references: [id])
+  contaProvedor         ContaProvedor          @relation(fields: [contaProvedorId], references: [id])
+
+  @@index([gatilhoId, criadoEm])
+  @@index([situacao])
+  @@index([criadoEm])
+  @@map("execucoes_gatilho_saque")
+}

@@ -1,0 +1,14 @@
+---
+description: Ledger com Prisma raw SQL e Decimal — nunca float
+alwaysApply: true
+globs: "**/ledger/**,**/saldo/**,**/*movimentacao*"
+---
+
+# Ledger + Prisma
+
+1. **Único ponto de escrita de saldo:** serviço de ledger.
+2. Fluxo: `Prisma.$transaction` → `$queryRaw` `SELECT … FOR UPDATE` em `saldos_empresas` → insert `movimentacoes_saldo` com `saldo_apos` → update snapshot → outbox **no mesmo commit**.
+3. Chave idempotência de movimentação UNIQUE — nunca duplicar crédito.
+4. Dinheiro: `Prisma.Decimal` + `decimal.js` (`@vpay/shared/money`). **Nunca** `number` JS para valores monetários.
+5. Config efetiva: CTE/`COALESCE(empresa, usuario)` via `$queryRaw`.
+6. CHECKs/índices parciais/FK composta: SQL na migration, não só Prisma Client.
