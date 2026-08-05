@@ -1,10 +1,24 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
 
+/**
+ * INCR e EXPIRE no MESMO round-trip. Em dois comandos separados, uma queda
+ * entre eles deixa a chave SEM TTL: o contador nunca zera e aquele IP (ou
+ * credencial) fica barrado para sempre, até alguém apagar a chave na mão.
+ */
+const LUA_INCR_COM_TTL = `
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return n
+`;
+
 @Injectable()
 export class RateLimitService implements OnModuleDestroy {
+  private readonly log = new Logger(RateLimitService.name);
   private readonly redis: Redis;
 
   constructor(
@@ -14,27 +28,76 @@ export class RateLimitService implements OnModuleDestroy {
     this.redis = new Redis(config.get<string>('REDIS_URL') ?? 'redis://localhost:6379', {
       maxRetriesPerRequest: null,
     });
+    // ioredis emite 'error' de forma assíncrona; sem listener, um Redis fora do
+    // ar derruba o processo com unhandled error event.
+    this.redis.on('error', (e) => this.log.warn(`Redis do rate limit: ${e.message}`));
   }
 
   async onModuleDestroy() {
     await this.redis.quit();
   }
 
+  /**
+   * `true` = dentro do limite.
+   *
+   * FALHA ABERTA de propósito: se o Redis cair, o gateway continua atendendo
+   * (com aviso no log) em vez de recusar tudo. Rate limit é proteção contra
+   * abuso, não parte do fluxo de pagamento — derrubar 100% das cobranças por
+   * causa do contador seria transformar uma degradação em indisponibilidade.
+   */
   async check(key: string, max: number, windowSec: number): Promise<boolean> {
-    const n = await this.redis.incr(key);
-    if (n === 1) await this.redis.expire(key, windowSec);
-    return n <= max;
+    try {
+      const n = (await this.redis.eval(
+        LUA_INCR_COM_TTL,
+        1,
+        key,
+        String(windowSec),
+      )) as number;
+      return n <= max;
+    } catch (e) {
+      this.log.error(
+        `Rate limit indisponível (${(e as Error).message}) — liberando ${key}`,
+      );
+      return true;
+    }
+  }
+
+  /**
+   * A política vive no banco mas muda uma vez por ano — buscá-la a cada
+   * requisição colocava um SELECT extra no caminho crítico de TODA chamada da
+   * API pública. Cache curto: mudança no painel entra em no máximo 60s.
+   */
+  private politicaCache: { max: number; window: number; expiraEm: number } | null = null;
+
+  private async politicaCredencial() {
+    const agora = Date.now();
+    if (this.politicaCache && this.politicaCache.expiraEm > agora) {
+      return this.politicaCache;
+    }
+    let max = 60;
+    let window = 60;
+    try {
+      const politica = await this.prisma.politicaLimiteRequisicoes.findFirst({
+        where: { escopo: 'CREDENCIAL_API', ativo: true },
+        orderBy: { id: 'asc' },
+      });
+      max = politica?.quantidadeMaxima ?? max;
+      window = politica?.janelaSegundos ?? window;
+    } catch (e) {
+      this.log.warn(`Política de rate limit indisponível, usando padrão: ${(e as Error).message}`);
+    }
+    this.politicaCache = { max, window, expiraEm: agora + 60_000 };
+    return this.politicaCache;
   }
 
   async enforceCredential(credencialId: string, ip: string): Promise<void> {
-    const politica = await this.prisma.politicaLimiteRequisicoes.findFirst({
-      where: { escopo: 'CREDENCIAL_API', ativo: true },
-      orderBy: { id: 'asc' },
-    });
-    const max = politica?.quantidadeMaxima ?? 60;
-    const window = politica?.janelaSegundos ?? 60;
+    const { max, window } = await this.politicaCredencial();
     const ok = await this.check(`rl:cred:${credencialId}`, max, window);
-    if (!ok) {
+    if (ok) return;
+
+    // O registro do evento é auditoria: não pode transformar um 429 em 500 se
+    // o insert falhar.
+    try {
       await this.prisma.eventoSeguranca.create({
         data: {
           credencialApiId: BigInt(credencialId),
@@ -46,9 +109,12 @@ export class RateLimitService implements OnModuleDestroy {
           acaoAplicada: 'HTTP_429',
         },
       });
-      const err = new Error('Rate limit excedido');
-      (err as Error & { status: number }).status = 429;
-      throw err;
+    } catch (e) {
+      this.log.error(`Falha ao registrar evento de rate limit: ${(e as Error).message}`);
     }
+
+    const err = new Error('Rate limit excedido');
+    (err as Error & { status: number }).status = 429;
+    throw err;
   }
 }

@@ -134,7 +134,7 @@ export class DevolucaoPixProcessor extends WorkerHost {
         // Callback ao lojista SEMPRE via outbox (claim atômico no publisher).
         return tx.eventoOutbox.create({
           data: {
-            empresaId: devolucao.transacao.empresaId,
+            usuarioId: devolucao.transacao.usuarioId,
             tipoAgregado: 'DEVOLUCAO_PIX',
             identificadorAgregado: devolucao.transacao.idTransacaoPublico,
             tipoEvento: EVENTOS_LOJISTA.PIX_DEVOLUCAO_CONCLUIDA,

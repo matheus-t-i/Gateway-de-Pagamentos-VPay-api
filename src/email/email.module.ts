@@ -1,7 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { EmailService } from './email.service';
 
-/** Global: o serviço é usado por auth, onboarding, empresas e pelo worker. */
+/** Global: o serviço é usado por auth, onboarding, PIX e pelo worker. */
 @Global()
 @Module({
   providers: [EmailService],

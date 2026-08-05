@@ -38,7 +38,7 @@ function sanitizarNome(nome: string): string {
  * (caminho, hash sha256, tamanho, mime) para persistir no banco.
  */
 export async function salvarArquivo(
-  escopo: 'usuarios' | 'empresas',
+  escopo: 'usuarios',
   id: string | bigint,
   arquivo: ArquivoRecebido,
 ): Promise<ArquivoSalvo> {

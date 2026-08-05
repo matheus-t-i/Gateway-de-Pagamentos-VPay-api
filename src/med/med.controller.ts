@@ -12,9 +12,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { z } from 'zod';
-import { PAPEIS } from '../shared';
+import { PERMISSOES } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RequerPermissao } from '../auth/permissoes.decorator';
 import { MedService } from './med.service';
 
 const receberSchema = z.object({
@@ -29,7 +30,7 @@ const decidirSchema = z.object({
   motivo: z.string().max(500).optional(),
 });
 
-type MedReq = { user: { id: string; papeis: string[] } };
+type MedReq = { user: { id: string } };
 
 @Controller('admin/med')
 @UseGuards(JwtAuthGuard)
@@ -39,23 +40,16 @@ export class MedController {
     private readonly med: MedService,
   ) {}
 
-  private assertPermissao(req: MedReq) {
-    const ok =
-      req.user.papeis.includes(PAPEIS.ADMINISTRADOR) ||
-      req.user.papeis.includes(PAPEIS.ANALISTA_MED);
-    if (!ok) throw new ForbiddenException('Sem permissão para MED');
-  }
-
   @Get()
-  async listar(@Req() req: MedReq, @Query('situacao') situacao?: string) {
-    this.assertPermissao(req);
+  @RequerPermissao(PERMISSOES.ADMIN_MED_VER)
+  async listar(@Query('situacao') situacao?: string) {
     const casos = await this.prisma.casoMed.findMany({
       where: situacao ? { situacao } : undefined,
       orderBy: { recebidoEm: 'desc' },
       take: 200,
       include: {
         transacao: { select: { idTransacaoPublico: true, valorBruto: true } },
-        empresa: { select: { razaoSocial: true, idPublico: true } },
+        usuario: { select: { nomeRazaoSocial: true, idPublico: true } },
       },
     });
     return casos.map((c) => ({
@@ -69,7 +63,7 @@ export class MedController {
       motivo: c.motivo,
       recebidoEm: c.recebidoEm,
       decididoEm: c.decididoEm,
-      empresa: c.empresa,
+      cliente: { nome: c.usuario.nomeRazaoSocial, idPublico: c.usuario.idPublico },
       transacao: {
         idTransacao: c.transacao.idTransacaoPublico,
         valorBruto: c.transacao.valorBruto.toString(),
@@ -78,13 +72,13 @@ export class MedController {
   }
 
   @Get(':idPublico')
-  async detalhe(@Param('idPublico') idPublico: string, @Req() req: MedReq) {
-    this.assertPermissao(req);
+  @RequerPermissao(PERMISSOES.ADMIN_MED_VER)
+  async detalhe(@Param('idPublico') idPublico: string) {
     const c = await this.prisma.casoMed.findUnique({
       where: { idPublico },
       include: {
         transacao: { select: { idTransacaoPublico: true, valorBruto: true, criadoEm: true } },
-        empresa: { select: { razaoSocial: true, idPublico: true } },
+        usuario: { select: { nomeRazaoSocial: true, idPublico: true } },
         historicos: { orderBy: { id: 'asc' } },
         devolucoes: true,
       },
@@ -101,7 +95,7 @@ export class MedController {
       motivo: c.motivo,
       recebidoEm: c.recebidoEm,
       decididoEm: c.decididoEm,
-      empresa: c.empresa,
+      cliente: { nome: c.usuario.nomeRazaoSocial, idPublico: c.usuario.idPublico },
       transacao: {
         idTransacao: c.transacao.idTransacaoPublico,
         valorBruto: c.transacao.valorBruto.toString(),
@@ -125,8 +119,8 @@ export class MedController {
 
   /** Entrada manual (a via normal é o webhook da adquirente). */
   @Post('receber')
+  @RequerPermissao(PERMISSOES.ADMIN_MED_DECIDIR)
   async receber(@Req() req: MedReq, @Body() body: unknown) {
-    this.assertPermissao(req);
     const parsed = receberSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
     return this.med.receber({
@@ -137,12 +131,12 @@ export class MedController {
   }
 
   @Post(':idPublico/decidir')
+  @RequerPermissao(PERMISSOES.ADMIN_MED_DECIDIR)
   async decidir(
     @Param('idPublico') idPublico: string,
     @Req() req: MedReq,
     @Body() body: unknown,
   ) {
-    this.assertPermissao(req);
     const parsed = decidirSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
     return this.med.decidir({

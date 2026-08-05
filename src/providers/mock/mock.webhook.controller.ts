@@ -15,8 +15,20 @@ import { QueuesService } from '../../queues/queues.service';
 import { getRastreio } from '../../common/request-context';
 import { MockPaymentProvider } from './mock.client';
 import { MedService } from '../../med/med.service';
+import { Throttle } from '../../common/ip-throttle.guard';
 
+/**
+ * Webhook da adquirente. O teto global de 300 req/min por IP é pensado para
+ * navegador humano e é BAIXO demais aqui: a liquidante entrega de um punhado de
+ * IPs e em rajada (retentativa de fila acumulada), então o limite padrão
+ * recusaria confirmação de pagamento legítima — 429 aqui é dinheiro que entrou
+ * e não foi creditado.
+ *
+ * Afrouxar não abre buraco: o acesso já passa por allowlist de IP + `x-key`
+ * (camada 2) e a consulta de status na liquidante (camada 1).
+ */
 @Controller('webhooks/mock')
+@Throttle({ limit: 6000, windowSec: 60 })
 export class MockWebhookController {
   constructor(
     private readonly prisma: PrismaService,

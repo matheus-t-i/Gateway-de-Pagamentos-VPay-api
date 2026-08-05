@@ -19,10 +19,10 @@ function ehConflitoUnico(e: unknown): boolean {
  * Tesouraria: saldo da NOSSA conta em cada adquirente e o saque automático
  * desse saldo para uma chave PIX nossa.
  *
- * Nada aqui toca o ledger do lojista (`saldos_empresas`/`movimentacoes_saldo`):
+ * Nada aqui toca o ledger do lojista (`saldos_usuarios`/`movimentacoes_saldo`):
  * é dinheiro do gateway parado na adquirente, não saldo de cliente. Por isso o
  * disparo grava `ExecucaoGatilhoSaque` e NÃO uma `Transacao`, que é sempre
- * dinheiro de uma empresa.
+ * dinheiro de um cliente.
  */
 @Injectable()
 export class TesourariaService {

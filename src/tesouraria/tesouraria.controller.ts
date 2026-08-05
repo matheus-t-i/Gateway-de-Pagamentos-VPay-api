@@ -11,19 +11,24 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
-  PAPEIS,
+  PERMISSOES,
   SITUACAO_EXECUCAO_SAQUE,
   SITUACAO_PROVEDOR,
   SITUACAO_TRANSACAO,
   TIPOS_CHAVE_PIX,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import {
+  JwtAuthGuard,
+  temPermissao,
+  type UsuarioAutenticado,
+} from '../auth/jwt-auth.guard';
+import { RequerPermissao } from '../auth/permissoes.decorator';
 import { QueuesService } from '../queues/queues.service';
 import { getRastreio } from '../common/request-context';
 import { TesourariaService } from './tesouraria.service';
 
-type UsuarioReq = { user: { id: string; papeis: string[] }; ip?: string };
+type UsuarioReq = { user: UsuarioAutenticado; ip?: string };
 
 /** Corpo aceito na criação/edição de gatilho. */
 type GatilhoBody = {
@@ -51,21 +56,20 @@ export class AdminTesourariaController {
     private readonly queues: QueuesService,
   ) {}
 
-  private assertAdmin(papeis: string[]) {
-    if (!papeis.includes(PAPEIS.ADMINISTRADOR)) {
-      throw new BadRequestException('Somente ADMINISTRADOR');
-    }
-  }
-
   /**
    * Saldo do gateway em cada adquirente. Por padrão devolve o último snapshot
    * (`saldos_adquirentes`); `?atualizar=1` força a consulta na API da
    * adquirente antes de responder.
    */
   @Get('saldos')
+  @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_VER)
   async saldos(@Req() req: UsuarioReq, @Query() q: Record<string, string>) {
-    this.assertAdmin(req.user.papeis);
-    if (q.atualizar === '1') {
+    // `atualizar=1` bate na API da adquirente: é ação, não leitura. Quem só tem
+    // permissão de ver recebe o último snapshot em vez de um 403.
+    if (
+      q.atualizar === '1' &&
+      temPermissao(req.user, PERMISSOES.ADMIN_TESOURARIA_EXECUTAR)
+    ) {
       await this.tesouraria.atualizarTodosSaldos();
     }
     const contas = await this.prisma.contaProvedor.findMany({
@@ -94,16 +98,16 @@ export class AdminTesourariaController {
   }
 
   @Post('saldos/atualizar')
-  async atualizarSaldos(@Req() req: UsuarioReq) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_EXECUTAR)
+  async atualizarSaldos() {
     const contas = await this.tesouraria.atualizarTodosSaldos();
     return { ok: true, contas };
   }
 
   /** Gatilhos de saque automático — paginado + filtros. */
   @Get('gatilhos')
-  async gatilhos(@Req() req: UsuarioReq, @Query() q: Record<string, string>) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_VER)
+  async gatilhos(@Query() q: Record<string, string>) {
     const { pagina, limite } = this.paginacao(q);
 
     const where: Record<string, unknown> = {};
@@ -161,8 +165,8 @@ export class AdminTesourariaController {
   }
 
   @Post('gatilhos')
+  @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_EDITAR)
   async criarGatilho(@Body() body: GatilhoBody, @Req() req: UsuarioReq) {
-    this.assertAdmin(req.user.papeis);
     const dados = await this.validarGatilho(body, { exigirConta: true });
     const criado = await this.prisma.gatilhoSaqueAdquirente.create({
       data: {
@@ -177,12 +181,12 @@ export class AdminTesourariaController {
   }
 
   @Put('gatilhos/:id')
+  @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_EDITAR)
   async editarGatilho(
     @Param('id') id: string,
     @Body() body: GatilhoBody,
     @Req() req: UsuarioReq,
   ) {
-    this.assertAdmin(req.user.papeis);
     const antes = await this.prisma.gatilhoSaqueAdquirente.findUnique({
       where: { idPublico: id },
     });
@@ -215,8 +219,8 @@ export class AdminTesourariaController {
    * — o botão não é um atalho para sacar fora da política configurada.
    */
   @Post('gatilhos/:id/executar')
+  @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_EXECUTAR)
   async executarGatilho(@Param('id') id: string, @Req() req: UsuarioReq) {
-    this.assertAdmin(req.user.papeis);
     const gatilho = await this.prisma.gatilhoSaqueAdquirente.findUnique({
       where: { idPublico: id },
     });
@@ -238,8 +242,8 @@ export class AdminTesourariaController {
 
   /** Histórico de disparos — paginado + filtros. */
   @Get('execucoes')
-  async execucoes(@Req() req: UsuarioReq, @Query() q: Record<string, string>) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_VER)
+  async execucoes(@Query() q: Record<string, string>) {
     const { pagina, limite } = this.paginacao(q);
 
     const where: Record<string, unknown> = {};
@@ -298,8 +302,8 @@ export class AdminTesourariaController {
    * topo da tela; a tabela detalhada é o relatório de cash-out.
    */
   @Get('saques/resumo')
-  async resumoSaques(@Req() req: UsuarioReq, @Query() q: Record<string, string>) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_VER)
+  async resumoSaques(@Query() q: Record<string, string>) {
     const where: Record<string, unknown> = { direcao: 'SAIDA' };
     if (q.dataInicial || q.dataFinal) {
       const gte = q.dataInicial ? new Date(q.dataInicial + 'T00:00:00') : undefined;
@@ -359,8 +363,8 @@ export class AdminTesourariaController {
 
   /** Contas de adquirente elegíveis a gatilho (para o select do modal). */
   @Get('contas')
-  async contas(@Req() req: UsuarioReq) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_VER)
+  async contas() {
     const contas = await this.prisma.contaProvedor.findMany({
       where: { situacao: SITUACAO_PROVEDOR.ATIVO },
       orderBy: [{ provedorPagamentoId: 'asc' }, { id: 'asc' }],

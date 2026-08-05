@@ -7,8 +7,8 @@ import { TracingInterceptor } from './common/tracing.interceptor';
 import { PrismaExceptionFilter } from './common/prisma-exception.filter';
 import { IpThrottleGuard } from './common/ip-throttle.guard';
 import { AuthModule } from './auth/auth.module';
-import { EmpresasModule } from './empresas/empresas.module';
 import { ApiCredentialsModule } from './api-credentials/api-credentials.module';
+import { ContingenciaModule } from './contingencia/contingencia.module';
 import { LedgerModule } from './ledger/ledger.module';
 import { QueuesModule } from './queues/queues.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
@@ -17,6 +17,7 @@ import { ProvidersModule } from './providers/providers.module';
 import { PixModule } from './pix/pix.module';
 import { MedModule } from './med/med.module';
 import { OpsModule } from './ops/ops.module';
+import { PerfisModule } from './perfis/perfis.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -49,15 +50,16 @@ import { HealthController } from './health.controller';
     PrismaModule,
     EmailModule,
     AuthModule,
-    EmpresasModule,
     OnboardingModule,
     ApiCredentialsModule,
+    ContingenciaModule,
     LedgerModule,
     QueuesModule.forRoot(),
     ProvidersModule,
     PixModule,
     MedModule,
     OpsModule,
+    PerfisModule,
   ],
   controllers: [HealthController],
   providers: [

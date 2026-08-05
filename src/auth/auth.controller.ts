@@ -18,14 +18,14 @@ import {
   loginSchema,
   PAPEIS,
   SITUACAO_ANALISE,
-  SITUACAO_EMPRESA,
   SITUACAO_USUARIO,
   VERSAO_DOCUMENTOS_LEGAIS,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueuesService } from '../queues/queues.service';
 import { TIPOS_EMAIL } from '../shared';
-import { JwtAuthGuard } from './jwt-auth.guard';
+import { JwtAuthGuard, type UsuarioAutenticado } from './jwt-auth.guard';
+import { permissoesEfetivas } from './permissoes.util';
 import { validarTotp } from './totp.controller';
 import { montarStatusOnboarding } from '../onboarding/onboarding.util';
 import { Throttle } from '../common/ip-throttle.guard';
@@ -62,14 +62,6 @@ export class AuthController {
     if (exists) {
       throw new BadRequestException('E-mail ou CPF/CNPJ já cadastrado');
     }
-    // A 1ª empresa é sempre a própria pessoa: documento derivado do cadastro.
-    const empresaExiste = await this.prisma.empresa.findUnique({
-      where: { cnpj: data.cpfCnpj },
-    });
-    if (empresaExiste) {
-      throw new BadRequestException('Documento já vinculado a uma empresa');
-    }
-
     const senhaHash = await argon2.hash(data.senha);
     const papel = await this.prisma.papel.findUniqueOrThrow({
       where: { nome: PAPEIS.CLIENTE },
@@ -78,8 +70,8 @@ export class AuthController {
     const enderecoIp = req.ip ?? null;
     const agenteUsuario = req.headers['user-agent'] ?? null;
 
-    const { usuario, empresa } = await this.prisma.$transaction(async (tx) => {
-      const usuario = await tx.usuario.create({
+    const usuario = await this.prisma.$transaction(async (tx) => {
+      const criado = await tx.usuario.create({
         data: {
           tipoPessoa: data.tipoPessoa,
           cpfCnpj: data.cpfCnpj,
@@ -106,7 +98,7 @@ export class AuthController {
           DOCUMENTOS_LEGAIS.TERMOS_USO_PRIVACIDADE,
           DOCUMENTOS_LEGAIS.CONTRATO_INTERMEDIACAO,
         ].map((documento) => ({
-          usuarioId: usuario.id,
+          usuarioId: criado.id,
           documento,
           versao: VERSAO_DOCUMENTOS_LEGAIS,
           enderecoIp,
@@ -116,38 +108,17 @@ export class AuthController {
         })),
       });
 
-      // Primeira empresa: SEMPRE criada, sempre com os dados da própria pessoa.
-      // PJ → CNPJ + razão social; PF → CPF + nome (a empresa é a própria pessoa).
-      const criada = await tx.empresa.create({
+      await tx.historicoSituacaoUsuario.create({
         data: {
-          usuarioProprietarioId: usuario.id,
-          criadoPorUsuarioId: usuario.id,
-          cnpj: data.cpfCnpj,
-          tipoPessoa: data.tipoPessoa,
-          razaoSocial: data.nomeRazaoSocial,
-          nomeFantasia: data.empresa?.nomeFantasia ?? data.nomeFantasia,
-          email: data.empresa?.email ?? data.email,
-          telefone: data.empresa?.telefone ?? data.telefone,
-          situacao: SITUACAO_EMPRESA.PENDENTE,
-          analises: { create: { situacao: SITUACAO_ANALISE.PENDENTE } },
-          historicosSituacao: {
-            create: {
-              novaSituacao: SITUACAO_EMPRESA.PENDENTE,
-              motivo: 'Cadastro inicial (onboarding)',
-              usuarioAtorId: usuario.id,
-            },
-          },
+          usuarioId: criado.id,
+          novaSituacao: SITUACAO_USUARIO.PENDENTE,
+          motivo: 'Cadastro inicial (onboarding)',
+          usuarioAtorId: criado.id,
+          enderecoIp,
         },
       });
 
-      return {
-        usuario,
-        empresa: {
-          idPublico: criada.idPublico,
-          situacao: criada.situacao,
-          tipoPessoa: criada.tipoPessoa,
-        },
-      };
+      return criado;
     });
 
     await this.queues.enqueueEmail({
@@ -164,7 +135,6 @@ export class AuthController {
       email: usuario.email,
       situacao: usuario.situacao,
       tipoPessoa: usuario.tipoPessoa,
-      empresa,
     };
   }
 
@@ -283,7 +253,9 @@ export class AuthController {
         data: { ultimoAcessoEm: new Date() },
       });
 
-      const papeis = usuario.papeis.map((p) => p.papel.nome);
+      const papeis = usuario.papeis
+        .filter((p) => p.papel.ativo)
+        .map((p) => p.papel.nome);
       const accessToken = await this.jwt.signAsync({
         sub: usuario.id.toString(),
         email: usuario.email,
@@ -298,7 +270,13 @@ export class AuthController {
           email: usuario.email,
           nomeRazaoSocial: usuario.nomeRazaoSocial,
           temaPreferido: usuario.temaPreferido,
+          // O indicador de 2FA no topo lê isto; sem enviar já no login ele
+          // pisca "Inativo" até o /auth/me responder.
+          totpHabilitado: usuario.totpHabilitado,
           papeis,
+          // O painel monta menu e guardas de rota com isto; sem enviar já no
+          // login, a primeira tela renderiza sem nada até o /auth/me responder.
+          permissoes: await permissoesEfetivas(this.prisma, usuario.id, papeis),
         },
       };
     }
@@ -323,11 +301,7 @@ export class AuthController {
         situacao: SITUACAO_USUARIO.PENDENTE,
         proximoPasso: 'ENVIAR_DOCUMENTOS',
         mensagem: 'Cadastro recebido. Envie a documentação para concluir.',
-        empresaIdPublico: status.empresa?.idPublico ?? null,
-        documentosFaltantes: {
-          usuario: status.documentosUsuario.faltantes,
-          empresa: status.empresa?.documentos.faltantes ?? [],
-        },
+        documentosFaltantes: status.documentos.faltantes,
       };
     }
 
@@ -362,31 +336,34 @@ export class AuthController {
 
   @Get('me')
   @UseGuards(JwtAuthGuard)
-  async me(@Req() req: { user: { id: string } }) {
+  async me(@Req() req: { user: UsuarioAutenticado }) {
     const usuario = await this.prisma.usuario.findUniqueOrThrow({
       where: { id: BigInt(req.user.id) },
-      include: {
-        papeis: { include: { papel: true } },
-        empresasProprietario: {
-          select: {
-            idPublico: true,
-            razaoSocial: true,
-            cnpj: true,
-            situacao: true,
-          },
-        },
-      },
+      include: { papeis: { include: { papel: true } }, saldo: true },
     });
     return {
       idPublico: usuario.idPublico,
       email: usuario.email,
+      cpfCnpj: usuario.cpfCnpj,
       nomeRazaoSocial: usuario.nomeRazaoSocial,
+      nomeFantasia: usuario.nomeFantasia,
+      telefone: usuario.telefone,
       temaPreferido: usuario.temaPreferido,
       situacao: usuario.situacao,
       tipoPessoa: usuario.tipoPessoa,
       totpHabilitado: usuario.totpHabilitado,
-      papeis: usuario.papeis.map((p) => p.papel.nome),
-      empresas: usuario.empresasProprietario,
+      papeis: usuario.papeis.filter((p) => p.papel.ativo).map((p) => p.papel.nome),
+      // Resolvidas pelo guard a cada request: refletem alteração de perfil na
+      // hora, sem precisar reemitir o token.
+      permissoes: req.user.permissoes,
+      saldo: usuario.saldo
+        ? {
+            disponivel: usuario.saldo.saldoDisponivel.toString(),
+            pendenteLiberacao: usuario.saldo.saldoPendenteLiberacao.toString(),
+            reservado: usuario.saldo.saldoReservado.toString(),
+            bloqueadoMed: usuario.saldo.saldoBloqueadoMed.toString(),
+          }
+        : null,
     };
   }
 

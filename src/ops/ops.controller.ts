@@ -15,16 +15,45 @@ import {
   configuracaoWebhookSchema,
   EVENTOS_LOJISTA,
   money,
-  PAPEIS,
-  SITUACAO_EMPRESA,
+  PERMISSOES,
+  DISPONIBILIDADE_ADQUIRENTE,
   SITUACAO_PROVEDOR,
   SITUACAO_TRANSACAO,
+  SITUACAO_USUARIO,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import {
+  JwtAuthGuard,
+  temEscopoGlobal,
+  type UsuarioAutenticado,
+} from '../auth/jwt-auth.guard';
+import { RequerPermissao } from '../auth/permissoes.decorator';
 import { QueuesService } from '../queues/queues.service';
 import { getRastreio } from '../common/request-context';
 import { encryptText } from '../common/crypto.util';
+import { AdquirentesService } from '../providers/adquirentes.service';
+import * as ipaddr from 'ipaddr.js';
+
+/**
+ * Valida um IP ou CIDR (IPv4 e IPv6, ex.: `2804:14c::/64`) e devolve a forma
+ * normalizada. A allowlist de webhook aceita faixa porque liquidante entrega
+ * de blocos inteiros — recusar CIDR obrigaria a cadastrar IP por IP.
+ */
+function normalizarIpOuCidr(valor: string): string {
+  const v = valor.trim();
+  if (!v) throw new BadRequestException('IP vazio.');
+  try {
+    if (v.includes('/')) {
+      const [addr, prefixo] = ipaddr.parseCIDR(v);
+      return `${addr.toString()}/${prefixo}`;
+    }
+    return ipaddr.parse(v).toString();
+  } catch {
+    throw new BadRequestException(
+      `IP ou CIDR inválido: "${v}" (ex.: 187.10.0.5, 187.10.0.0/24, 2804:14c::/64).`,
+    );
+  }
+}
 
 /**
  * Rótulo da coluna "Produto" de uma venda. Com vários itens mostra o primeiro
@@ -43,7 +72,7 @@ function resumoProduto(
 
 @Controller('painel/webhooks')
 @UseGuards(JwtAuthGuard)
-export class WebhooksEmpresaController {
+export class WebhooksClienteController {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
@@ -56,21 +85,18 @@ export class WebhooksEmpresaController {
     return Object.values(EVENTOS_LOJISTA);
   }
 
-  @Get(':empresaIdPublico')
-  async listar(
-    @Param('empresaIdPublico') empresaIdPublico: string,
-    @Req() req: { user: { id: string; papeis: string[] } },
-  ) {
-    const empresa = await this.getEmpresa(empresaIdPublico, req.user);
+  @Get()
+  @RequerPermissao(PERMISSOES.WEBHOOKS_VER)
+  async listar(@Req() req: { user: UsuarioAutenticado }) {
     // Removidos são desativados (soft delete) e não aparecem na listagem.
-    const rows = await this.prisma.configuracaoWebhookEmpresa.findMany({
-      where: { empresaId: empresa.id, ativo: true },
+    const rows = await this.prisma.configuracaoWebhookUsuario.findMany({
+      where: { usuarioId: BigInt(req.user.id), ativo: true },
       orderBy: { id: 'desc' },
     });
     return rows.map((w) => this.mapWebhook(w));
   }
 
-  /** Resposta pública: id como string, sem ids internos (empresaId). */
+  /** Resposta pública: id como string, sem ids internos (usuarioId). */
   private mapWebhook(w: {
     id: bigint;
     nome: string;
@@ -94,18 +120,14 @@ export class WebhooksEmpresaController {
     };
   }
 
-  @Post(':empresaIdPublico')
-  async criar(
-    @Param('empresaIdPublico') empresaIdPublico: string,
-    @Req() req: { user: { id: string; papeis: string[] } },
-    @Body() body: unknown,
-  ) {
+  @Post()
+  @RequerPermissao(PERMISSOES.WEBHOOKS_CRIAR)
+  async criar(@Req() req: { user: UsuarioAutenticado }, @Body() body: unknown) {
     const parsed = configuracaoWebhookSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
-    const empresa = await this.getEmpresa(empresaIdPublico, req.user);
-    const criado = await this.prisma.configuracaoWebhookEmpresa.create({
+    const criado = await this.prisma.configuracaoWebhookUsuario.create({
       data: {
-        empresaId: empresa.id,
+        usuarioId: BigInt(req.user.id),
         nome: parsed.data.nome,
         urlDestino: parsed.data.urlDestino,
         tiposEvento: parsed.data.tiposEvento,
@@ -119,36 +141,22 @@ export class WebhooksEmpresaController {
     return this.mapWebhook(criado);
   }
 
-  @Delete(':empresaIdPublico/:id')
+  @Delete(':id')
+  @RequerPermissao(PERMISSOES.WEBHOOKS_EXCLUIR)
   async remover(
-    @Param('empresaIdPublico') empresaIdPublico: string,
     @Param('id') id: string,
-    @Req() req: { user: { id: string; papeis: string[] } },
+    @Req() req: { user: UsuarioAutenticado },
   ) {
-    const empresa = await this.getEmpresa(empresaIdPublico, req.user);
     // Soft delete: entregas_webhook referenciam esta config (histórico de
     // auditoria). Apagar violaria a FK e destruiria o histórico de entregas.
-    const r = await this.prisma.configuracaoWebhookEmpresa.updateMany({
-      where: { id: BigInt(id), empresaId: empresa.id, ativo: true },
+    const r = await this.prisma.configuracaoWebhookUsuario.updateMany({
+      where: { id: BigInt(id), usuarioId: BigInt(req.user.id), ativo: true },
       data: { ativo: false },
     });
     if (r.count === 0) {
       throw new BadRequestException('Webhook não encontrado');
     }
     return { ok: true };
-  }
-
-  private async getEmpresa(
-    idPublico: string,
-    user: { id: string; papeis: string[] },
-  ) {
-    const empresa = await this.prisma.empresa.findUnique({ where: { idPublico } });
-    if (!empresa) throw new BadRequestException('Empresa não encontrada');
-    const isAdmin = user.papeis.includes(PAPEIS.ADMINISTRADOR);
-    if (!isAdmin && empresa.usuarioProprietarioId.toString() !== user.id) {
-      throw new BadRequestException('Sem acesso');
-    }
-    return empresa;
   }
 }
 
@@ -158,20 +166,39 @@ export class AdminOpsController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly queues: QueuesService,
+    private readonly adquirentes: AdquirentesService,
   ) {}
 
-  private assertAdmin(papeis: string[]) {
-    if (!papeis.includes(PAPEIS.ADMINISTRADOR)) {
-      throw new BadRequestException('Somente ADMINISTRADOR');
+  /**
+   * Guarda das ações que tiram uma adquirente de circulação para o PIX in.
+   *
+   * Nenhum cliente pode ficar sem adquirente de entrada: se ainda houver quem
+   * use esta, o admin é obrigado a mandar as substituições no mesmo request, e
+   * o remanejamento acontece na MESMA transação da mudança.
+   */
+  private async remanejarAntesDeTirarDeCirculacao(
+    codigo: string,
+    substituicoes: Array<{ usuarioIdPublico: string; adquirenteCodigo: string }> | undefined,
+    atorId: bigint,
+    tx: Parameters<Parameters<PrismaService['$transaction']>[0]>[0],
+  ) {
+    const afetados = await this.adquirentes.clientesAfetados(codigo);
+    if (afetados.length === 0) return;
+    if (!substituicoes?.length) {
+      throw new BadRequestException(
+        `${afetados.length} cliente(s) usam esta adquirente no PIX in. ` +
+          'Escolha a adquirente substituta de cada um antes de tirá-la de circulação.',
+      );
     }
+    await this.adquirentes.aplicarSubstituicoes(tx, codigo, substituicoes, atorId);
   }
 
   @Get('dashboard')
-  async dashboard(@Req() req: { user: { papeis: string[] } }) {
-    this.assertAdmin(req.user.papeis);
-    const [usuarios, empresas, transacoes, volume] = await Promise.all([
+  @RequerPermissao(PERMISSOES.ADMIN_RELATORIOS_VER)
+  async dashboard() {
+    const [usuarios, clientesAtivos, transacoes, volume] = await Promise.all([
       this.prisma.usuario.count(),
-      this.prisma.empresa.count({ where: { situacao: SITUACAO_EMPRESA.ATIVA } }),
+      this.prisma.usuario.count({ where: { situacao: SITUACAO_USUARIO.ATIVO } }),
       this.prisma.transacao.count(),
       this.prisma.transacao.aggregate({
         _sum: { valorBruto: true, valorMargemBruta: true },
@@ -192,7 +219,7 @@ export class AdminOpsController {
     `;
     return {
       usuarios,
-      empresasAtivas: empresas,
+      clientesAtivos,
       transacoes,
       volumeBruto: volume._sum.valorBruto?.toString() ?? '0',
       margem: volume._sum.valorMargemBruta?.toString() ?? '0',
@@ -212,11 +239,8 @@ export class AdminOpsController {
    * mudanças posteriores de config não reescrevem o histórico.
    */
   @Get('relatorios/resultado')
-  async relatorioResultado(
-    @Req() req: { user: { papeis: string[] } },
-    @Query() q: Record<string, string>,
-  ) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_RELATORIOS_VER)
+  async relatorioResultado(@Query() q: Record<string, string>) {
     const hoje = new Date();
     const inicio = q.dataInicial
       ? new Date(q.dataInicial + 'T00:00:00')
@@ -246,7 +270,7 @@ export class AdminOpsController {
     const txs = await this.prisma.transacao.findMany({
       where: { criadoEm: { gte: inicio, lte: fim }, OR: cond as never },
       select: {
-        empresaId: true,
+        usuarioId: true,
         direcao: true,
         situacao: true,
         valorBruto: true,
@@ -258,18 +282,18 @@ export class AdminOpsController {
       take: 200000,
     });
 
-    const empresaIds = [...new Set(txs.map((t) => t.empresaId))];
+    const usuarioIds = [...new Set(txs.map((t) => t.usuarioId))];
     const contaIds = [
       ...new Set(txs.map((t) => t.contaProvedorId).filter(Boolean)),
     ] as bigint[];
-    const [empresas, contas] = await Promise.all([
-      this.prisma.empresa.findMany({
-        where: { id: { in: empresaIds } },
+    const [donos, contas] = await Promise.all([
+      this.prisma.usuario.findMany({
+        where: { id: { in: usuarioIds } },
         select: {
           id: true,
           idPublico: true,
-          razaoSocial: true,
-          usuarioProprietario: { select: { nomeRazaoSocial: true, email: true } },
+          nomeRazaoSocial: true,
+          email: true,
         },
       }),
       this.prisma.contaProvedor.findMany({
@@ -277,7 +301,7 @@ export class AdminOpsController {
         select: { id: true, provedor: { select: { codigo: true, nome: true } } },
       }),
     ]);
-    const empMap = new Map(empresas.map((e) => [e.id.toString(), e]));
+    const donoMap = new Map(donos.map((u) => [u.id.toString(), u]));
     const contaMap = new Map(contas.map((c) => [c.id.toString(), c.provedor]));
 
     const num = (d: unknown) => Number((d as { toString(): string })?.toString?.() ?? 0);
@@ -312,16 +336,16 @@ export class AdminOpsController {
     const clientes = new Map<string, Cli>();
 
     for (const t of txs) {
-      const emp = empMap.get(t.empresaId.toString());
-      if (!emp) continue;
-      const nome = emp.razaoSocial ?? emp.usuarioProprietario?.nomeRazaoSocial ?? '';
-      const email = emp.usuarioProprietario?.email ?? '';
+      const dono = donoMap.get(t.usuarioId.toString());
+      if (!dono) continue;
+      const nome = dono.nomeRazaoSocial;
+      const email = dono.email;
       if (
         buscaCliente &&
         !(
           nome.toLowerCase().includes(buscaCliente) ||
           email.toLowerCase().includes(buscaCliente) ||
-          emp.idPublico.toLowerCase().includes(buscaCliente)
+          dono.idPublico.toLowerCase().includes(buscaCliente)
         )
       )
         continue;
@@ -338,10 +362,10 @@ export class AdminOpsController {
       const resultado = retida ? volume : num(t.valorMargemBruta);
       const tipoLabel = t.direcao === 'ENTRADA' ? 'Cash-in' : 'Cash-out';
 
-      let cli = clientes.get(t.empresaId.toString());
+      let cli = clientes.get(t.usuarioId.toString());
       if (!cli) {
         cli = {
-          idPublico: emp.idPublico,
+          idPublico: dono.idPublico,
           nome,
           email,
           operacoes: 0,
@@ -355,7 +379,7 @@ export class AdminOpsController {
           adqSet: new Set(),
           dets: new Map(),
         };
-        clientes.set(t.empresaId.toString(), cli);
+        clientes.set(t.usuarioId.toString(), cli);
       }
       cli.operacoes++;
       cli.volume += volume;
@@ -462,16 +486,13 @@ export class AdminOpsController {
   }
 
   /**
-   * Relatório de transações admin (cross-empresa) para Cash-in (ENTRADA) e
+   * Relatório de transações admin (todos os clientes) para Cash-in (ENTRADA) e
    * Cash-out (SAIDA). Paginação SERVER-SIDE (skip/take + count) — cresce em
    * volume. Filtros por período, cliente, adquirente, situação e busca.
    */
   @Get('relatorios/transacoes')
-  async relatorioTransacoes(
-    @Req() req: { user: { papeis: string[] } },
-    @Query() q: Record<string, string>,
-  ) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_RELATORIOS_VER)
+  async relatorioTransacoes(@Query() q: Record<string, string>) {
     const direcao = q.direcao === 'SAIDA' ? 'SAIDA' : 'ENTRADA';
     const pagina = Math.max(1, Number(q.page) || 1);
     const limite = Math.min(100, Math.max(5, Number(q.limit) || 25));
@@ -497,16 +518,17 @@ export class AdminOpsController {
     }
     const cliente = (q.cliente ?? '').trim();
     if (cliente) {
-      const emps = await this.prisma.empresa.findMany({
+      const donos = await this.prisma.usuario.findMany({
         where: {
           OR: [
-            { razaoSocial: { contains: cliente, mode: 'insensitive' } },
-            { usuarioProprietario: { email: { contains: cliente, mode: 'insensitive' } } },
+            { nomeRazaoSocial: { contains: cliente, mode: 'insensitive' } },
+            { nomeFantasia: { contains: cliente, mode: 'insensitive' } },
+            { email: { contains: cliente, mode: 'insensitive' } },
           ],
         },
         select: { id: true },
       });
-      where.empresaId = { in: emps.map((e) => e.id) };
+      where.usuarioId = { in: donos.map((u) => u.id) };
     }
     if (q.adquirente) {
       const contas = await this.prisma.contaProvedor.findMany({
@@ -526,7 +548,7 @@ export class AdminOpsController {
         include: {
           pix: true,
           itens: { orderBy: { id: 'asc' } },
-          empresa: { select: { razaoSocial: true, idPublico: true } },
+          usuario: { select: { nomeRazaoSocial: true, idPublico: true } },
           contaProvedor: { select: { provedor: { select: { codigo: true } } } },
         },
       }),
@@ -539,7 +561,7 @@ export class AdminOpsController {
       itens: itens.map((t) => ({
         idTransacao: t.idTransacaoPublico,
         criadoEm: t.criadoEm,
-        empresa: t.empresa.razaoSocial,
+        lojista: t.usuario.nomeRazaoSocial,
         cliente: t.pix?.nomePagador ?? '—',
         clienteEmail: t.pix?.emailPagador ?? null,
         // Produto real da venda; `referenciaExterna` é só o fallback das
@@ -572,11 +594,8 @@ export class AdminOpsController {
    * Paginação server-side + filtros.
    */
   @Get('auditoria')
-  async auditoria(
-    @Req() req: { user: { papeis: string[] } },
-    @Query() q: Record<string, string>,
-  ) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_AUDITORIA_VER)
+  async auditoria(@Query() q: Record<string, string>) {
     const fonte = q.fonte === 'acesso' ? 'acesso' : 'persistencia';
     const pagina = Math.max(1, Number(q.page) || 1);
     const limite = Math.min(100, Math.max(5, Number(q.limit) || 25));
@@ -688,8 +707,8 @@ export class AdminOpsController {
   }
 
   @Get('provedores')
-  async provedores(@Req() req: { user: { papeis: string[] } }) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_VER)
+  async provedores() {
     const rows = await this.prisma.provedorPagamento.findMany({
       include: { ipsWebhook: true },
     });
@@ -697,6 +716,10 @@ export class AdminOpsController {
     return rows.map((p) => ({
       codigo: p.codigo,
       nome: p.nome,
+      nomeFantasia: p.nomeFantasia,
+      temMed: p.temMed,
+      observacaoCliente: p.observacaoCliente,
+      disponibilidadePixEntrada: p.disponibilidadePixEntrada,
       situacao: p.situacao,
       permitePixEntrada: p.permitePixEntrada,
       permitePixSaida: p.permitePixSaida,
@@ -706,12 +729,16 @@ export class AdminOpsController {
   }
 
   @Put('provedores/:codigo/situacao')
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_EDITAR)
   async situacaoProvedor(
     @Param('codigo') codigo: string,
-    @Body() body: { situacao: 'ATIVO' | 'INATIVO' | 'SUSPENSO' },
-    @Req() req: { user: { papeis: string[] } },
+    @Body()
+    body: {
+      situacao: 'ATIVO' | 'INATIVO' | 'SUSPENSO';
+      substituicoes?: Array<{ usuarioIdPublico: string; adquirenteCodigo: string }>;
+    },
+    @Req() req: { user: { id: string } },
   ) {
-    this.assertAdmin(req.user.papeis);
     const situacoesValidas: string[] = [
       SITUACAO_PROVEDOR.ATIVO,
       SITUACAO_PROVEDOR.INATIVO,
@@ -720,28 +747,63 @@ export class AdminOpsController {
     if (!situacoesValidas.includes(body?.situacao)) {
       throw new BadRequestException('situacao inválida');
     }
-    const p = await this.prisma.provedorPagamento.update({
-      where: { codigo },
-      data: { situacao: body.situacao },
+    const p = await this.prisma.$transaction(async (tx) => {
+      // Inativar/suspender derruba o PIX in de quem estiver nela.
+      if (body.situacao !== SITUACAO_PROVEDOR.ATIVO) {
+        await this.remanejarAntesDeTirarDeCirculacao(
+          codigo,
+          body.substituicoes,
+          BigInt(req.user.id),
+          tx,
+        );
+      }
+      return tx.provedorPagamento.update({
+        where: { codigo },
+        data: { situacao: body.situacao },
+      });
     });
     return { codigo: p.codigo, nome: p.nome, situacao: p.situacao };
   }
 
   /**
-   * Alternância EM MASSA de adquirente: troca a conta de roteamento de TODOS os
-   * clientes (config por usuário + overrides por empresa + padrão do sistema)
-   * para uma adquirente escolhida, por direção (cash-in e/ou cash-out).
+   * Alternância EM MASSA de adquirente: troca a conta de roteamento dos
+   * clientes (config por usuário + padrão do sistema) para uma adquirente
+   * escolhida, por direção (cash-in e/ou cash-out).
+   *
+   * `origemCodigo` restringe a troca a quem está HOJE naquela adquirente (por
+   * direção) — é a migração origem→destino. Sem origem, a troca vale para
+   * todos os clientes, seja qual for a adquirente atual.
+   *
+   * Libera a adquirente destino para os afetados quando ela é ESPECIFICOS: sem
+   * isso, forçar a troca deixaria os clientes usando uma adquirente que eles
+   * não podem escolher no painel.
    */
   @Post('adquirentes/alternar-massa')
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_EDITAR)
   async alternarAdquirenteMassa(
-    @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
-    @Body() body: { adquirenteCodigo?: string; cashIn?: boolean; cashOut?: boolean },
+    @Req() req: { user: { id: string }; ip?: string },
+    @Body()
+    body: {
+      adquirenteCodigo?: string;
+      origemCodigo?: string;
+      cashIn?: boolean;
+      cashOut?: boolean;
+    },
   ) {
-    this.assertAdmin(req.user.papeis);
     const codigo = (body?.adquirenteCodigo ?? '').trim();
     if (!codigo) throw new BadRequestException('Informe a adquirente destino.');
     if (!body.cashIn && !body.cashOut) {
       throw new BadRequestException('Selecione cash-in e/ou cash-out.');
+    }
+    const origem = (body?.origemCodigo ?? '').trim() || null;
+    if (origem === codigo) {
+      throw new BadRequestException('Origem e destino são a mesma adquirente.');
+    }
+    if (origem) {
+      const existeOrigem = await this.prisma.provedorPagamento.findUnique({
+        where: { codigo: origem },
+      });
+      if (!existeOrigem) throw new BadRequestException('Adquirente de origem não encontrada.');
     }
 
     const acharConta = (direcao: 'entrada' | 'saida') =>
@@ -769,37 +831,62 @@ export class AdminOpsController {
       );
     }
 
-    const afetados = { usuarios: 0, empresas: 0, padrao: 0 };
+    const afetados = { usuarios: 0, padrao: 0 };
     await this.prisma.$transaction(async (tx) => {
       if (contaEntrada) {
+        // Com origem, só migra quem está NELA hoje (por direção).
+        const filtroEntrada = origem
+          ? { contaEntrada: { provedor: { codigo: origem } } }
+          : {};
+        const configs = await tx.configuracaoPixUsuario.findMany({
+          where: filtroEntrada,
+          select: { usuarioId: true },
+        });
         afetados.usuarios += (
           await tx.configuracaoPixUsuario.updateMany({
-            data: { contaProvedorPixEntradaId: contaEntrada.id },
-          })
-        ).count;
-        afetados.empresas += (
-          await tx.configuracaoPixEmpresa.updateMany({
-            where: { contaProvedorPixEntradaId: { not: null } },
-            data: { contaProvedorPixEntradaId: contaEntrada.id },
+            where: filtroEntrada,
+            data: {
+              contaProvedorPixEntradaId: contaEntrada.id,
+              adquirentePixEntradaTrocadaEm: new Date(),
+              atualizadoPorUsuarioId: BigInt(req.user.id),
+            },
           })
         ).count;
         afetados.padrao += (
           await tx.configuracaoPadraoPixUsuario.updateMany({
-            where: { padraoSistema: true },
+            where: {
+              padraoSistema: true,
+              ...(origem
+                ? { contaEntrada: { provedor: { codigo: origem } } }
+                : {}),
+            },
             data: { contaProvedorPixEntradaId: contaEntrada.id },
           })
         ).count;
+        const provedor = await tx.provedorPagamento.findUniqueOrThrow({
+          where: { codigo },
+        });
+        if (provedor.disponibilidadePixEntrada === DISPONIBILIDADE_ADQUIRENTE.ESPECIFICOS) {
+          await tx.liberacaoAdquirenteUsuario.createMany({
+            data: configs.map((c) => ({
+              provedorPagamentoId: provedor.id,
+              usuarioId: c.usuarioId,
+              liberadoPorUsuarioId: BigInt(req.user.id),
+            })),
+            skipDuplicates: true,
+          });
+        }
       }
       if (contaSaida) {
         await tx.configuracaoPixUsuario.updateMany({
-          data: { contaProvedorPixSaidaId: contaSaida.id },
-        });
-        await tx.configuracaoPixEmpresa.updateMany({
-          where: { contaProvedorPixSaidaId: { not: null } },
+          where: origem ? { contaSaida: { provedor: { codigo: origem } } } : {},
           data: { contaProvedorPixSaidaId: contaSaida.id },
         });
         await tx.configuracaoPadraoPixUsuario.updateMany({
-          where: { padraoSistema: true },
+          where: {
+            padraoSistema: true,
+            ...(origem ? { contaSaida: { provedor: { codigo: origem } } } : {}),
+          },
           data: { contaProvedorPixSaidaId: contaSaida.id },
         });
       }
@@ -828,30 +915,34 @@ export class AdminOpsController {
       cashIn: !!body.cashIn,
       cashOut: !!body.cashOut,
       configuracoesUsuarioAtualizadas: afetados.usuarios,
-      overridesEmpresaAtualizados: afetados.empresas,
       padraoAtualizado: afetados.padrao > 0,
     };
   }
 
   /** Detalhe de uma adquirente: informações + contas com custo configurado. */
   @Get('adquirentes/:codigo')
-  async adquirenteDetalhe(
-    @Param('codigo') codigo: string,
-    @Req() req: { user: { papeis: string[] } },
-  ) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_VER)
+  async adquirenteDetalhe(@Param('codigo') codigo: string) {
     const p = await this.prisma.provedorPagamento.findUnique({
       where: { codigo },
-      include: { contas: { include: { custoPix: true }, orderBy: { id: 'asc' } } },
+      include: {
+        contas: { include: { custoPix: true }, orderBy: { id: 'asc' } },
+        ipsWebhook: { orderBy: { id: 'asc' } },
+      },
     });
     if (!p) throw new BadRequestException('Adquirente não encontrada');
     return {
       codigo: p.codigo,
       nome: p.nome,
+      nomeFantasia: p.nomeFantasia,
+      temMed: p.temMed,
+      observacaoCliente: p.observacaoCliente,
+      disponibilidadePixEntrada: p.disponibilidadePixEntrada,
       situacao: p.situacao,
       permitePixEntrada: p.permitePixEntrada,
       permitePixSaida: p.permitePixSaida,
       exigeAssinaturaWebhook: p.exigeAssinaturaWebhook,
+      ipsWebhook: p.ipsWebhook.map((i) => i.ipOuCidr),
       contas: p.contas.map((c) => ({
         id: c.id.toString(),
         nome: c.nome,
@@ -870,6 +961,7 @@ export class AdminOpsController {
 
   /** Edita informações da adquirente (nome/flags). */
   @Put('adquirentes/:codigo')
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_EDITAR)
   async editarAdquirente(
     @Param('codigo') codigo: string,
     @Body()
@@ -878,20 +970,31 @@ export class AdminOpsController {
       permitePixEntrada?: boolean;
       permitePixSaida?: boolean;
       exigeAssinaturaWebhook?: boolean;
+      substituicoes?: Array<{ usuarioIdPublico: string; adquirenteCodigo: string }>;
     },
     @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
   ) {
-    this.assertAdmin(req.user.papeis);
     const antes = await this.prisma.provedorPagamento.findUnique({ where: { codigo } });
     if (!antes) throw new BadRequestException('Adquirente não encontrada');
-    const p = await this.prisma.provedorPagamento.update({
-      where: { codigo },
-      data: {
-        nome: body.nome?.trim() || undefined,
-        permitePixEntrada: body.permitePixEntrada,
-        permitePixSaida: body.permitePixSaida,
-        exigeAssinaturaWebhook: body.exigeAssinaturaWebhook,
-      },
+    const p = await this.prisma.$transaction(async (tx) => {
+      // Desligar o PIX in tira a adquirente de circulação para cash-in.
+      if (antes.permitePixEntrada && body.permitePixEntrada === false) {
+        await this.remanejarAntesDeTirarDeCirculacao(
+          codigo,
+          body.substituicoes,
+          BigInt(req.user.id),
+          tx,
+        );
+      }
+      return tx.provedorPagamento.update({
+        where: { codigo },
+        data: {
+          nome: body.nome?.trim() || undefined,
+          permitePixEntrada: body.permitePixEntrada,
+          permitePixSaida: body.permitePixSaida,
+          exigeAssinaturaWebhook: body.exigeAssinaturaWebhook,
+        },
+      });
     });
     await this.auditar(req, 'ADQUIRENTE_EDITAR', 'provedores_pagamento', codigo, {
       nome: antes.nome,
@@ -905,8 +1008,57 @@ export class AdminOpsController {
     return { codigo: p.codigo, nome: p.nome };
   }
 
+  /**
+   * IPs de webhook da liquidante (Camada 2). Substitui a lista inteira —
+   * aceita IP ou CIDR, IPv4 e IPv6 (ex.: /64). Lista vazia desliga a checagem
+   * de IP e deixa a segurança só com token/assinatura + Camada 1.
+   */
+  @Put('adquirentes/:codigo/ips-webhook')
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_EDITAR)
+  async editarIpsWebhook(
+    @Param('codigo') codigo: string,
+    @Body() body: { ips?: string[] },
+    @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
+  ) {
+    const provedor = await this.prisma.provedorPagamento.findUnique({
+      where: { codigo },
+      include: { ipsWebhook: true },
+    });
+    if (!provedor) throw new BadRequestException('Adquirente não encontrada');
+    if (!Array.isArray(body?.ips)) {
+      throw new BadRequestException('Informe `ips` como lista.');
+    }
+    if (body.ips.length > 100) {
+      throw new BadRequestException('Máximo de 100 IPs/faixas por adquirente.');
+    }
+    const normalizados = [...new Set(body.ips.map(normalizarIpOuCidr))];
+
+    const antes = provedor.ipsWebhook.map((i) => i.ipOuCidr);
+    await this.prisma.$transaction([
+      this.prisma.ipPermitidoWebhookProvedor.deleteMany({
+        where: { provedorPagamentoId: provedor.id },
+      }),
+      this.prisma.ipPermitidoWebhookProvedor.createMany({
+        data: normalizados.map((ipOuCidr) => ({
+          provedorPagamentoId: provedor.id,
+          ipOuCidr,
+        })),
+      }),
+    ]);
+    await this.auditar(
+      req,
+      'ADQUIRENTE_IPS_WEBHOOK_EDITAR',
+      'ips_permitidos_webhook_provedor',
+      codigo,
+      { ips: antes },
+      { ips: normalizados },
+    );
+    return { ok: true, ips: normalizados };
+  }
+
   /** Edita o CUSTO (o que a adquirente cobra de nós) de uma conta. */
   @Put('adquirentes/contas/:contaId/custo')
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_EDITAR)
   async editarCustoConta(
     @Param('contaId') contaId: string,
     @Body()
@@ -918,7 +1070,6 @@ export class AdminOpsController {
     },
     @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
   ) {
-    this.assertAdmin(req.user.papeis);
     const id = BigInt(contaId);
     const conta = await this.prisma.contaProvedor.findUnique({ where: { id } });
     if (!conta) throw new BadRequestException('Conta não encontrada');
@@ -961,8 +1112,8 @@ export class AdminOpsController {
 
   /** Taxa padrão do sistema (o que o gateway cobra dos lojistas por padrão). */
   @Get('taxa-padrao')
-  async taxaPadrao(@Req() req: { user: { papeis: string[] } }) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_VER)
+  async taxaPadrao() {
     const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
       where: { padraoSistema: true },
     });
@@ -981,11 +1132,11 @@ export class AdminOpsController {
   }
 
   @Put('taxa-padrao')
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_EDITAR)
   async editarTaxaPadrao(
     @Body() body: Record<string, number | string>,
     @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
   ) {
-    this.assertAdmin(req.user.papeis);
     const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
       where: { padraoSistema: true },
     });
@@ -1031,18 +1182,27 @@ export class AdminOpsController {
 
   /** Cadastro de nova adquirente (nasce INATIVA; conta/credenciais depois). */
   @Post('adquirentes')
+  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_CRIAR)
   async criarAdquirente(
     @Body()
-    body: { codigo?: string; nome?: string; permitePixEntrada?: boolean; permitePixSaida?: boolean },
+    body: {
+      codigo?: string;
+      nome?: string;
+      permitePixEntrada?: boolean;
+      permitePixSaida?: boolean;
+      /** IPs/faixas (CIDR, inclusive IPv6 /64) de onde a liquidante entrega webhook. */
+      ipsWebhook?: string[];
+    },
     @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
   ) {
-    this.assertAdmin(req.user.papeis);
     const codigo = (body.codigo ?? '').trim().toLowerCase();
     const nome = (body.nome ?? '').trim();
     if (!/^[a-z0-9_]{2,50}$/.test(codigo)) {
       throw new BadRequestException('Código inválido (a-z, 0-9, _; 2 a 50 caracteres).');
     }
     if (!nome) throw new BadRequestException('Informe o nome da adquirente.');
+    // Validar ANTES de criar: IP inválido não pode deixar a adquirente pela metade.
+    const ips = [...new Set((body.ipsWebhook ?? []).map(normalizarIpOuCidr))];
     const existe = await this.prisma.provedorPagamento.findUnique({ where: { codigo } });
     if (existe) throw new BadRequestException('Já existe uma adquirente com esse código.');
     const p = await this.prisma.provedorPagamento.create({
@@ -1052,11 +1212,15 @@ export class AdminOpsController {
         situacao: SITUACAO_PROVEDOR.INATIVO,
         permitePixEntrada: body.permitePixEntrada ?? false,
         permitePixSaida: body.permitePixSaida ?? false,
+        ...(ips.length
+          ? { ipsWebhook: { create: ips.map((ipOuCidr) => ({ ipOuCidr })) } }
+          : {}),
       },
     });
     await this.auditar(req, 'ADQUIRENTE_CADASTRAR', 'provedores_pagamento', codigo, null, {
       codigo: p.codigo,
       nome: p.nome,
+      ipsWebhook: ips,
     });
     return { codigo: p.codigo, nome: p.nome, situacao: p.situacao };
   }
@@ -1086,11 +1250,8 @@ export class AdminOpsController {
   }
 
   @Post('webhooks/:entregaId/reenviar')
-  async reenviar(
-    @Param('entregaId') entregaId: string,
-    @Req() req: { user: { papeis: string[] } },
-  ) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_FILAS_EXECUTAR)
+  async reenviar(@Param('entregaId') entregaId: string) {
     const entrega = await this.prisma.entregaWebhook.findUnique({
       where: { id: BigInt(entregaId) },
       include: { eventoOutbox: true },
@@ -1101,7 +1262,7 @@ export class AdminOpsController {
       payload: {
         tipoEvento: entrega.eventoOutbox.tipoEvento,
         idPublico: entrega.eventoOutbox.identificadorAgregado,
-        empresaId: entrega.empresaId.toString(),
+        usuarioId: entrega.usuarioId.toString(),
         eventoOutboxId: entrega.eventoOutboxId.toString(),
       },
       identificadorRastreio: getRastreio(),
@@ -1149,41 +1310,38 @@ export class PainelDashboardController {
   constructor(private readonly prisma: PrismaService) {}
 
   @Get()
+  @RequerPermissao(PERMISSOES.DASHBOARD_VER)
   async meu(
     @Req() req: { user: { id: string } },
     @Query('range') range?: string,
   ) {
-    const empresas = await this.prisma.empresa.findMany({
-      where: { usuarioProprietarioId: BigInt(req.user.id) },
+    const usuarioId = BigInt(req.user.id);
+    const usuario = await this.prisma.usuario.findUniqueOrThrow({
+      where: { id: usuarioId },
       include: { saldo: true },
     });
-    const empresaIds = empresas.map((e) => e.id);
     const janela = resolverJanela(range);
 
-    const saldoDisponivel = empresas
-      .reduce((acc, e) => acc + Number(e.saldo?.saldoDisponivel ?? 0), 0)
-      .toFixed(2);
-    const bloqueadoMed = empresas
-      .reduce((acc, e) => acc + Number(e.saldo?.saldoBloqueadoMed ?? 0), 0)
-      .toFixed(2);
+    const saldoDisponivel = (usuario.saldo?.saldoDisponivel ?? 0).toString();
+    const bloqueadoMed = (usuario.saldo?.saldoBloqueadoMed ?? 0).toString();
 
-    const empresasResumo = empresas.map((e) => ({
-      idPublico: e.idPublico,
-      razaoSocial: e.razaoSocial,
-      situacao: e.situacao,
-      saldo: e.saldo
+    const conta = {
+      idPublico: usuario.idPublico,
+      nome: usuario.nomeFantasia ?? usuario.nomeRazaoSocial,
+      situacao: usuario.situacao,
+      saldo: usuario.saldo
         ? {
-            disponivel: e.saldo.saldoDisponivel.toString(),
-            pendente: e.saldo.saldoPendenteLiberacao.toString(),
-            reservado: e.saldo.saldoReservado.toString(),
-            bloqueadoMed: e.saldo.saldoBloqueadoMed.toString(),
+            disponivel: usuario.saldo.saldoDisponivel.toString(),
+            pendente: usuario.saldo.saldoPendenteLiberacao.toString(),
+            reservado: usuario.saldo.saldoReservado.toString(),
+            bloqueadoMed: usuario.saldo.saldoBloqueadoMed.toString(),
           }
         : null,
-    }));
+    };
 
-    if (empresaIds.length === 0) {
+    if (!usuario.saldo) {
       return {
-        empresas: empresasResumo,
+        conta,
         range: janela.range,
         saldoDisponivel,
         volumeBruto: '0',
@@ -1199,7 +1357,7 @@ export class PainelDashboardController {
     }
 
     const whereEntrada = {
-      empresaId: { in: empresaIds },
+      usuarioId,
       direcao: 'ENTRADA' as const,
       criadoEm: { gte: janela.desde },
     };
@@ -1216,14 +1374,10 @@ export class PainelDashboardController {
         _count: true,
       }),
       this.prisma.transacao.findMany({
-        where: { empresaId: { in: empresaIds }, direcao: 'ENTRADA' },
+        where: { usuarioId, direcao: 'ENTRADA' },
         orderBy: { criadoEm: 'desc' },
         take: 12,
-        include: {
-          pix: true,
-          itens: { orderBy: { id: 'asc' } },
-          empresa: { select: { razaoSocial: true } },
-        },
+        include: { pix: true, itens: { orderBy: { id: 'asc' } } },
       }),
       this.prisma.transacao.findMany({
         where: whereEntrada,
@@ -1261,7 +1415,7 @@ export class PainelDashboardController {
     const conversao = geradasQtd > 0 ? aprovadasQtd / geradasQtd : 0;
 
     return {
-      empresas: empresasResumo,
+      conta,
       range: janela.range,
       saldoDisponivel,
       // Compatibilidade com a versão anterior do dashboard.
@@ -1282,7 +1436,6 @@ export class PainelDashboardController {
         cliente: t.pix?.nomePagador ?? '—',
         clienteEmail: t.pix?.emailPagador ?? null,
         produto: resumoProduto(t.itens, t.referenciaExterna),
-        empresa: t.empresa.razaoSocial,
         valor: t.valorBruto.toString(),
         situacao: t.situacao,
         criadoEm: t.criadoEm,

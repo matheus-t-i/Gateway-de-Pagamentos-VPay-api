@@ -115,9 +115,7 @@ export class OnboardingController {
     body: {
       email?: string;
       senha?: string;
-      alvo?: string;
       tipoDocumento?: string;
-      empresaIdPublico?: string;
     },
     @UploadedFile() arquivo?: Express.Multer.File,
   ) {
@@ -125,10 +123,6 @@ export class OnboardingController {
 
     if (!arquivo) {
       throw new BadRequestException('Arquivo ausente (campo "arquivo").');
-    }
-    const alvo = (body.alvo ?? '').toUpperCase();
-    if (alvo !== 'USUARIO' && alvo !== 'EMPRESA') {
-      throw new BadRequestException('alvo deve ser USUARIO ou EMPRESA.');
     }
     const tipoDocumento = body.tipoDocumento ?? '';
     if (!TIPOS_VALIDOS.includes(tipoDocumento)) {
@@ -141,59 +135,31 @@ export class OnboardingController {
       );
     }
     // Cota anti-abuso do canal público.
-    const [docsUsuario, docsEmpresas] = await Promise.all([
-      this.prisma.documentoUsuario.count({ where: { usuarioId: usuario.id } }),
-      this.prisma.documentoEmpresa.count({
-        where: { empresa: { usuarioProprietarioId: usuario.id } },
-      }),
-    ]);
-    if (docsUsuario + docsEmpresas >= MAX_DOCUMENTOS_POR_CONTA) {
+    const enviados = await this.prisma.documentoUsuario.count({
+      where: { usuarioId: usuario.id },
+    });
+    if (enviados >= MAX_DOCUMENTOS_POR_CONTA) {
       throw new BadRequestException(
         'Limite de documentos atingido. Fale com o suporte para reenviar.',
       );
     }
 
-    if (alvo === 'USUARIO') {
-      const salvo = await salvarArquivo('usuarios', usuario.id, arquivo);
-      await this.prisma.$transaction(async (tx) => {
-        await tx.documentoUsuario.create({
-          data: {
-            usuarioId: usuario.id,
-            tipoDocumento,
-            nomeArquivo: salvo.nomeArquivo,
-            caminhoArquivo: salvo.caminhoArquivo,
-            tipoMime: salvo.tipoMime,
-            tamanhoBytes: BigInt(salvo.tamanhoBytes),
-            hashArquivo: salvo.hashArquivo,
-            situacao: SITUACAO_DOCUMENTO.PENDENTE,
-          },
-        });
-        await reavaliarSituacoes(tx, usuario.id);
+    const salvo = await salvarArquivo('usuarios', usuario.id, arquivo);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.documentoUsuario.create({
+        data: {
+          usuarioId: usuario.id,
+          tipoDocumento,
+          nomeArquivo: salvo.nomeArquivo,
+          caminhoArquivo: salvo.caminhoArquivo,
+          tipoMime: salvo.tipoMime,
+          tamanhoBytes: BigInt(salvo.tamanhoBytes),
+          hashArquivo: salvo.hashArquivo,
+          situacao: SITUACAO_DOCUMENTO.PENDENTE,
+        },
       });
-    } else {
-      const empresa = await this.prisma.empresa.findUnique({
-        where: { idPublico: body.empresaIdPublico ?? '' },
-      });
-      if (!empresa || empresa.usuarioProprietarioId !== usuario.id) {
-        throw new BadRequestException('Empresa não encontrada para este usuário.');
-      }
-      const salvo = await salvarArquivo('empresas', empresa.id, arquivo);
-      await this.prisma.$transaction(async (tx) => {
-        await tx.documentoEmpresa.create({
-          data: {
-            empresaId: empresa.id,
-            tipoDocumento,
-            nomeArquivo: salvo.nomeArquivo,
-            caminhoArquivo: salvo.caminhoArquivo,
-            tipoMime: salvo.tipoMime,
-            tamanhoBytes: BigInt(salvo.tamanhoBytes),
-            hashArquivo: salvo.hashArquivo,
-            situacao: SITUACAO_DOCUMENTO.PENDENTE,
-          },
-        });
-        await reavaliarSituacoes(tx, usuario.id);
-      });
-    }
+      await reavaliarSituacoes(tx, usuario.id);
+    });
 
     return montarStatusOnboarding(this.prisma, usuario.id);
   }

@@ -5,13 +5,13 @@ import { LedgerService } from './ledger.service';
 import { money } from '../shared';
 
 /**
- * Teste de concorrência: duas escritas paralelas na mesma empresa
- * devem serializar via SELECT FOR UPDATE e produzir saldo coerente.
+ * Teste de concorrência: duas escritas paralelas na mesma conta devem
+ * serializar via SELECT FOR UPDATE e produzir saldo coerente.
  */
 describe('LedgerService concurrency', () => {
   let prisma: PrismaService;
   let ledger: LedgerService;
-  let empresaId: bigint;
+  let usuarioId: bigint;
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({
@@ -32,23 +32,13 @@ describe('LedgerService concurrency', () => {
         senhaHash: 'x',
         situacao: 'ATIVO',
       },
-      update: {},
+      update: { situacao: 'ATIVO' },
     });
-    const empresa = await prisma.empresa.upsert({
-      where: { cnpj: '11111111000111' },
+    usuarioId = user.id;
+    await prisma.saldoUsuario.upsert({
+      where: { usuarioId },
       create: {
-        usuarioProprietarioId: user.id,
-        cnpj: '11111111000111',
-        razaoSocial: 'Empresa Ledger Test',
-        situacao: 'ATIVA',
-      },
-      update: { situacao: 'ATIVA' },
-    });
-    empresaId = empresa.id;
-    await prisma.saldoEmpresa.upsert({
-      where: { empresaId },
-      create: {
-        empresaId,
+        usuarioId,
         saldoDisponivel: '0',
         saldoPendenteLiberacao: '0',
         saldoReservado: '0',
@@ -71,7 +61,7 @@ describe('LedgerService concurrency', () => {
     const suffix = Date.now();
     await Promise.all([
       ledger.aplicarMovimentacoes({
-        empresaId,
+        usuarioId,
         entries: [
           {
             tipoSaldo: 'DISPONIVEL',
@@ -83,7 +73,7 @@ describe('LedgerService concurrency', () => {
         ],
       }),
       ledger.aplicarMovimentacoes({
-        empresaId,
+        usuarioId,
         entries: [
           {
             tipoSaldo: 'DISPONIVEL',
@@ -96,13 +86,13 @@ describe('LedgerService concurrency', () => {
       }),
     ]);
 
-    const saldo = await prisma.saldoEmpresa.findUniqueOrThrow({
-      where: { empresaId },
+    const saldo = await prisma.saldoUsuario.findUniqueOrThrow({
+      where: { usuarioId },
     });
     // saldo pode ter restos de runs anteriores; validamos incremento via movimentações
     const movs = await prisma.movimentacaoSaldo.findMany({
       where: {
-        empresaId,
+        usuarioId,
         chaveIdempotencia: { in: [`test:a:${suffix}`, `test:b:${suffix}`] },
       },
     });

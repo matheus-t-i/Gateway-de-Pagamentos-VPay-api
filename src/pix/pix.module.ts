@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ApiCredentialsModule } from '../api-credentials/api-credentials.module';
 import { AuthModule } from '../auth/auth.module';
+import { ContingenciaModule } from '../contingencia/contingencia.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { ProvidersModule } from '../providers/providers.module';
 import { PixApiController, PixPainelController } from './pix.controller';
@@ -11,7 +12,13 @@ import {
 import { PixService } from './pix.service';
 
 @Module({
-  imports: [AuthModule, ApiCredentialsModule, LedgerModule, ProvidersModule],
+  imports: [
+    AuthModule,
+    ApiCredentialsModule,
+    ContingenciaModule,
+    LedgerModule,
+    ProvidersModule,
+  ],
   controllers: [
     PixApiController,
     PixPainelController,

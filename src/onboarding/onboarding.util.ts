@@ -1,11 +1,9 @@
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
-  documentosObrigatoriosEmpresa,
-  DOCUMENTOS_OBRIGATORIOS_USUARIO,
+  documentosObrigatorios,
   SITUACAO_ANALISE,
   SITUACAO_DOCUMENTO,
-  SITUACAO_EMPRESA,
   SITUACAO_USUARIO,
 } from '../shared';
 
@@ -31,17 +29,9 @@ export type DocsStatus = {
 
 export type StatusOnboarding = {
   situacao: string;
-  /** PF: documentos do titular. PJ: documentos do responsável. */
+  /** PF: documentos do titular. PJ: do responsável + os da pessoa jurídica. */
   tipoPessoa: 'PF' | 'PJ';
-  documentosUsuario: DocsStatus;
-  empresa: {
-    idPublico: string;
-    situacao: string;
-    tipoPessoa: 'PF' | 'PJ';
-    /** false para PF — a empresa é a própria pessoa e não exige documentação. */
-    exigeDocumentos: boolean;
-    documentos: DocsStatus;
-  } | null;
+  documentos: DocsStatus;
 };
 
 /**
@@ -65,6 +55,36 @@ export function documentosFaltantes(
   return obrigatorios.filter((tipo) => !satisfeitos.has(tipo));
 }
 
+/**
+ * Serialização de documento para as telas de admin (aprovações e ficha do
+ * cliente). `id` vira string porque BigInt não passa pelo JSON do Nest, e
+ * `caminhoArquivo`/`hashArquivo` ficam de fora de propósito: o arquivo só sai
+ * pelo endpoint de download autenticado.
+ */
+export function mapDocumentoAdmin(d: {
+  id: bigint;
+  tipoDocumento: string;
+  nomeArquivo: string;
+  tipoMime: string | null;
+  tamanhoBytes: bigint | null;
+  situacao: string;
+  motivoInvalidacao: string | null;
+  enviadoEm: Date;
+  validadoEm: Date | null;
+}) {
+  return {
+    id: d.id.toString(),
+    tipoDocumento: d.tipoDocumento,
+    nomeArquivo: d.nomeArquivo,
+    tipoMime: d.tipoMime,
+    tamanhoBytes: d.tamanhoBytes ? Number(d.tamanhoBytes) : null,
+    situacao: d.situacao,
+    motivoInvalidacao: d.motivoInvalidacao,
+    enviadoEm: d.enviadoEm.toISOString(),
+    validadoEm: d.validadoEm ? d.validadoEm.toISOString() : null,
+  };
+}
+
 function mapDocs(obrigatorios: string[], docs: DocRow[]): DocsStatus {
   return {
     enviados: docs.map((d) => ({
@@ -79,9 +99,8 @@ function mapDocs(obrigatorios: string[], docs: DocRow[]): DocsStatus {
 }
 
 /**
- * Monta o retrato de onboarding de um usuário: situação da conta, documentos do
- * titular e da primeira empresa (proprietário). Reusado pelo login e pelo
- * endpoint público /onboarding/status.
+ * Retrato de onboarding da conta: situação e documentação. Reusado pelo login e
+ * pelo endpoint público /onboarding/status.
  */
 export async function montarStatusOnboarding(
   prisma: PrismaService,
@@ -89,50 +108,27 @@ export async function montarStatusOnboarding(
 ): Promise<StatusOnboarding> {
   const usuario = await prisma.usuario.findUniqueOrThrow({
     where: { id: usuarioId },
-    include: {
-      documentos: { orderBy: { enviadoEm: 'desc' } },
-      empresasProprietario: {
-        orderBy: { criadoEm: 'asc' },
-        include: { documentos: { orderBy: { enviadoEm: 'desc' } } },
-      },
-    },
+    include: { documentos: { orderBy: { enviadoEm: 'desc' } } },
   });
-
-  const empresa = usuario.empresasProprietario[0] ?? null;
-  const obrigatoriosEmpresa = empresa
-    ? documentosObrigatoriosEmpresa(empresa.tipoPessoa)
-    : [];
 
   return {
     situacao: usuario.situacao,
     tipoPessoa: usuario.tipoPessoa,
-    documentosUsuario: mapDocs(
-      DOCUMENTOS_OBRIGATORIOS_USUARIO,
+    documentos: mapDocs(
+      documentosObrigatorios(usuario.tipoPessoa),
       usuario.documentos as DocRow[],
     ),
-    empresa: empresa
-      ? {
-          idPublico: empresa.idPublico,
-          situacao: empresa.situacao,
-          tipoPessoa: empresa.tipoPessoa,
-          exigeDocumentos: obrigatoriosEmpresa.length > 0,
-          documentos: mapDocs(obrigatoriosEmpresa, empresa.documentos as DocRow[]),
-        }
-      : null,
   };
 }
 
 /**
- * Reavalia a situação do usuário E de todas as suas empresas após qualquer
- * mudança de documentação (envio novo ou invalidação pelo analista).
+ * Reavalia a situação da conta após qualquer mudança de documentação (envio
+ * novo ou invalidação pelo analista).
  *
  * Bidirecional de propósito:
  *  - completou os obrigatórios → PENDENTE vira EM_ANALISE;
  *  - analista invalidou um obrigatório → EM_ANALISE volta para PENDENTE, senão
  *    a conta seguiria na fila de aprovação sem a documentação exigida.
- *
- * A empresa de PF não exige documento algum, por isso ela acompanha a
- * documentação pessoal — do contrário ficaria PENDENTE para sempre.
  */
 export async function reavaliarSituacoes(
   tx: Prisma.TransactionClient,
@@ -140,19 +136,15 @@ export async function reavaliarSituacoes(
 ) {
   const usuario = await tx.usuario.findUniqueOrThrow({
     where: { id: usuarioId },
-    include: {
-      documentos: true,
-      empresasProprietario: { include: { documentos: true } },
-    },
+    include: { documentos: true },
   });
 
-  const pessoaisFaltando = documentosFaltantes(
-    DOCUMENTOS_OBRIGATORIOS_USUARIO,
+  const faltando = documentosFaltantes(
+    documentosObrigatorios(usuario.tipoPessoa),
     usuario.documentos,
   );
-  const donoAtivo = usuario.situacao === SITUACAO_USUARIO.ATIVO;
 
-  if (usuario.situacao === SITUACAO_USUARIO.PENDENTE && pessoaisFaltando.length === 0) {
+  if (usuario.situacao === SITUACAO_USUARIO.PENDENTE && faltando.length === 0) {
     await mudarSituacaoUsuario(
       tx,
       usuarioId,
@@ -162,49 +154,15 @@ export async function reavaliarSituacoes(
     );
   } else if (
     usuario.situacao === SITUACAO_USUARIO.EM_ANALISE &&
-    pessoaisFaltando.length > 0
+    faltando.length > 0
   ) {
     await mudarSituacaoUsuario(
       tx,
       usuarioId,
       SITUACAO_USUARIO.EM_ANALISE,
       SITUACAO_USUARIO.PENDENTE,
-      `Documento invalidado — reenviar: ${pessoaisFaltando.join(', ')}`,
+      `Documento invalidado — reenviar: ${faltando.join(', ')}`,
     );
-  }
-
-  for (const empresa of usuario.empresasProprietario) {
-    const faltam = documentosFaltantes(
-      documentosObrigatoriosEmpresa(empresa.tipoPessoa),
-      empresa.documentos,
-    );
-    // Onboarding inicial: a empresa só avança junto da documentação pessoal.
-    // Para dono já ATIVO (empresa adicional), a pessoal já foi aprovada.
-    const pessoalOk = donoAtivo || pessoaisFaltando.length === 0;
-
-    if (
-      empresa.situacao === SITUACAO_EMPRESA.PENDENTE &&
-      faltam.length === 0 &&
-      pessoalOk
-    ) {
-      await mudarSituacaoEmpresa(
-        tx,
-        empresa.id,
-        SITUACAO_EMPRESA.PENDENTE,
-        SITUACAO_EMPRESA.EM_ANALISE,
-        empresa.tipoPessoa === 'PJ'
-          ? 'Documentação enviada'
-          : 'Documentação pessoal enviada (empresa PF não exige documentos)',
-      );
-    } else if (empresa.situacao === SITUACAO_EMPRESA.EM_ANALISE && faltam.length > 0) {
-      await mudarSituacaoEmpresa(
-        tx,
-        empresa.id,
-        SITUACAO_EMPRESA.EM_ANALISE,
-        SITUACAO_EMPRESA.PENDENTE,
-        `Documento invalidado — reenviar: ${faltam.join(', ')}`,
-      );
-    }
   }
 }
 
@@ -230,30 +188,5 @@ async function mudarSituacaoUsuario(
   });
   await tx.historicoSituacaoUsuario.create({
     data: { usuarioId, situacaoAnterior: de, novaSituacao: para, motivo },
-  });
-}
-
-async function mudarSituacaoEmpresa(
-  tx: Prisma.TransactionClient,
-  empresaId: bigint,
-  de: string,
-  para: 'PENDENTE' | 'EM_ANALISE',
-  motivo: string,
-) {
-  await tx.empresa.update({ where: { id: empresaId }, data: { situacao: para } });
-  await tx.analiseCadastroEmpresa.updateMany({
-    where: {
-      empresaId,
-      situacao: { in: [SITUACAO_ANALISE.PENDENTE, SITUACAO_ANALISE.EM_ANALISE] },
-    },
-    data: {
-      situacao:
-        para === SITUACAO_EMPRESA.EM_ANALISE
-          ? SITUACAO_ANALISE.EM_ANALISE
-          : SITUACAO_ANALISE.PENDENTE,
-    },
-  });
-  await tx.historicoSituacaoEmpresa.create({
-    data: { empresaId, situacaoAnterior: de, novaSituacao: para, motivo },
   });
 }

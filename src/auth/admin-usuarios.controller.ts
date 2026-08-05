@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  NotFoundException,
   Param,
   Post,
   Put,
@@ -11,9 +12,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
-  documentosObrigatoriosEmpresa,
-  DOCUMENTOS_OBRIGATORIOS_USUARIO,
+  DISPONIBILIDADE_ADQUIRENTE,
+  documentosObrigatorios,
   PAPEIS,
+  PERMISSOES,
   reprovarCadastroSchema,
   SITUACAO_ANALISE,
   SITUACAO_DOCUMENTO,
@@ -24,7 +26,8 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { QueuesService } from '../queues/queues.service';
 import { documentosFaltantes } from '../onboarding/onboarding.util';
-import { JwtAuthGuard, RolesGuard } from './jwt-auth.guard';
+import { JwtAuthGuard } from './jwt-auth.guard';
+import { RequerPermissao } from './permissoes.decorator';
 
 @Controller('admin/usuarios')
 @UseGuards(JwtAuthGuard)
@@ -35,13 +38,8 @@ export class AdminUsuariosController {
   ) {}
 
   @Get()
-  async listar(
-    @Query('situacao') situacao: string | undefined,
-    @Req() req: { user: { papeis: string[] } },
-  ) {
-    if (!req.user.papeis.includes(PAPEIS.ADMINISTRADOR)) {
-      throw new BadRequestException('Somente ADMINISTRADOR');
-    }
+  @RequerPermissao(PERMISSOES.ADMIN_APROVACOES_VER)
+  async listar(@Query('situacao') situacao: string | undefined) {
     const situacoesValidas: string[] = [
       SITUACAO_USUARIO.PENDENTE,
       SITUACAO_USUARIO.EM_ANALISE,
@@ -60,9 +58,6 @@ export class AdminUsuariosController {
       take: 200,
       include: {
         documentos: { select: { situacao: true } },
-        empresasProprietario: {
-          select: { idPublico: true, razaoSocial: true, situacao: true },
-        },
         papeis: { include: { papel: true } },
       },
     });
@@ -72,7 +67,7 @@ export class AdminUsuariosController {
       email: u.email,
       cpfCnpj: u.cpfCnpj,
       tipoPessoa: u.tipoPessoa,
-      // Para PJ, é o CPF/nome de quem responde pela empresa — o analista compara
+      // Para PJ, é o CPF/nome de quem responde pela pessoa jurídica — o analista compara
       // com o RG/CNH e a selfie enviados.
       responsavel: { cpf: u.cpfResponsavel, nome: u.nomeResponsavel },
       situacao: u.situacao,
@@ -90,23 +85,29 @@ export class AdminUsuariosController {
           (d) => d.situacao === SITUACAO_DOCUMENTO.INVALIDO,
         ).length,
       },
-      empresas: u.empresasProprietario,
     }));
   }
 
-  private assertAdmin(papeis: string[]) {
-    if (!papeis.includes(PAPEIS.ADMINISTRADOR)) {
-      throw new BadRequestException('Somente ADMINISTRADOR');
-    }
+  /**
+   * Perfis que podem ser atribuídos na edição do usuário. Endpoint próprio (e
+   * não `/admin/perfis`) para quem gerencia usuários não precisar também da
+   * permissão de gerenciar perfis.
+   */
+  @Get('perfis-disponiveis')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_VER)
+  async perfisDisponiveis() {
+    const papeis = await this.prisma.papel.findMany({
+      where: { ativo: true },
+      orderBy: { nome: 'asc' },
+      select: { nome: true, descricao: true },
+    });
+    return papeis;
   }
 
   /** Listagem de gestão de usuários: paginada (server-side) + busca. */
   @Get('gestao')
-  async gestao(
-    @Query() q: Record<string, string>,
-    @Req() req: { user: { papeis: string[] } },
-  ) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_VER)
+  async gestao(@Query() q: Record<string, string>) {
     const pagina = Math.max(1, Number(q.page) || 1);
     const limite = Math.min(1000, Math.max(5, Number(q.limit) || 10));
     const where: Record<string, unknown> = {};
@@ -127,12 +128,7 @@ export class AdminUsuariosController {
         orderBy: { criadoEm: 'desc' },
         skip: (pagina - 1) * limite,
         take: limite,
-        include: {
-          empresasProprietario: {
-            select: { idPublico: true, razaoSocial: true, situacao: true },
-          },
-          papeis: { include: { papel: true } },
-        },
+        include: { papeis: { include: { papel: true } } },
       }),
     ]);
     return {
@@ -148,19 +144,110 @@ export class AdminUsuariosController {
         situacao: u.situacao,
         criadoEm: u.criadoEm.toISOString(),
         papeis: u.papeis.map((p) => p.papel.nome),
-        empresas: u.empresasProprietario,
+      })),
+    };
+  }
+
+  /**
+   * Ficha completa do cliente para a tela de edição/consulta do admin: dados
+   * pessoais e cadastrais, endereço, documentos, saldo, histórico de situação
+   * e aceites legais.
+   *
+   * Nunca devolve `senhaHash` nem `segredoTotpCriptografado` — só o indicador
+   * de que o 2FA está ativo.
+   */
+  @Get(':idPublico/detalhe')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_VER)
+  async detalhe(@Param('idPublico') idPublico: string) {
+    const u = await this.prisma.usuario.findUnique({
+      where: { idPublico },
+      include: {
+        documentos: { orderBy: { enviadoEm: 'desc' } },
+        papeis: { include: { papel: true } },
+        ativadoPor: { select: { nomeRazaoSocial: true, email: true } },
+        historicosSituacao: { orderBy: { criadoEm: 'desc' }, take: 50 },
+        aceitesLegais: { orderBy: { aceitoEm: 'desc' } },
+        saldo: true,
+      },
+    });
+    if (!u) throw new NotFoundException('Usuário não encontrado');
+
+    const contar = (docs: Array<{ situacao: string }>) => ({
+      total: docs.length,
+      pendentes: docs.filter((d) => d.situacao === SITUACAO_DOCUMENTO.PENDENTE).length,
+      validos: docs.filter((d) => d.situacao === SITUACAO_DOCUMENTO.VALIDO).length,
+      invalidos: docs.filter((d) => d.situacao === SITUACAO_DOCUMENTO.INVALIDO).length,
+    });
+
+    return {
+      idPublico: u.idPublico,
+      tipoPessoa: u.tipoPessoa,
+      cpfCnpj: u.cpfCnpj,
+      nomeRazaoSocial: u.nomeRazaoSocial,
+      nomeFantasia: u.nomeFantasia,
+      email: u.email,
+      telefone: u.telefone,
+      situacao: u.situacao,
+      contaBloqueada: u.contaBloqueada,
+      forcarTrocaSenha: u.forcarTrocaSenha,
+      totpHabilitado: u.totpHabilitado,
+      totpAtivadoEm: u.totpAtivadoEm?.toISOString() ?? null,
+      // Para PJ é quem responde pela pessoa jurídica; para PF espelha o titular.
+      responsavel: { nome: u.nomeResponsavel, cpf: u.cpfResponsavel },
+      endereco: u.endereco,
+      faturamentoMensalMedio: u.faturamentoMensalMedio?.toString() ?? null,
+      papeis: u.papeis.map((p) => p.papel.nome),
+      motivoReprovacao: u.motivoReprovacao,
+      criadoEm: u.criadoEm.toISOString(),
+      atualizadoEm: u.atualizadoEm.toISOString(),
+      ultimoAcessoEm: u.ultimoAcessoEm?.toISOString() ?? null,
+      ativadoEm: u.ativadoEm?.toISOString() ?? null,
+      ativadoPor: u.ativadoPor
+        ? { nome: u.ativadoPor.nomeRazaoSocial, email: u.ativadoPor.email }
+        : null,
+      documentos: {
+        resumo: contar(u.documentos),
+        faltantes: documentosFaltantes(
+          documentosObrigatorios(u.tipoPessoa),
+          u.documentos,
+        ),
+      },
+      saldo: u.saldo
+        ? {
+            disponivel: u.saldo.saldoDisponivel.toString(),
+            pendenteLiberacao: u.saldo.saldoPendenteLiberacao.toString(),
+            reservado: u.saldo.saldoReservado.toString(),
+            bloqueadoMed: u.saldo.saldoBloqueadoMed.toString(),
+            atualizadoEm: u.saldo.atualizadoEm.toISOString(),
+          }
+        : null,
+      historicoSituacao: u.historicosSituacao.map((h) => ({
+        id: h.id.toString(),
+        situacaoAnterior: h.situacaoAnterior,
+        novaSituacao: h.novaSituacao,
+        motivo: h.motivo,
+        enderecoIp: h.enderecoIp,
+        criadoEm: h.criadoEm.toISOString(),
+      })),
+      aceitesLegais: u.aceitesLegais.map((a) => ({
+        id: a.id.toString(),
+        documento: a.documento,
+        versao: a.versao,
+        enderecoIp: a.enderecoIp,
+        agenteUsuario: a.agenteUsuario,
+        aceitoEm: a.aceitoEm.toISOString(),
       })),
     };
   }
 
   /** Muda o status de um usuário já processado (ATIVO/SUSPENSO/BLOQUEADO/ENCERRADO). */
   @Put(':idPublico/situacao')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
   async mudarSituacao(
     @Param('idPublico') idPublico: string,
     @Body() body: { situacao?: string },
-    @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
+    @Req() req: { user: { id: string }; ip?: string },
   ) {
-    this.assertAdmin(req.user.papeis);
     const permitidas: string[] = [
       SITUACAO_USUARIO.ATIVO,
       SITUACAO_USUARIO.SUSPENSO,
@@ -209,11 +296,8 @@ export class AdminUsuariosController {
 
   /** Taxas + adquirente de roteamento do usuário (fallback: padrão do sistema). */
   @Get(':idPublico/config')
-  async config(
-    @Param('idPublico') idPublico: string,
-    @Req() req: { user: { papeis: string[] } },
-  ) {
-    this.assertAdmin(req.user.papeis);
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_VER)
+  async config(@Param('idPublico') idPublico: string) {
     const u = await this.prisma.usuario.findUnique({ where: { idPublico } });
     if (!u) throw new BadRequestException('Usuário não encontrado');
     const cfg = await this.prisma.configuracaoPixUsuario.findUnique({
@@ -247,12 +331,12 @@ export class AdminUsuariosController {
   }
 
   @Put(':idPublico/config')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
   async editarConfig(
     @Param('idPublico') idPublico: string,
     @Body() body: Record<string, string>,
-    @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
+    @Req() req: { user: { id: string }; ip?: string },
   ) {
-    this.assertAdmin(req.user.papeis);
     const u = await this.prisma.usuario.findUnique({ where: { idPublico } });
     if (!u) throw new BadRequestException('Usuário não encontrado');
     const cfg = await this.prisma.configuracaoPixUsuario.findUnique({
@@ -288,6 +372,33 @@ export class AdminUsuariosController {
       padrao?.contaProvedorPixSaidaId;
     if (!contaEntradaId || !contaSaidaId) {
       throw new BadRequestException('Defina as adquirentes de cash-in e cash-out.');
+    }
+
+    // O admin escolher a adquirente de PIX in para o cliente IMPLICA liberá-la
+    // na vitrine: sem isso a conta ficaria roteando por uma adquirente que ela
+    // não pode selecionar no painel — e a própria cobrança seria recusada.
+    if (body.adquirenteEntrada) {
+      const provedor = await this.prisma.provedorPagamento.findUnique({
+        where: { codigo: body.adquirenteEntrada },
+      });
+      if (
+        provedor?.disponibilidadePixEntrada === DISPONIBILIDADE_ADQUIRENTE.ESPECIFICOS
+      ) {
+        await this.prisma.liberacaoAdquirenteUsuario.upsert({
+          where: {
+            provedorPagamentoId_usuarioId: {
+              provedorPagamentoId: provedor.id,
+              usuarioId: u.id,
+            },
+          },
+          create: {
+            provedorPagamentoId: provedor.id,
+            usuarioId: u.id,
+            liberadoPorUsuarioId: BigInt(req.user.id),
+          },
+          update: {},
+        });
+      }
     }
 
     const dec = (v: unknown, campo: string) => {
@@ -354,19 +465,14 @@ export class AdminUsuariosController {
   }
 
   @Post(':idPublico/ativar')
+  @RequerPermissao(PERMISSOES.ADMIN_APROVACOES_APROVAR)
   async ativar(
     @Param('idPublico') idPublico: string,
-    @Req() req: { user: { id: string; papeis: string[] } },
+    @Req() req: { user: { id: string } },
   ) {
-    if (!req.user.papeis.includes(PAPEIS.ADMINISTRADOR)) {
-      throw new BadRequestException('Somente ADMINISTRADOR');
-    }
     const usuario = await this.prisma.usuario.findUnique({
       where: { idPublico },
-      include: {
-        documentos: true,
-        empresasProprietario: { include: { documentos: true } },
-      },
+      include: { documentos: true },
     });
     if (!usuario) throw new BadRequestException('Usuário não encontrado');
 
@@ -378,7 +484,8 @@ export class AdminUsuariosController {
           'A documentação precisa ser enviada antes da aprovação.',
       );
     }
-    const obrigatoriosInvalidos = DOCUMENTOS_OBRIGATORIOS_USUARIO.filter((tipo) =>
+    const exigidos = documentosObrigatorios(usuario.tipoPessoa);
+    const obrigatoriosInvalidos = exigidos.filter((tipo) =>
       usuario.documentos.some(
         (d) =>
           d.tipoDocumento === tipo && d.situacao === SITUACAO_DOCUMENTO.INVALIDO,
@@ -399,16 +506,11 @@ export class AdminUsuariosController {
     // Furo de KYC fechado: um PJ chega a EM_ANALISE só com os documentos
     // pessoais do responsável. Sem esta checagem o admin poderia ativar a conta
     // antes de qualquer documento societário ter sido enviado.
-    for (const empresa of usuario.empresasProprietario) {
-      const faltam = documentosFaltantes(
-        documentosObrigatoriosEmpresa(empresa.tipoPessoa),
-        empresa.documentos,
+    const faltantes = documentosFaltantes(exigidos, usuario.documentos);
+    if (faltantes.length > 0) {
+      throw new BadRequestException(
+        `Documentação incompleta — ainda falta: ${faltantes.join(', ')}.`,
       );
-      if (faltam.length > 0) {
-        throw new BadRequestException(
-          `A empresa ${empresa.razaoSocial} ainda não enviou: ${faltam.join(', ')}.`,
-        );
-      }
     }
 
     const padrao = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
@@ -462,6 +564,13 @@ export class AdminUsuariosController {
         },
         update: {},
       });
+      // Carteira do cliente: nasce zerada junto da ativação. Sem ela o primeiro
+      // crédito não tem onde cair.
+      await tx.saldoUsuario.upsert({
+        where: { usuarioId: usuario.id },
+        create: { usuarioId: usuario.id },
+        update: {},
+      });
       await tx.analiseCadastroUsuario.updateMany({
         where: {
           usuarioId: usuario.id,
@@ -499,14 +608,12 @@ export class AdminUsuariosController {
   }
 
   @Post(':idPublico/reprovar')
+  @RequerPermissao(PERMISSOES.ADMIN_APROVACOES_APROVAR)
   async reprovar(
     @Param('idPublico') idPublico: string,
     @Body() body: unknown,
-    @Req() req: { user: { id: string; papeis: string[] } },
+    @Req() req: { user: { id: string } },
   ) {
-    if (!req.user.papeis.includes(PAPEIS.ADMINISTRADOR)) {
-      throw new BadRequestException('Somente ADMINISTRADOR');
-    }
     const parsed = reprovarCadastroSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
 
@@ -568,5 +675,94 @@ export class AdminUsuariosController {
     });
 
     return { ok: true, situacao: SITUACAO_USUARIO.REPROVADO };
+  }
+
+  /**
+   * Perfis de acesso do usuário. Substitui o conjunto inteiro — o corpo é a
+   * lista final de nomes de perfil.
+   */
+  @Put(':idPublico/perfis')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
+  async definirPerfis(
+    @Param('idPublico') idPublico: string,
+    @Body() body: { perfis?: string[] },
+    @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
+  ) {
+    const nomes = Array.from(new Set(body?.perfis ?? []));
+    if (!Array.isArray(body?.perfis)) {
+      throw new BadRequestException('Informe `perfis` (lista de nomes).');
+    }
+
+    const usuario = await this.prisma.usuario.findUnique({
+      where: { idPublico },
+      include: { papeis: { include: { papel: true } } },
+    });
+    if (!usuario) throw new NotFoundException('Usuário não encontrado');
+
+    const papeis = await this.prisma.papel.findMany({
+      where: { nome: { in: nomes } },
+    });
+    const faltando = nomes.filter((n) => !papeis.some((p) => p.nome === n));
+    if (faltando.length) {
+      throw new BadRequestException(`Perfil inexistente: ${faltando.join(', ')}`);
+    }
+
+    const anteriores = usuario.papeis.map((p) => p.papel.nome);
+    // Trava anti-lockout: o admin não tira o próprio ADMINISTRADOR. Se tirasse,
+    // ninguém mais conseguiria devolver o perfil — a tela exige a permissão.
+    if (
+      usuario.id.toString() === req.user.id &&
+      anteriores.includes(PAPEIS.ADMINISTRADOR) &&
+      !nomes.includes(PAPEIS.ADMINISTRADOR)
+    ) {
+      throw new BadRequestException(
+        'Você não pode remover o próprio perfil ADMINISTRADOR.',
+      );
+    }
+
+    /**
+     * Barreira anti-escalação: quem não é ADMINISTRADOR não pode CONCEDER
+     * ADMINISTRADOR — nem a si mesmo, nem a terceiro.
+     *
+     * Sem isto, `admin.usuarios.editar` (um perfil delegado de "gerente de
+     * contas") valia superusuário: bastava atribuir ADMINISTRADOR à própria
+     * conta, porque `permissoesEfetivas` devolve TODAS_PERMISSOES para esse
+     * papel e as permissões são reresolvidas no banco a cada request — a
+     * promoção passa a valer na requisição seguinte, com o MESMO token.
+     */
+    if (
+      nomes.includes(PAPEIS.ADMINISTRADOR) &&
+      !anteriores.includes(PAPEIS.ADMINISTRADOR) &&
+      !req.user.papeis.includes(PAPEIS.ADMINISTRADOR)
+    ) {
+      throw new BadRequestException(
+        'Somente um ADMINISTRADOR pode conceder o perfil ADMINISTRADOR.',
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.usuarioPapel.deleteMany({ where: { usuarioId: usuario.id } });
+      if (papeis.length) {
+        await tx.usuarioPapel.createMany({
+          data: papeis.map((p) => ({ usuarioId: usuario.id, papelId: p.id })),
+        });
+      }
+      await tx.registroAuditoria.create({
+        data: {
+          usuarioAfetadoId: usuario.id,
+          usuarioAtorId: BigInt(req.user.id),
+          origem: 'PAINEL',
+          operacao: 'ACAO_NEGOCIO',
+          acao: 'USUARIO_PERFIS_DEFINIR',
+          nomeTabela: 'usuarios_papeis',
+          chaveRegistro: usuario.id.toString(),
+          enderecoIp: req.ip,
+          dadosAnteriores: { perfis: anteriores } as never,
+          dadosNovos: { perfis: nomes } as never,
+        },
+      });
+    });
+
+    return { idPublico, perfis: nomes };
   }
 }

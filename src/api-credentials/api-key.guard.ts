@@ -8,7 +8,7 @@ import {
 import * as argon2 from 'argon2';
 import * as ipaddr from 'ipaddr.js';
 import { PrismaService } from '../prisma/prisma.service';
-import { SITUACAO_EMPRESA, SITUACAO_USUARIO } from '../shared';
+import { ESCOPOS_API, SITUACAO_USUARIO } from '../shared';
 import { createHash } from 'node:crypto';
 
 function ipMatches(clientIp: string, allowed: string): boolean {
@@ -44,11 +44,7 @@ export class ApiKeyGuard implements CanActivate {
 
     const cred = await this.prisma.credencialApi.findUnique({
       where: { chavePublica: publicKey },
-      include: {
-        ipsPermitidos: true,
-        empresa: true,
-        usuario: true,
-      },
+      include: { ipsPermitidos: true, usuario: true },
     });
 
     if (!cred || !cred.ativo || cred.revogadoEm) {
@@ -57,11 +53,8 @@ export class ApiKeyGuard implements CanActivate {
     if (cred.expiraEm && cred.expiraEm < new Date()) {
       throw new UnauthorizedException('Credencial expirada');
     }
-    if (cred.empresa.situacao !== SITUACAO_EMPRESA.ATIVA) {
-      throw new ForbiddenException('Empresa não ativa');
-    }
     if (cred.usuario.situacao !== SITUACAO_USUARIO.ATIVO || cred.usuario.contaBloqueada) {
-      throw new ForbiddenException('Usuário titular não ativo');
+      throw new ForbiddenException('Conta titular não ativa');
     }
 
     const ok = await argon2.verify(cred.segredoHash, secret);
@@ -69,7 +62,6 @@ export class ApiKeyGuard implements CanActivate {
       await this.prisma.eventoSeguranca.create({
         data: {
           usuarioId: cred.usuarioId,
-          empresaId: cred.empresaId,
           credencialApiId: cred.id,
           tipoEvento: 'CREDENCIAL_INVALIDA',
           severidade: 'ALTA',
@@ -89,7 +81,6 @@ export class ApiKeyGuard implements CanActivate {
         await this.prisma.eventoSeguranca.create({
           data: {
             usuarioId: cred.usuarioId,
-            empresaId: cred.empresaId,
             credencialApiId: cred.id,
             tipoEvento: 'IP_BLOQUEADO',
             severidade: 'ALTA',
@@ -107,8 +98,6 @@ export class ApiKeyGuard implements CanActivate {
     req.apiCredential = {
       id: cred.id.toString(),
       usuarioId: cred.usuarioId.toString(),
-      empresaId: cred.empresaId.toString(),
-      empresaIdPublico: cred.empresa.idPublico,
       escopos: (cred.escopos as string[]) ?? [],
       temIpAllowlist: cred.ipsPermitidos.length > 0,
     };
@@ -141,7 +130,9 @@ export function assertSaqueViaApiPermitido(cred?: {
   escopos: string[];
   temIpAllowlist?: boolean;
 }) {
-  assertEscopo(cred, 'pix.saque.criar');
+  // Constante, não literal: com a string solta, renomear o escopo no catálogo
+  // não quebrava o build e a checagem passava a nunca casar.
+  assertEscopo(cred, ESCOPOS_API.PIX_SAQUE_CRIAR);
   if (!cred?.temIpAllowlist) {
     throw new ForbiddenException(
       'Saque via API exige credencial com IP liberado. Cadastre os IPs permitidos na chave de API.',
@@ -158,16 +149,16 @@ export class IdempotencyInterceptor {
     return createHash('sha256').update(JSON.stringify(body ?? {})).digest('hex');
   }
 
-  async getExisting(empresaId: bigint, chave: string) {
+  async getExisting(usuarioId: bigint, chave: string) {
     return this.prisma.chaveIdempotencia.findUnique({
       where: {
-        empresaId_chaveIdempotencia: { empresaId, chaveIdempotencia: chave },
+        usuarioId_chaveIdempotencia: { usuarioId, chaveIdempotencia: chave },
       },
     });
   }
 
   async save(params: {
-    empresaId: bigint;
+    usuarioId: bigint;
     credencialApiId: bigint;
     chave: string;
     hash: string;
@@ -177,7 +168,7 @@ export class IdempotencyInterceptor {
   }) {
     return this.prisma.chaveIdempotencia.create({
       data: {
-        empresaId: params.empresaId,
+        usuarioId: params.usuarioId,
         credencialApiId: params.credencialApiId,
         chaveIdempotencia: params.chave,
         hashRequisicao: params.hash,

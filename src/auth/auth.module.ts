@@ -16,7 +16,7 @@ import { TotpController } from './totp.controller';
       useFactory: (config: ConfigService) => ({
         secret: config.getOrThrow<string>('JWT_SECRET'),
         signOptions: {
-          expiresIn: (config.get<string>('JWT_EXPIRES_IN') ?? '8h') as `${number}h`,
+          expiresIn: (config.get<string>('JWT_EXPIRES_IN') ?? '1h') as `${number}h`,
         },
       }),
     }),

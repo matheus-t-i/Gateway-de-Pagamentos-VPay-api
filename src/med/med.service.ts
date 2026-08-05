@@ -33,10 +33,10 @@ export class MedService {
     private readonly queues: QueuesService,
   ) {}
 
-  /** Saldo disponível atual da empresa (para calcular cobertura do bloqueio). */
-  private async saldoDisponivel(empresaId: bigint): Promise<Decimal> {
-    const saldo = await this.prisma.saldoEmpresa.findUnique({
-      where: { empresaId },
+  /** Saldo disponível atual do cliente (para calcular cobertura do bloqueio). */
+  private async saldoDisponivel(usuarioId: bigint): Promise<Decimal> {
+    const saldo = await this.prisma.saldoUsuario.findUnique({
+      where: { usuarioId },
     });
     return money(saldo?.saldoDisponivel?.toString() ?? '0');
   }
@@ -56,7 +56,7 @@ export class MedService {
   }) {
     const tx = await this.prisma.transacao.findUnique({
       where: { idTransacaoPublico: params.idTransacaoPublico },
-      include: { empresa: { include: { usuarioProprietario: true } } },
+      include: { usuario: true },
     });
     if (!tx) throw new BadRequestException('Transação não encontrada');
     if (tx.direcao !== 'ENTRADA') {
@@ -84,10 +84,10 @@ export class MedService {
       return { idPublico: existente.idPublico, situacao: existente.situacao, duplicado: true };
     }
 
-    const cfg = await this.configPix.resolverEfetiva(tx.empresaId);
+    const cfg = await this.configPix.resolverEfetiva(tx.usuarioId);
     const caso = await this.prisma.casoMed.create({
       data: {
-        empresaId: tx.empresaId,
+        usuarioId: tx.usuarioId,
         transacaoId: tx.id,
         contaProvedorId: tx.contaProvedorId,
         webhookRecebidoId: params.webhookRecebidoId,
@@ -119,14 +119,14 @@ export class MedService {
 
     if (cfg.modoTratamentoMed === 'BLOQUEAR_SALDO') {
       // Bloqueia só o que existe de saldo. O restante vira valorNaoCoberto —
-      // travar tudo geraria saldo negativo e derrubaria a operação da empresa.
-      const disponivel = await this.saldoDisponivel(tx.empresaId);
+      // travar tudo geraria saldo negativo e derrubaria a operação do cliente.
+      const disponivel = await this.saldoDisponivel(tx.usuarioId);
       const bloquear = Decimal.min(valor, Decimal.max(disponivel, new Decimal(0)));
       const naoCoberto = valor.minus(bloquear);
 
       if (bloquear.gt(0)) {
         await this.ledger.aplicarMovimentacoes({
-          empresaId: tx.empresaId,
+          usuarioId: tx.usuarioId,
           entries: [
             {
               tipoSaldo: 'DISPONIVEL',
@@ -162,7 +162,7 @@ export class MedService {
       });
       await this.prisma.bloqueioSaldo.create({
         data: {
-          empresaId: tx.empresaId,
+          usuarioId: tx.usuarioId,
           casoMedId: caso.id,
           tipo: 'MED',
           valorSolicitado: valor.toFixed(2),
@@ -175,7 +175,7 @@ export class MedService {
       situacaoFinal = SITUACAO_MED.SALDO_BLOQUEADO;
     } else if (cfg.modoTratamentoMed === 'DEBITAR_IMEDIATAMENTE') {
       await this.ledger.aplicarMovimentacoes({
-        empresaId: tx.empresaId,
+        usuarioId: tx.usuarioId,
         permiteSaldoNegativo: cfg.permiteSaldoNegativo,
         entries: [
           {
@@ -204,8 +204,8 @@ export class MedService {
 
     await this.queues.enqueueEmail({
       tipo: TIPOS_EMAIL.MED_RECEBIDO,
-      para: tx.empresa.usuarioProprietario.email,
-      nome: tx.empresa.usuarioProprietario.nomeRazaoSocial,
+      para: tx.usuario.email,
+      nome: tx.usuario.nomeRazaoSocial,
       dados: {
         valor: valor.toFixed(2),
         idTransacao: tx.idTransacaoPublico,
@@ -240,7 +240,7 @@ export class MedService {
       where: { idPublico: params.idPublico },
       include: {
         transacao: { select: { id: true, idTransacaoPublico: true } },
-        empresa: { include: { usuarioProprietario: true } },
+        usuario: true,
       },
     });
     if (!caso) throw new BadRequestException('Caso não encontrado');
@@ -256,7 +256,7 @@ export class MedService {
     const solicitado = money(caso.valorSolicitado.toString());
     const bloqueado = money(caso.valorBloqueado.toString());
     const jaDebitado = money(caso.valorDebitado.toString());
-    const cfg = await this.configPix.resolverEfetiva(caso.empresaId);
+    const cfg = await this.configPix.resolverEfetiva(caso.usuarioId);
 
     let devolucaoId: bigint | undefined;
 
@@ -291,7 +291,7 @@ export class MedService {
       }
       if (entries.length > 0) {
         await this.ledger.aplicarMovimentacoes({
-          empresaId: caso.empresaId,
+          usuarioId: caso.usuarioId,
           permiteSaldoNegativo: cfg.permiteSaldoNegativo,
           entries,
         });
@@ -316,7 +316,7 @@ export class MedService {
     } else if (bloqueado.gt(0)) {
       // RECUSADO: devolve o bloqueio ao disponível.
       await this.ledger.aplicarMovimentacoes({
-        empresaId: caso.empresaId,
+        usuarioId: caso.usuarioId,
         entries: [
           {
             tipoSaldo: 'BLOQUEADO_MED',
@@ -380,8 +380,8 @@ export class MedService {
         params.decisao === 'ACEITO'
           ? TIPOS_EMAIL.MED_ACEITO
           : TIPOS_EMAIL.MED_RECUSADO,
-      para: caso.empresa.usuarioProprietario.email,
-      nome: caso.empresa.usuarioProprietario.nomeRazaoSocial,
+      para: caso.usuario.email,
+      nome: caso.usuario.nomeRazaoSocial,
       dados: {
         valor: solicitado.toFixed(2),
         idTransacao: caso.transacao.idTransacaoPublico,

@@ -1,20 +1,21 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { ProvidersModule } from '../providers/providers.module';
 import { TesourariaModule } from '../tesouraria/tesouraria.module';
 import { AdminTesourariaController } from '../tesouraria/tesouraria.controller';
 import {
   AdminOpsController,
   PainelDashboardController,
-  WebhooksEmpresaController,
+  WebhooksClienteController,
 } from './ops.controller';
 
 @Module({
-  imports: [AuthModule, TesourariaModule],
+  imports: [AuthModule, TesourariaModule, ProvidersModule],
   controllers: [
     AdminOpsController,
     AdminTesourariaController,
     PainelDashboardController,
-    WebhooksEmpresaController,
+    WebhooksClienteController,
   ],
 })
 export class OpsModule {}

@@ -1,22 +1,12 @@
 import { z } from 'zod';
 import { TEMAS } from './enums';
-import { documentoValidoPara, isCnpj, isCpf, normalizarDocumento } from './documento';
+import { documentoValidoPara, isCpf, normalizarDocumento } from './documento';
 
 export const loginSchema = z.object({
   email: z.string().email(),
   senha: z.string().min(8),
   /** Código do app autenticador — exigido quando a conta tem 2FA ativo. */
   codigoTotp: z.string().regex(/^\d{6}$/).optional(),
-});
-
-/**
- * Dados COMPLEMENTARES da primeira empresa. Documento e razão social são
- * sempre derivados da pessoa — nunca informados pelo cliente.
- */
-export const dadosEmpresaSchema = z.object({
-  nomeFantasia: z.string().max(255).optional(),
-  email: z.string().email().optional(),
-  telefone: z.string().max(20).optional(),
 });
 
 export const enderecoSchema = z.object({
@@ -54,8 +44,6 @@ export const cadastroUsuarioSchema = z
         nome: z.string().min(2).max(255),
       })
       .optional(),
-    // Dados complementares da 1ª empresa (documento/razão social são derivados).
-    empresa: dadosEmpresaSchema.optional(),
     // Assinatura eletrônica: os dois aceites são obrigatórios para concluir o cadastro.
     aceites: z.object(
       {
@@ -153,16 +141,9 @@ export const atualizarPerfilSchema = z.object({
   temaPreferido: z.enum([TEMAS.PADRAO, TEMAS.CLARO, TEMAS.ESCURO]).optional(),
 });
 
-/** Empresa ADICIONAL (a primeira é criada automaticamente): sempre PJ. */
-export const criarEmpresaSchema = z.object({
-  cnpj: z
-    .string()
-    .transform(normalizarDocumento)
-    .refine(isCnpj, 'CNPJ inválido (14 caracteres, aceita o padrão alfanumérico).'),
-  razaoSocial: z.string().min(2).max(255),
-  nomeFantasia: z.string().max(255).optional(),
-  email: z.string().email().optional(),
-  telefone: z.string().max(20).optional(),
+/** Escolha da adquirente de PIX in pelo próprio lojista, no painel. */
+export const escolherAdquirentePixEntradaSchema = z.object({
+  adquirenteCodigo: z.string().min(2).max(50),
 });
 
 /** Endereço de entrega do pagador. Mesmo formato do endereço do cadastro. */
@@ -248,7 +229,14 @@ export const criarSaquePixSchema = z.object({
 
 export const criarCredencialApiSchema = z.object({
   nome: z.string().min(1).max(100),
-  escopos: z.array(z.string()).default([]),
+  /**
+   * Só escopo do catálogo. Com `z.string()` solto, um nome errado
+   * ("transacoes.lerr") era gravado calado e o lojista via na tela um escopo
+   * que nenhuma rota jamais consultaria.
+   */
+  escopos: z
+    .array(z.enum(Object.values(ESCOPOS_API) as [string, ...string[]]))
+    .default([]),
   ipsPermitidos: z.array(z.string()).default([]),
 });
 

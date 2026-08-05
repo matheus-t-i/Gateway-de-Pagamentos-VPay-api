@@ -1,6 +1,3 @@
--- CreateSchema
-CREATE SCHEMA IF NOT EXISTS "public";
-
 -- CreateEnum
 CREATE TYPE "TipoPessoa" AS ENUM ('PF', 'PJ');
 
@@ -9,9 +6,6 @@ CREATE TYPE "TemaPreferido" AS ENUM ('PADRAO', 'CLARO', 'ESCURO');
 
 -- CreateEnum
 CREATE TYPE "SituacaoUsuario" AS ENUM ('PENDENTE', 'EM_ANALISE', 'ATIVO', 'REPROVADO', 'SUSPENSO', 'BLOQUEADO', 'ENCERRADO');
-
--- CreateEnum
-CREATE TYPE "SituacaoEmpresa" AS ENUM ('PENDENTE', 'EM_ANALISE', 'ATIVA', 'REPROVADA', 'SUSPENSA', 'BLOQUEADA', 'ENCERRADA');
 
 -- CreateEnum
 CREATE TYPE "SituacaoDocumento" AS ENUM ('PENDENTE', 'VALIDO', 'INVALIDO', 'EXPIRADO');
@@ -23,10 +17,10 @@ CREATE TYPE "SituacaoAnalise" AS ENUM ('PENDENTE', 'EM_ANALISE', 'APROVADA', 'RE
 CREATE TYPE "SituacaoProvedor" AS ENUM ('ATIVO', 'INATIVO', 'SUSPENSO');
 
 -- CreateEnum
-CREATE TYPE "DirecaoTransacao" AS ENUM ('ENTRADA', 'SAIDA');
+CREATE TYPE "DisponibilidadeAdquirente" AS ENUM ('TODOS', 'ESPECIFICOS');
 
 -- CreateEnum
-CREATE TYPE "OrigemConfiguracao" AS ENUM ('USUARIO', 'EMPRESA', 'MISTA');
+CREATE TYPE "DirecaoTransacao" AS ENUM ('ENTRADA', 'SAIDA');
 
 -- CreateEnum
 CREATE TYPE "SituacaoTransacao" AS ENUM ('PENDENTE', 'PROCESSANDO', 'AGUARDANDO_PAGAMENTO', 'LIQUIDADA', 'CONCLUIDA', 'FALHA', 'CANCELADA', 'DEVOLVIDA');
@@ -52,6 +46,12 @@ CREATE TYPE "TipoLiberacao" AS ENUM ('SALDO_PRINCIPAL', 'RESERVA');
 -- CreateEnum
 CREATE TYPE "SituacaoLiberacao" AS ENUM ('AGENDADA', 'PROCESSANDO', 'LIBERADA', 'CANCELADA', 'BLOQUEADA_MED', 'FALHA');
 
+-- CreateEnum
+CREATE TYPE "SituacaoChavePix" AS ENUM ('PENDENTE', 'APROVADA', 'REPROVADA', 'INATIVA');
+
+-- CreateEnum
+CREATE TYPE "TipoChavePix" AS ENUM ('CPF', 'CNPJ', 'EMAIL', 'TELEFONE', 'ALEATORIA');
+
 -- CreateTable
 CREATE TABLE "usuarios" (
     "id" BIGSERIAL NOT NULL,
@@ -60,6 +60,8 @@ CREATE TABLE "usuarios" (
     "cpf_cnpj" VARCHAR(14) NOT NULL,
     "nome_razao_social" VARCHAR(255) NOT NULL,
     "nome_fantasia" VARCHAR(255),
+    "cpf_responsavel" VARCHAR(14),
+    "nome_responsavel" VARCHAR(255),
     "email" VARCHAR(255) NOT NULL,
     "telefone" VARCHAR(20),
     "senha_hash" VARCHAR(255) NOT NULL,
@@ -74,6 +76,8 @@ CREATE TABLE "usuarios" (
     "ativado_por_usuario_id" BIGINT,
     "ativado_em" TIMESTAMPTZ,
     "motivo_reprovacao" TEXT,
+    "endereco" JSONB,
+    "faturamento_mensal_medio" DECIMAL(15,2),
     "metadados" JSONB NOT NULL DEFAULT '{}',
     "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "atualizado_em" TIMESTAMPTZ NOT NULL,
@@ -82,72 +86,39 @@ CREATE TABLE "usuarios" (
 );
 
 -- CreateTable
-CREATE TABLE "empresas" (
+CREATE TABLE "aceites_documentos_legais" (
+    "id" BIGSERIAL NOT NULL,
+    "usuario_id" BIGINT NOT NULL,
+    "documento" VARCHAR(80) NOT NULL,
+    "versao" VARCHAR(20) NOT NULL,
+    "endereco_ip" VARCHAR(45),
+    "agente_usuario" TEXT,
+    "latitude" DECIMAL(9,6),
+    "longitude" DECIMAL(9,6),
+    "aceito_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "aceites_documentos_legais_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "chaves_pix_usuarios" (
     "id" BIGSERIAL NOT NULL,
     "id_publico" UUID NOT NULL,
-    "usuario_proprietario_id" BIGINT NOT NULL,
-    "cnpj" VARCHAR(14) NOT NULL,
-    "razao_social" VARCHAR(255) NOT NULL,
-    "nome_fantasia" VARCHAR(255),
-    "email" VARCHAR(255),
-    "telefone" VARCHAR(20),
-    "situacao" "SituacaoEmpresa" NOT NULL DEFAULT 'PENDENTE',
+    "usuario_id" BIGINT NOT NULL,
+    "apelido" VARCHAR(100),
+    "chave" VARCHAR(255) NOT NULL,
+    "tipo_chave" "TipoChavePix" NOT NULL,
+    "nome_titular" VARCHAR(255),
+    "documento_titular" VARCHAR(14),
+    "situacao" "SituacaoChavePix" NOT NULL DEFAULT 'PENDENTE',
     "motivo_reprovacao" TEXT,
-    "ativada_por_usuario_id" BIGINT,
-    "ativada_em" TIMESTAMPTZ,
-    "metadados" JSONB NOT NULL DEFAULT '{}',
+    "aprovada_por_usuario_id" BIGINT,
+    "aprovada_em" TIMESTAMPTZ,
     "criado_por_usuario_id" BIGINT,
     "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "atualizado_em" TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT "empresas_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "documentos_empresas" (
-    "id" BIGSERIAL NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
-    "tipo_documento" VARCHAR(60) NOT NULL,
-    "nome_arquivo" VARCHAR(255) NOT NULL,
-    "caminho_arquivo" VARCHAR(500) NOT NULL,
-    "tipo_mime" VARCHAR(100),
-    "tamanho_bytes" BIGINT,
-    "hash_arquivo" VARCHAR(128),
-    "situacao" "SituacaoDocumento" NOT NULL DEFAULT 'PENDENTE',
-    "motivo_invalidacao" TEXT,
-    "enviado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "validado_por_usuario_id" BIGINT,
-    "validado_em" TIMESTAMPTZ,
-
-    CONSTRAINT "documentos_empresas_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "analises_cadastro_empresas" (
-    "id" BIGSERIAL NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
-    "situacao" "SituacaoAnalise" NOT NULL DEFAULT 'PENDENTE',
-    "observacoes" TEXT,
-    "analisado_por_usuario_id" BIGINT,
-    "analisado_em" TIMESTAMPTZ,
-    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "atualizado_em" TIMESTAMPTZ NOT NULL,
-
-    CONSTRAINT "analises_cadastro_empresas_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "historicos_situacoes_empresas" (
-    "id" BIGSERIAL NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
-    "situacao_anterior" VARCHAR(30),
-    "nova_situacao" VARCHAR(30) NOT NULL,
-    "motivo" TEXT,
-    "usuario_ator_id" BIGINT,
-    "endereco_ip" VARCHAR(45),
-    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "historicos_situacoes_empresas_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "chaves_pix_usuarios_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -267,7 +238,6 @@ CREATE TABLE "auditorias_acesso" (
 CREATE TABLE "credenciais_api" (
     "id" BIGSERIAL NOT NULL,
     "usuario_id" BIGINT NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
     "criado_por_usuario_id" BIGINT,
     "nome" VARCHAR(100) NOT NULL,
     "chave_publica" VARCHAR(150) NOT NULL,
@@ -296,7 +266,6 @@ CREATE TABLE "ips_permitidos_api" (
 CREATE TABLE "registros_acesso_api" (
     "id" BIGSERIAL NOT NULL,
     "usuario_id" BIGINT,
-    "empresa_id" BIGINT,
     "credencial_api_id" BIGINT,
     "endereco_ip" VARCHAR(45),
     "metodo" VARCHAR(10) NOT NULL,
@@ -314,6 +283,10 @@ CREATE TABLE "provedores_pagamento" (
     "id" BIGSERIAL NOT NULL,
     "codigo" VARCHAR(50) NOT NULL,
     "nome" VARCHAR(255) NOT NULL,
+    "nome_fantasia" VARCHAR(120),
+    "tem_med" BOOLEAN NOT NULL DEFAULT false,
+    "observacao_cliente" TEXT,
+    "disponibilidade_pix_entrada" "DisponibilidadeAdquirente" NOT NULL DEFAULT 'ESPECIFICOS',
     "situacao" "SituacaoProvedor" NOT NULL DEFAULT 'ATIVO',
     "permite_pix_entrada" BOOLEAN NOT NULL DEFAULT false,
     "permite_pix_saida" BOOLEAN NOT NULL DEFAULT false,
@@ -323,6 +296,17 @@ CREATE TABLE "provedores_pagamento" (
     "atualizado_em" TIMESTAMPTZ NOT NULL,
 
     CONSTRAINT "provedores_pagamento_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "liberacoes_adquirente_usuario" (
+    "id" BIGSERIAL NOT NULL,
+    "provedor_pagamento_id" BIGINT NOT NULL,
+    "usuario_id" BIGINT NOT NULL,
+    "liberado_por_usuario_id" BIGINT,
+    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "liberacoes_adquirente_usuario_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -340,7 +324,6 @@ CREATE TABLE "contas_provedor" (
     "id" BIGSERIAL NOT NULL,
     "provedor_pagamento_id" BIGINT NOT NULL,
     "usuario_id" BIGINT,
-    "empresa_id" BIGINT,
     "nome" VARCHAR(100) NOT NULL,
     "identificador_conta_externa" VARCHAR(255),
     "chave_unica_conta" VARCHAR(500) NOT NULL,
@@ -410,6 +393,7 @@ CREATE TABLE "configuracoes_pix_usuarios" (
     "configuracao_padrao_origem_id" BIGINT,
     "conta_provedor_pix_entrada_id" BIGINT NOT NULL,
     "conta_provedor_pix_saida_id" BIGINT NOT NULL,
+    "adquirente_pix_entrada_trocada_em" TIMESTAMPTZ,
     "taxa_pix_entrada_percentual" DECIMAL(7,4) NOT NULL DEFAULT 0,
     "taxa_pix_entrada_fixa" DECIMAL(19,4) NOT NULL DEFAULT 0,
     "taxa_pix_saida_percentual" DECIMAL(7,4) NOT NULL DEFAULT 0,
@@ -433,45 +417,17 @@ CREATE TABLE "configuracoes_pix_usuarios" (
 );
 
 -- CreateTable
-CREATE TABLE "configuracoes_pix_empresas" (
-    "empresa_id" BIGINT NOT NULL,
-    "conta_provedor_pix_entrada_id" BIGINT,
-    "conta_provedor_pix_saida_id" BIGINT,
-    "taxa_pix_entrada_percentual" DECIMAL(7,4),
-    "taxa_pix_entrada_fixa" DECIMAL(19,4),
-    "taxa_pix_saida_percentual" DECIMAL(7,4),
-    "taxa_pix_saida_fixa" DECIMAL(19,4),
-    "ticket_minimo_pix_entrada" DECIMAL(19,2),
-    "ticket_maximo_pix_entrada" DECIMAL(19,2),
-    "ticket_minimo_pix_saida" DECIMAL(19,2),
-    "ticket_maximo_pix_saida" DECIMAL(19,2),
-    "permitir_pix_saida_via_api" BOOLEAN,
-    "dias_liberacao_saldo" INTEGER,
-    "percentual_reserva" DECIMAL(7,4),
-    "base_calculo_reserva" "BaseCalculoReserva",
-    "dias_retencao_reserva" INTEGER,
-    "modo_tratamento_med" "ModoTratamentoMed",
-    "permite_saldo_negativo" BOOLEAN,
-    "atualizado_por_usuario_id" BIGINT,
-    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "atualizado_em" TIMESTAMPTZ NOT NULL,
-
-    CONSTRAINT "configuracoes_pix_empresas_pkey" PRIMARY KEY ("empresa_id")
-);
-
--- CreateTable
 CREATE TABLE "transacoes" (
     "id" BIGSERIAL NOT NULL,
     "id_transacao_publico" UUID NOT NULL,
     "id_transacao_privado" UUID NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
-    "usuario_solicitante_id" BIGINT,
+    "usuario_id" BIGINT NOT NULL,
     "credencial_api_id" BIGINT,
     "conta_provedor_id" BIGINT,
     "transacao_origem_id" BIGINT,
     "referencia_externa" VARCHAR(255),
+    "url_callback" TEXT,
     "direcao" "DirecaoTransacao" NOT NULL,
-    "origem_configuracao" "OrigemConfiguracao" NOT NULL DEFAULT 'USUARIO',
     "moeda" VARCHAR(3) NOT NULL DEFAULT 'BRL',
     "valor_bruto" DECIMAL(19,2) NOT NULL,
     "tarifa_pix_percentual_aplicada" DECIMAL(7,4) NOT NULL DEFAULT 0,
@@ -514,6 +470,7 @@ CREATE TABLE "transacoes_pix" (
     "telefone_pagador" VARCHAR(20),
     "nome_beneficiario" VARCHAR(255),
     "documento_beneficiario" VARCHAR(20),
+    "endereco_pagador" JSONB,
     "chave_pix" VARCHAR(255),
     "tipo_chave_pix" VARCHAR(20),
     "pix_copia_cola" TEXT,
@@ -523,6 +480,20 @@ CREATE TABLE "transacoes_pix" (
     "atualizado_em" TIMESTAMPTZ NOT NULL,
 
     CONSTRAINT "transacoes_pix_pkey" PRIMARY KEY ("transacao_id")
+);
+
+-- CreateTable
+CREATE TABLE "itens_cobranca" (
+    "id" BIGSERIAL NOT NULL,
+    "transacao_id" BIGINT NOT NULL,
+    "titulo" VARCHAR(255) NOT NULL,
+    "quantidade" INTEGER NOT NULL,
+    "valor_unitario" DECIMAL(19,2) NOT NULL,
+    "valor_total" DECIMAL(19,2) NOT NULL,
+    "tangivel" BOOLEAN NOT NULL,
+    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "itens_cobranca_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -563,7 +534,7 @@ CREATE TABLE "historicos_situacoes_transacoes" (
 -- CreateTable
 CREATE TABLE "chaves_idempotencia" (
     "id" BIGSERIAL NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
+    "usuario_id" BIGINT NOT NULL,
     "credencial_api_id" BIGINT,
     "chave_idempotencia" VARCHAR(255) NOT NULL,
     "hash_requisicao" VARCHAR(255) NOT NULL,
@@ -596,22 +567,22 @@ CREATE TABLE "devolucoes_pix" (
 );
 
 -- CreateTable
-CREATE TABLE "saldos_empresas" (
-    "empresa_id" BIGINT NOT NULL,
+CREATE TABLE "saldos_usuarios" (
+    "usuario_id" BIGINT NOT NULL,
     "saldo_disponivel" DECIMAL(19,2) NOT NULL DEFAULT 0,
     "saldo_pendente_liberacao" DECIMAL(19,2) NOT NULL DEFAULT 0,
     "saldo_reservado" DECIMAL(19,2) NOT NULL DEFAULT 0,
     "saldo_bloqueado_med" DECIMAL(19,2) NOT NULL DEFAULT 0,
     "atualizado_em" TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT "saldos_empresas_pkey" PRIMARY KEY ("empresa_id")
+    CONSTRAINT "saldos_usuarios_pkey" PRIMARY KEY ("usuario_id")
 );
 
 -- CreateTable
 CREATE TABLE "movimentacoes_saldo" (
     "id" BIGSERIAL NOT NULL,
     "id_publico" UUID NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
+    "usuario_id" BIGINT NOT NULL,
     "transacao_id" BIGINT,
     "devolucao_pix_id" BIGINT,
     "caso_med_id" BIGINT,
@@ -633,7 +604,7 @@ CREATE TABLE "movimentacoes_saldo" (
 -- CreateTable
 CREATE TABLE "liberacoes_saldo" (
     "id" BIGSERIAL NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
+    "usuario_id" BIGINT NOT NULL,
     "transacao_id" BIGINT NOT NULL,
     "tipo_liberacao" "TipoLiberacao" NOT NULL,
     "valor" DECIMAL(19,2) NOT NULL,
@@ -653,7 +624,7 @@ CREATE TABLE "liberacoes_saldo" (
 CREATE TABLE "bloqueios_saldo" (
     "id" BIGSERIAL NOT NULL,
     "id_publico" UUID NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
+    "usuario_id" BIGINT NOT NULL,
     "caso_med_id" BIGINT,
     "tipo" VARCHAR(30) NOT NULL,
     "valor_solicitado" DECIMAL(19,2) NOT NULL,
@@ -674,7 +645,7 @@ CREATE TABLE "bloqueios_saldo" (
 CREATE TABLE "casos_med" (
     "id" BIGSERIAL NOT NULL,
     "id_publico" UUID NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
+    "usuario_id" BIGINT NOT NULL,
     "transacao_id" BIGINT NOT NULL,
     "conta_provedor_id" BIGINT,
     "webhook_recebido_id" BIGINT,
@@ -716,11 +687,12 @@ CREATE TABLE "historicos_casos_med" (
 );
 
 -- CreateTable
-CREATE TABLE "configuracoes_webhook_empresa" (
+CREATE TABLE "configuracoes_webhook_usuario" (
     "id" BIGSERIAL NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
+    "usuario_id" BIGINT NOT NULL,
     "nome" VARCHAR(100) NOT NULL,
     "url_destino" TEXT NOT NULL,
+    "nome_header_autenticacao" VARCHAR(100),
     "segredo_criptografado" TEXT,
     "tipos_evento" JSONB NOT NULL DEFAULT '[]',
     "cabecalhos_criptografados" JSONB NOT NULL DEFAULT '{}',
@@ -728,7 +700,7 @@ CREATE TABLE "configuracoes_webhook_empresa" (
     "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "atualizado_em" TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT "configuracoes_webhook_empresa_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "configuracoes_webhook_usuario_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -736,7 +708,7 @@ CREATE TABLE "webhooks_recebidos_provedor" (
     "id" BIGSERIAL NOT NULL,
     "provedor_pagamento_id" BIGINT NOT NULL,
     "conta_provedor_id" BIGINT,
-    "empresa_id" BIGINT,
+    "usuario_id" BIGINT,
     "identificador_evento_externo" VARCHAR(255),
     "chave_idempotencia" VARCHAR(255) NOT NULL,
     "tipo_evento" VARCHAR(100) NOT NULL,
@@ -754,7 +726,7 @@ CREATE TABLE "webhooks_recebidos_provedor" (
 CREATE TABLE "eventos_outbox" (
     "id" BIGSERIAL NOT NULL,
     "evento_uuid" UUID NOT NULL,
-    "empresa_id" BIGINT,
+    "usuario_id" BIGINT,
     "tipo_agregado" VARCHAR(100) NOT NULL,
     "identificador_agregado" VARCHAR(100) NOT NULL,
     "tipo_evento" VARCHAR(150) NOT NULL,
@@ -772,8 +744,9 @@ CREATE TABLE "eventos_outbox" (
 CREATE TABLE "entregas_webhook" (
     "id" BIGSERIAL NOT NULL,
     "evento_outbox_id" BIGINT NOT NULL,
-    "configuracao_webhook_id" BIGINT NOT NULL,
-    "empresa_id" BIGINT NOT NULL,
+    "configuracao_webhook_id" BIGINT,
+    "url_destino" TEXT,
+    "usuario_id" BIGINT NOT NULL,
     "numero_tentativa" INTEGER NOT NULL,
     "situacao" VARCHAR(30) NOT NULL,
     "status_http" INTEGER,
@@ -792,7 +765,6 @@ CREATE TABLE "entregas_webhook" (
 CREATE TABLE "registros_auditoria" (
     "id" BIGSERIAL NOT NULL,
     "usuario_afetado_id" BIGINT,
-    "empresa_afetada_id" BIGINT,
     "usuario_ator_id" BIGINT,
     "credencial_api_id" BIGINT,
     "origem" VARCHAR(30) NOT NULL,
@@ -820,7 +792,6 @@ CREATE TABLE "registros_auditoria" (
 CREATE TABLE "politicas_limite_requisicoes" (
     "id" BIGSERIAL NOT NULL,
     "usuario_id" BIGINT,
-    "empresa_id" BIGINT,
     "escopo" VARCHAR(30) NOT NULL,
     "caminho_rota" VARCHAR(500),
     "quantidade_maxima" INTEGER NOT NULL,
@@ -837,7 +808,6 @@ CREATE TABLE "politicas_limite_requisicoes" (
 CREATE TABLE "bloqueios_acesso" (
     "id" BIGSERIAL NOT NULL,
     "usuario_id" BIGINT,
-    "empresa_id" BIGINT,
     "credencial_api_id" BIGINT,
     "tipo_alvo" VARCHAR(30) NOT NULL,
     "valor_alvo" VARCHAR(255) NOT NULL,
@@ -858,7 +828,6 @@ CREATE TABLE "bloqueios_acesso" (
 CREATE TABLE "eventos_seguranca" (
     "id" BIGSERIAL NOT NULL,
     "usuario_id" BIGINT,
-    "empresa_id" BIGINT,
     "credencial_api_id" BIGINT,
     "tipo_evento" VARCHAR(50) NOT NULL,
     "severidade" VARCHAR(20) NOT NULL,
@@ -873,6 +842,103 @@ CREATE TABLE "eventos_seguranca" (
     CONSTRAINT "eventos_seguranca_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "saldos_adquirentes" (
+    "conta_provedor_id" BIGINT NOT NULL,
+    "moeda" VARCHAR(3) NOT NULL DEFAULT 'BRL',
+    "saldo_disponivel" DECIMAL(19,2) NOT NULL DEFAULT 0,
+    "saldo_bloqueado" DECIMAL(19,2) NOT NULL DEFAULT 0,
+    "consultado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "erro_ultima_consulta" TEXT,
+    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "atualizado_em" TIMESTAMPTZ NOT NULL,
+
+    CONSTRAINT "saldos_adquirentes_pkey" PRIMARY KEY ("conta_provedor_id")
+);
+
+-- CreateTable
+CREATE TABLE "gatilhos_saque_adquirente" (
+    "id" BIGSERIAL NOT NULL,
+    "id_publico" UUID NOT NULL,
+    "conta_provedor_id" BIGINT NOT NULL,
+    "nome" VARCHAR(120) NOT NULL,
+    "ativo" BOOLEAN NOT NULL DEFAULT true,
+    "ordem" INTEGER NOT NULL DEFAULT 0,
+    "valor_gatilho" DECIMAL(19,2) NOT NULL,
+    "valor_reserva" DECIMAL(19,2) NOT NULL DEFAULT 0,
+    "valor_minimo_payout" DECIMAL(19,2) NOT NULL DEFAULT 0,
+    "valor_maximo_payout" DECIMAL(19,2),
+    "chave_pix" VARCHAR(255) NOT NULL,
+    "tipo_chave_pix" "TipoChavePix" NOT NULL,
+    "nome_titular" VARCHAR(255),
+    "documento_titular" VARCHAR(20),
+    "intervalo_minimo_minutos" INTEGER NOT NULL DEFAULT 60,
+    "ultima_execucao_em" TIMESTAMPTZ,
+    "criado_por_usuario_id" BIGINT,
+    "atualizado_por_usuario_id" BIGINT,
+    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "atualizado_em" TIMESTAMPTZ NOT NULL,
+
+    CONSTRAINT "gatilhos_saque_adquirente_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "execucoes_gatilho_saque" (
+    "id" BIGSERIAL NOT NULL,
+    "id_publico" UUID NOT NULL,
+    "gatilho_id" BIGINT NOT NULL,
+    "conta_provedor_id" BIGINT NOT NULL,
+    "chave_idempotencia" VARCHAR(255) NOT NULL,
+    "origem" VARCHAR(20) NOT NULL DEFAULT 'AUTOMATICO',
+    "saldo_observado" DECIMAL(19,2) NOT NULL,
+    "valor_solicitado" DECIMAL(19,2) NOT NULL,
+    "situacao" VARCHAR(30) NOT NULL DEFAULT 'PENDENTE',
+    "id_transacao_liquidante" VARCHAR(255),
+    "mensagem_erro" TEXT,
+    "solicitado_por_usuario_id" BIGINT,
+    "metadados" JSONB NOT NULL DEFAULT '{}',
+    "concluido_em" TIMESTAMPTZ,
+    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "atualizado_em" TIMESTAMPTZ NOT NULL,
+
+    CONSTRAINT "execucoes_gatilho_saque_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "contingencia_adquirente" (
+    "id" BIGSERIAL NOT NULL,
+    "conta_provedor_id" BIGINT NOT NULL,
+    "ordem" INTEGER NOT NULL,
+    "ativo" BOOLEAN NOT NULL DEFAULT true,
+    "observacao" VARCHAR(255),
+    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "atualizado_em" TIMESTAMPTZ NOT NULL,
+
+    CONSTRAINT "contingencia_adquirente_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "falhas_adquirente" (
+    "id" BIGSERIAL NOT NULL,
+    "id_publico" UUID NOT NULL,
+    "transacao_id" BIGINT,
+    "conta_provedor_id" BIGINT NOT NULL,
+    "usuario_id" BIGINT,
+    "tipo" VARCHAR(30) NOT NULL,
+    "ordem_tentativa" INTEGER NOT NULL DEFAULT 0,
+    "mensagem" TEXT,
+    "status_http" INTEGER,
+    "codigo_erro" VARCHAR(100),
+    "dados_requisicao" JSONB,
+    "dados_resposta" JSONB,
+    "latencia_ms" INTEGER,
+    "resolvida_por_conta_provedor_id" BIGINT,
+    "resolvida_em" TIMESTAMPTZ,
+    "criado_em" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "falhas_adquirente_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "usuarios_id_publico_key" ON "usuarios"("id_publico");
 
@@ -883,25 +949,19 @@ CREATE UNIQUE INDEX "usuarios_cpf_cnpj_key" ON "usuarios"("cpf_cnpj");
 CREATE UNIQUE INDEX "usuarios_email_key" ON "usuarios"("email");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "empresas_id_publico_key" ON "empresas"("id_publico");
+CREATE INDEX "usuarios_situacao_idx" ON "usuarios"("situacao");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "empresas_cnpj_key" ON "empresas"("cnpj");
+CREATE INDEX "aceites_documentos_legais_usuario_id_idx" ON "aceites_documentos_legais"("usuario_id");
 
 -- CreateIndex
-CREATE INDEX "empresas_usuario_proprietario_id_idx" ON "empresas"("usuario_proprietario_id");
+CREATE UNIQUE INDEX "chaves_pix_usuarios_id_publico_key" ON "chaves_pix_usuarios"("id_publico");
 
 -- CreateIndex
-CREATE INDEX "empresas_situacao_idx" ON "empresas"("situacao");
+CREATE INDEX "chaves_pix_usuarios_usuario_id_situacao_idx" ON "chaves_pix_usuarios"("usuario_id", "situacao");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "empresas_id_usuario_proprietario_id_key" ON "empresas"("id", "usuario_proprietario_id");
-
--- CreateIndex
-CREATE INDEX "documentos_empresas_empresa_id_idx" ON "documentos_empresas"("empresa_id");
-
--- CreateIndex
-CREATE INDEX "historicos_situacoes_empresas_empresa_id_idx" ON "historicos_situacoes_empresas"("empresa_id");
+CREATE UNIQUE INDEX "chaves_pix_usuarios_usuario_id_chave_key" ON "chaves_pix_usuarios"("usuario_id", "chave");
 
 -- CreateIndex
 CREATE INDEX "documentos_usuarios_usuario_id_idx" ON "documentos_usuarios"("usuario_id");
@@ -919,19 +979,28 @@ CREATE UNIQUE INDEX "permissoes_codigo_key" ON "permissoes"("codigo");
 CREATE UNIQUE INDEX "tokens_redefinicao_senha_token_hash_key" ON "tokens_redefinicao_senha"("token_hash");
 
 -- CreateIndex
+CREATE INDEX "auditorias_acesso_usuario_id_sucesso_ocorrido_em_idx" ON "auditorias_acesso"("usuario_id", "sucesso", "ocorrido_em");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "credenciais_api_chave_publica_key" ON "credenciais_api"("chave_publica");
 
 -- CreateIndex
-CREATE INDEX "credenciais_api_empresa_id_idx" ON "credenciais_api"("empresa_id");
+CREATE INDEX "credenciais_api_usuario_id_idx" ON "credenciais_api"("usuario_id");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "credenciais_api_empresa_id_nome_key" ON "credenciais_api"("empresa_id", "nome");
+CREATE UNIQUE INDEX "credenciais_api_usuario_id_nome_key" ON "credenciais_api"("usuario_id", "nome");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ips_permitidos_api_credencial_api_id_ip_ou_cidr_key" ON "ips_permitidos_api"("credencial_api_id", "ip_ou_cidr");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "provedores_pagamento_codigo_key" ON "provedores_pagamento"("codigo");
+
+-- CreateIndex
+CREATE INDEX "liberacoes_adquirente_usuario_usuario_id_idx" ON "liberacoes_adquirente_usuario"("usuario_id");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "liberacoes_adquirente_usuario_provedor_pagamento_id_usuario_key" ON "liberacoes_adquirente_usuario"("provedor_pagamento_id", "usuario_id");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ips_permitidos_webhook_provedor_provedor_pagamento_id_ip_ou_key" ON "ips_permitidos_webhook_provedor"("provedor_pagamento_id", "ip_ou_cidr");
@@ -946,13 +1015,16 @@ CREATE INDEX "contas_provedor_provedor_pagamento_id_idx" ON "contas_provedor"("p
 CREATE UNIQUE INDEX "configuracoes_padrao_pix_usuarios_nome_key" ON "configuracoes_padrao_pix_usuarios"("nome");
 
 -- CreateIndex
+CREATE INDEX "configuracoes_pix_usuarios_conta_provedor_pix_entrada_id_idx" ON "configuracoes_pix_usuarios"("conta_provedor_pix_entrada_id");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "transacoes_id_transacao_publico_key" ON "transacoes"("id_transacao_publico");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "transacoes_id_transacao_privado_key" ON "transacoes"("id_transacao_privado");
 
 -- CreateIndex
-CREATE INDEX "transacoes_empresa_id_idx" ON "transacoes"("empresa_id");
+CREATE INDEX "transacoes_usuario_id_idx" ON "transacoes"("usuario_id");
 
 -- CreateIndex
 CREATE INDEX "transacoes_situacao_idx" ON "transacoes"("situacao");
@@ -961,7 +1033,10 @@ CREATE INDEX "transacoes_situacao_idx" ON "transacoes"("situacao");
 CREATE INDEX "transacoes_criado_em_idx" ON "transacoes"("criado_em");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "transacoes_empresa_id_referencia_externa_key" ON "transacoes"("empresa_id", "referencia_externa");
+CREATE INDEX "transacoes_usuario_id_criado_em_idx" ON "transacoes"("usuario_id", "criado_em");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "transacoes_usuario_id_referencia_externa_key" ON "transacoes"("usuario_id", "referencia_externa");
 
 -- CreateIndex
 CREATE INDEX "transacoes_pix_txid_idx" ON "transacoes_pix"("txid");
@@ -970,13 +1045,19 @@ CREATE INDEX "transacoes_pix_txid_idx" ON "transacoes_pix"("txid");
 CREATE INDEX "transacoes_pix_identificador_fim_a_fim_idx" ON "transacoes_pix"("identificador_fim_a_fim");
 
 -- CreateIndex
+CREATE INDEX "itens_cobranca_transacao_id_idx" ON "itens_cobranca"("transacao_id");
+
+-- CreateIndex
+CREATE INDEX "tentativas_transacoes_id_transacao_liquidante_idx" ON "tentativas_transacoes"("id_transacao_liquidante");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "tentativas_transacoes_transacao_id_numero_tentativa_key" ON "tentativas_transacoes"("transacao_id", "numero_tentativa");
 
 -- CreateIndex
 CREATE INDEX "historicos_situacoes_transacoes_transacao_id_idx" ON "historicos_situacoes_transacoes"("transacao_id");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "chaves_idempotencia_empresa_id_chave_idempotencia_key" ON "chaves_idempotencia"("empresa_id", "chave_idempotencia");
+CREATE UNIQUE INDEX "chaves_idempotencia_usuario_id_chave_idempotencia_key" ON "chaves_idempotencia"("usuario_id", "chave_idempotencia");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "devolucoes_pix_id_devolucao_publico_key" ON "devolucoes_pix"("id_devolucao_publico");
@@ -988,7 +1069,7 @@ CREATE UNIQUE INDEX "movimentacoes_saldo_id_publico_key" ON "movimentacoes_saldo
 CREATE UNIQUE INDEX "movimentacoes_saldo_chave_idempotencia_key" ON "movimentacoes_saldo"("chave_idempotencia");
 
 -- CreateIndex
-CREATE INDEX "movimentacoes_saldo_empresa_id_idx" ON "movimentacoes_saldo"("empresa_id");
+CREATE INDEX "movimentacoes_saldo_usuario_id_idx" ON "movimentacoes_saldo"("usuario_id");
 
 -- CreateIndex
 CREATE INDEX "movimentacoes_saldo_transacao_id_idx" ON "movimentacoes_saldo"("transacao_id");
@@ -1021,6 +1102,9 @@ CREATE INDEX "casos_med_situacao_idx" ON "casos_med"("situacao");
 CREATE INDEX "historicos_casos_med_caso_med_id_idx" ON "historicos_casos_med"("caso_med_id");
 
 -- CreateIndex
+CREATE INDEX "configuracoes_webhook_usuario_usuario_id_idx" ON "configuracoes_webhook_usuario"("usuario_id");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "webhooks_recebidos_provedor_chave_idempotencia_key" ON "webhooks_recebidos_provedor"("chave_idempotencia");
 
 -- CreateIndex
@@ -1038,26 +1122,59 @@ CREATE INDEX "registros_auditoria_criado_em_idx" ON "registros_auditoria"("criad
 -- CreateIndex
 CREATE INDEX "eventos_seguranca_ocorrido_em_idx" ON "eventos_seguranca"("ocorrido_em");
 
+-- CreateIndex
+CREATE UNIQUE INDEX "gatilhos_saque_adquirente_id_publico_key" ON "gatilhos_saque_adquirente"("id_publico");
+
+-- CreateIndex
+CREATE INDEX "gatilhos_saque_adquirente_conta_provedor_id_ativo_idx" ON "gatilhos_saque_adquirente"("conta_provedor_id", "ativo");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "execucoes_gatilho_saque_id_publico_key" ON "execucoes_gatilho_saque"("id_publico");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "execucoes_gatilho_saque_chave_idempotencia_key" ON "execucoes_gatilho_saque"("chave_idempotencia");
+
+-- CreateIndex
+CREATE INDEX "execucoes_gatilho_saque_gatilho_id_criado_em_idx" ON "execucoes_gatilho_saque"("gatilho_id", "criado_em");
+
+-- CreateIndex
+CREATE INDEX "execucoes_gatilho_saque_situacao_idx" ON "execucoes_gatilho_saque"("situacao");
+
+-- CreateIndex
+CREATE INDEX "execucoes_gatilho_saque_criado_em_idx" ON "execucoes_gatilho_saque"("criado_em");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "contingencia_adquirente_conta_provedor_id_key" ON "contingencia_adquirente"("conta_provedor_id");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "contingencia_adquirente_ordem_key" ON "contingencia_adquirente"("ordem");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "falhas_adquirente_id_publico_key" ON "falhas_adquirente"("id_publico");
+
+-- CreateIndex
+CREATE INDEX "falhas_adquirente_criado_em_idx" ON "falhas_adquirente"("criado_em");
+
+-- CreateIndex
+CREATE INDEX "falhas_adquirente_conta_provedor_id_criado_em_idx" ON "falhas_adquirente"("conta_provedor_id", "criado_em");
+
+-- CreateIndex
+CREATE INDEX "falhas_adquirente_tipo_idx" ON "falhas_adquirente"("tipo");
+
+-- CreateIndex
+CREATE INDEX "falhas_adquirente_transacao_id_idx" ON "falhas_adquirente"("transacao_id");
+
 -- AddForeignKey
 ALTER TABLE "usuarios" ADD CONSTRAINT "usuarios_ativado_por_usuario_id_fkey" FOREIGN KEY ("ativado_por_usuario_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "empresas" ADD CONSTRAINT "empresas_usuario_proprietario_id_fkey" FOREIGN KEY ("usuario_proprietario_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "aceites_documentos_legais" ADD CONSTRAINT "aceites_documentos_legais_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "empresas" ADD CONSTRAINT "empresas_ativada_por_usuario_id_fkey" FOREIGN KEY ("ativada_por_usuario_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "chaves_pix_usuarios" ADD CONSTRAINT "chaves_pix_usuarios_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "empresas" ADD CONSTRAINT "empresas_criado_por_usuario_id_fkey" FOREIGN KEY ("criado_por_usuario_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "documentos_empresas" ADD CONSTRAINT "documentos_empresas_empresa_id_fkey" FOREIGN KEY ("empresa_id") REFERENCES "empresas"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "analises_cadastro_empresas" ADD CONSTRAINT "analises_cadastro_empresas_empresa_id_fkey" FOREIGN KEY ("empresa_id") REFERENCES "empresas"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "historicos_situacoes_empresas" ADD CONSTRAINT "historicos_situacoes_empresas_empresa_id_fkey" FOREIGN KEY ("empresa_id") REFERENCES "empresas"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "chaves_pix_usuarios" ADD CONSTRAINT "chaves_pix_usuarios_aprovada_por_usuario_id_fkey" FOREIGN KEY ("aprovada_por_usuario_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "documentos_usuarios" ADD CONSTRAINT "documentos_usuarios_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -1090,13 +1207,16 @@ ALTER TABLE "auditorias_acesso" ADD CONSTRAINT "auditorias_acesso_usuario_id_fke
 ALTER TABLE "credenciais_api" ADD CONSTRAINT "credenciais_api_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "credenciais_api" ADD CONSTRAINT "credenciais_api_empresa_id_fkey" FOREIGN KEY ("empresa_id") REFERENCES "empresas"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "ips_permitidos_api" ADD CONSTRAINT "ips_permitidos_api_credencial_api_id_fkey" FOREIGN KEY ("credencial_api_id") REFERENCES "credenciais_api"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "registros_acesso_api" ADD CONSTRAINT "registros_acesso_api_credencial_api_id_fkey" FOREIGN KEY ("credencial_api_id") REFERENCES "credenciais_api"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "liberacoes_adquirente_usuario" ADD CONSTRAINT "liberacoes_adquirente_usuario_provedor_pagamento_id_fkey" FOREIGN KEY ("provedor_pagamento_id") REFERENCES "provedores_pagamento"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "liberacoes_adquirente_usuario" ADD CONSTRAINT "liberacoes_adquirente_usuario_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ips_permitidos_webhook_provedor" ADD CONSTRAINT "ips_permitidos_webhook_provedor_provedor_pagamento_id_fkey" FOREIGN KEY ("provedor_pagamento_id") REFERENCES "provedores_pagamento"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -1106,9 +1226,6 @@ ALTER TABLE "contas_provedor" ADD CONSTRAINT "contas_provedor_provedor_pagamento
 
 -- AddForeignKey
 ALTER TABLE "contas_provedor" ADD CONSTRAINT "contas_provedor_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "contas_provedor" ADD CONSTRAINT "contas_provedor_empresa_id_fkey" FOREIGN KEY ("empresa_id") REFERENCES "empresas"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "custos_pix_contas_provedor" ADD CONSTRAINT "custos_pix_contas_provedor_conta_provedor_id_fkey" FOREIGN KEY ("conta_provedor_id") REFERENCES "contas_provedor"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -1132,16 +1249,7 @@ ALTER TABLE "configuracoes_pix_usuarios" ADD CONSTRAINT "configuracoes_pix_usuar
 ALTER TABLE "configuracoes_pix_usuarios" ADD CONSTRAINT "configuracoes_pix_usuarios_conta_provedor_pix_saida_id_fkey" FOREIGN KEY ("conta_provedor_pix_saida_id") REFERENCES "contas_provedor"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "configuracoes_pix_empresas" ADD CONSTRAINT "configuracoes_pix_empresas_empresa_id_fkey" FOREIGN KEY ("empresa_id") REFERENCES "empresas"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "configuracoes_pix_empresas" ADD CONSTRAINT "configuracoes_pix_empresas_conta_provedor_pix_entrada_id_fkey" FOREIGN KEY ("conta_provedor_pix_entrada_id") REFERENCES "contas_provedor"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "configuracoes_pix_empresas" ADD CONSTRAINT "configuracoes_pix_empresas_conta_provedor_pix_saida_id_fkey" FOREIGN KEY ("conta_provedor_pix_saida_id") REFERENCES "contas_provedor"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "transacoes" ADD CONSTRAINT "transacoes_empresa_id_fkey" FOREIGN KEY ("empresa_id") REFERENCES "empresas"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "transacoes" ADD CONSTRAINT "transacoes_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "transacoes" ADD CONSTRAINT "transacoes_credencial_api_id_fkey" FOREIGN KEY ("credencial_api_id") REFERENCES "credenciais_api"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -1154,6 +1262,9 @@ ALTER TABLE "transacoes" ADD CONSTRAINT "transacoes_transacao_origem_id_fkey" FO
 
 -- AddForeignKey
 ALTER TABLE "transacoes_pix" ADD CONSTRAINT "transacoes_pix_transacao_id_fkey" FOREIGN KEY ("transacao_id") REFERENCES "transacoes"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "itens_cobranca" ADD CONSTRAINT "itens_cobranca_transacao_id_fkey" FOREIGN KEY ("transacao_id") REFERENCES "transacoes"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "tentativas_transacoes" ADD CONSTRAINT "tentativas_transacoes_transacao_id_fkey" FOREIGN KEY ("transacao_id") REFERENCES "transacoes"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -1177,7 +1288,7 @@ ALTER TABLE "devolucoes_pix" ADD CONSTRAINT "devolucoes_pix_transacao_id_fkey" F
 ALTER TABLE "devolucoes_pix" ADD CONSTRAINT "devolucoes_pix_caso_med_id_fkey" FOREIGN KEY ("caso_med_id") REFERENCES "casos_med"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "saldos_empresas" ADD CONSTRAINT "saldos_empresas_empresa_id_fkey" FOREIGN KEY ("empresa_id") REFERENCES "empresas"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "saldos_usuarios" ADD CONSTRAINT "saldos_usuarios_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "movimentacoes_saldo" ADD CONSTRAINT "movimentacoes_saldo_transacao_id_fkey" FOREIGN KEY ("transacao_id") REFERENCES "transacoes"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -1201,6 +1312,9 @@ ALTER TABLE "liberacoes_saldo" ADD CONSTRAINT "liberacoes_saldo_movimentacao_lib
 ALTER TABLE "bloqueios_saldo" ADD CONSTRAINT "bloqueios_saldo_caso_med_id_fkey" FOREIGN KEY ("caso_med_id") REFERENCES "casos_med"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "casos_med" ADD CONSTRAINT "casos_med_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "casos_med" ADD CONSTRAINT "casos_med_transacao_id_fkey" FOREIGN KEY ("transacao_id") REFERENCES "transacoes"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -1216,10 +1330,31 @@ ALTER TABLE "webhooks_recebidos_provedor" ADD CONSTRAINT "webhooks_recebidos_pro
 ALTER TABLE "entregas_webhook" ADD CONSTRAINT "entregas_webhook_evento_outbox_id_fkey" FOREIGN KEY ("evento_outbox_id") REFERENCES "eventos_outbox"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "entregas_webhook" ADD CONSTRAINT "entregas_webhook_configuracao_webhook_id_fkey" FOREIGN KEY ("configuracao_webhook_id") REFERENCES "configuracoes_webhook_empresa"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "entregas_webhook" ADD CONSTRAINT "entregas_webhook_configuracao_webhook_id_fkey" FOREIGN KEY ("configuracao_webhook_id") REFERENCES "configuracoes_webhook_usuario"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
--- FK composta: credencial pertence ao proprietario da empresa
-ALTER TABLE credenciais_api
-  ADD CONSTRAINT credenciais_api_empresa_usuario_fk
-  FOREIGN KEY (empresa_id, usuario_id)
-  REFERENCES empresas (id, usuario_proprietario_id);
+-- AddForeignKey
+ALTER TABLE "saldos_adquirentes" ADD CONSTRAINT "saldos_adquirentes_conta_provedor_id_fkey" FOREIGN KEY ("conta_provedor_id") REFERENCES "contas_provedor"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "gatilhos_saque_adquirente" ADD CONSTRAINT "gatilhos_saque_adquirente_conta_provedor_id_fkey" FOREIGN KEY ("conta_provedor_id") REFERENCES "contas_provedor"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "execucoes_gatilho_saque" ADD CONSTRAINT "execucoes_gatilho_saque_gatilho_id_fkey" FOREIGN KEY ("gatilho_id") REFERENCES "gatilhos_saque_adquirente"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "execucoes_gatilho_saque" ADD CONSTRAINT "execucoes_gatilho_saque_conta_provedor_id_fkey" FOREIGN KEY ("conta_provedor_id") REFERENCES "contas_provedor"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "contingencia_adquirente" ADD CONSTRAINT "contingencia_adquirente_conta_provedor_id_fkey" FOREIGN KEY ("conta_provedor_id") REFERENCES "contas_provedor"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "falhas_adquirente" ADD CONSTRAINT "falhas_adquirente_transacao_id_fkey" FOREIGN KEY ("transacao_id") REFERENCES "transacoes"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "falhas_adquirente" ADD CONSTRAINT "falhas_adquirente_conta_provedor_id_fkey" FOREIGN KEY ("conta_provedor_id") REFERENCES "contas_provedor"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "falhas_adquirente" ADD CONSTRAINT "falhas_adquirente_resolvida_por_conta_provedor_id_fkey" FOREIGN KEY ("resolvida_por_conta_provedor_id") REFERENCES "contas_provedor"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "falhas_adquirente" ADD CONSTRAINT "falhas_adquirente_usuario_id_fkey" FOREIGN KEY ("usuario_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;

@@ -1,6 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import * as argon2 from 'argon2';
-import * as ipaddr from 'ipaddr.js';
+import { ipAllowed } from '../ip-allowlist.util';
 import {
   money,
   SITUACAO_EXECUCAO_SAQUE,
@@ -25,24 +25,6 @@ const mockCharges = new Map<
   string,
   { status: GetStatusResult['status']; valor: string; paid?: boolean }
 >();
-
-function ipAllowed(clientIp: string, allowed: string[]): boolean {
-  if (allowed.length === 0) return true;
-  const normalized = clientIp.replace('::ffff:', '');
-  return allowed.some((a) => {
-    try {
-      if (a === '0.0.0.0/0' || a === '::/0') return true;
-      if (a.includes('/')) {
-        const cidr = ipaddr.parseCIDR(a);
-        const parsed = ipaddr.process(normalized);
-        return parsed.kind() === cidr[0].kind() && parsed.match(cidr);
-      }
-      return ipaddr.process(normalized).toString() === ipaddr.process(a).toString();
-    } catch {
-      return normalized === a;
-    }
-  });
-}
 
 @Injectable()
 export class MockPaymentProvider implements PaymentProviderPort {

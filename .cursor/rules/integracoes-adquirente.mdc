@@ -1,0 +1,78 @@
+---
+description: Padrão de segurança obrigatório para novas integrações de adquirente/liquidante PIX
+alwaysApply: true
+globs: "**/providers/**,**/worker-processors/**,*webhook*"
+---
+
+# Novas integrações de adquirente — padrão de segurança
+
+Contrato mínimo: **consultar a liquidante antes de mover dinheiro**, proteger o
+webhook o máximo que o provedor permitir, **nunca pagar/creditar em
+duplicidade**, e tratar resposta ambígua com cautela — especialmente no saque.
+Implementar `PaymentProviderPort` completo (`src/providers/payment-provider.port.ts`);
+referência: `src/providers/valorion/`.
+
+## Webhooks — nunca confiar só no aviso
+
+Toda liquidação (pago, estorno, saque, devolução) passa por duas camadas:
+
+1. **Camada 1 (obrigatória):** antes de creditar ou fechar status, consultar a
+   API da própria liquidante (`getStatus`) e só agir se o status real bater.
+   É a proteção principal contra webhook forjado.
+2. **Camada 2 (transporte):** quando a adquirente oferece — allowlist de IP,
+   assinatura HMAC e/ou token. Preferência: IP + consulta → HMAC/token +
+   consulta → só consulta (mínimo aceitável).
+
+Responder **200 mesmo ao descartar** a entrega (duplicada/ignorada) para não
+gerar tempestade de retries. 401/400 só para transporte inválido.
+
+## Credenciais e comunicação
+
+- Credenciais só em env / `credenciaisCriptografadas` por conta de provedor;
+  nunca no código; mascaradas nos logs.
+- Outbound com autenticação oficial deles (OAuth, Basic, API key), TLS
+  verificado e timeout explícito.
+
+## Idempotência e anti-duplicidade
+
+- Dedupe de webhooks (`chaveIdempotencia`) e de jobs — mesmo evento nunca
+  processa duas vezes. Mesmo id com status diferente (pago → MED): o status
+  entra na chave.
+- Saque: chave de idempotência quando a API oferece; se a adquirente NÃO tem,
+  resposta ambígua (timeout/5xx) **congela** o fluxo — sem retry automático que
+  possa pagar duas vezes; reconciliação manual.
+- Crédito de saldo idempotente (chaves `cashin:*` no ledger) — webhook repetido
+  não "soma de novo".
+
+## Controles de conta e saque
+
+Usuário aprovado e habilitado. Cash-out: validar documento, tipo de chave,
+ownership da chave, allowlist de IP da credencial e revalidar elegibilidade no
+retry. Tentativa abusiva pode desligar o saque da conta. Lock e rate limit por
+usuário.
+
+## Proteção financeira na máquina de estados
+
+- Não reprocessar crédito em venda já terminal ou retida.
+- Não rebaixar saque concluído por webhook de falha tardio.
+- Devolução de saque só com confirmação na API da liquidante.
+- Falha pós-crédito (saldo/callback) não pode fazer o retry "pular" o crédito.
+
+## Contingência e disponibilidade
+
+Timeout na criação do PIX; adquirente falhou → cadeia de contingência na MESMA
+transação. Muitas falhas em pouco tempo podem trocar o gateway padrão dos
+usuários automaticamente.
+
+## Saldo na liquidante
+
+A cada transação **paga** recebida, consultar o saldo da nossa conta na
+liquidante (`getBalance`) — mantém `saldos_adquirentes` fiel e alimenta
+tesouraria e gatilhos de saque automático. Sem endpoint de saldo, derivar do
+movimento (ver mock).
+
+## Operação no painel
+
+Ativar/desativar adquirente, contingência e saque automático exigem permissão
+(`PERMISSOES.*`) e, em mutações críticas, 2FA. Toda ação auditada com
+antes/depois.

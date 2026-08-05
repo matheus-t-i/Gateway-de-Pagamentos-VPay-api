@@ -3,7 +3,6 @@ import {
   Body,
   Controller,
   Delete,
-  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -15,16 +14,17 @@ import {
 import {
   criarChavePixSchema,
   decidirChavePixSchema,
-  PAPEIS,
+  PERMISSOES,
   SITUACAO_CHAVE_PIX,
-  SITUACAO_EMPRESA,
+  SITUACAO_USUARIO,
   TIPOS_EMAIL,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueuesService } from '../queues/queues.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { JwtAuthGuard, type UsuarioAutenticado } from '../auth/jwt-auth.guard';
+import { RequerPermissao } from '../auth/permissoes.decorator';
 
-type Req = { user: { id: string; papeis: string[] } };
+type Req = { user: UsuarioAutenticado };
 
 function mapChave(c: {
   idPublico: string;
@@ -54,50 +54,45 @@ function mapChave(c: {
  * Chaves PIX de saque do cliente. O cliente cadastra; o saque pelo painel só é
  * liberado depois que um ADMINISTRADOR aprova a chave.
  */
-@Controller('painel/empresas/:empresaIdPublico/chaves-pix')
+@Controller('painel/chaves-pix')
 @UseGuards(JwtAuthGuard)
 export class ChavesPixController {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async getEmpresa(idPublico: string, user: Req['user']) {
-    const empresa = await this.prisma.empresa.findUnique({ where: { idPublico } });
-    if (!empresa) throw new NotFoundException('Empresa não encontrada');
-    const isAdmin = user.papeis.includes(PAPEIS.ADMINISTRADOR);
-    if (!isAdmin && empresa.usuarioProprietarioId.toString() !== user.id) {
-      throw new ForbiddenException('Sem acesso a esta empresa');
-    }
-    return empresa;
+  private async conta(user: Req['user']) {
+    const usuario = await this.prisma.usuario.findUnique({
+      where: { id: BigInt(user.id) },
+    });
+    if (!usuario) throw new NotFoundException('Conta não encontrada');
+    return usuario;
   }
 
   @Get()
-  async listar(
-    @Param('empresaIdPublico') empresaIdPublico: string,
-    @Req() req: Req,
-  ) {
-    const empresa = await this.getEmpresa(empresaIdPublico, req.user);
-    const rows = await this.prisma.chavePixEmpresa.findMany({
-      where: { empresaId: empresa.id, situacao: { not: SITUACAO_CHAVE_PIX.INATIVA } },
+  @RequerPermissao(PERMISSOES.CHAVES_PIX_VER)
+  async listar(@Req() req: Req) {
+    const rows = await this.prisma.chavePixUsuario.findMany({
+      where: {
+        usuarioId: BigInt(req.user.id),
+        situacao: { not: SITUACAO_CHAVE_PIX.INATIVA },
+      },
       orderBy: { criadoEm: 'desc' },
     });
     return rows.map(mapChave);
   }
 
   @Post()
-  async criar(
-    @Param('empresaIdPublico') empresaIdPublico: string,
-    @Body() body: unknown,
-    @Req() req: Req,
-  ) {
+  @RequerPermissao(PERMISSOES.CHAVES_PIX_CRIAR)
+  async criar(@Body() body: unknown, @Req() req: Req) {
     const parsed = criarChavePixSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
-    const empresa = await this.getEmpresa(empresaIdPublico, req.user);
-    if (empresa.situacao !== SITUACAO_EMPRESA.ATIVA) {
-      throw new BadRequestException('Empresa não está ativa.');
+    const usuario = await this.conta(req.user);
+    if (usuario.situacao !== SITUACAO_USUARIO.ATIVO) {
+      throw new BadRequestException('Conta não está ativa.');
     }
 
-    const criada = await this.prisma.chavePixEmpresa.create({
+    const criada = await this.prisma.chavePixUsuario.create({
       data: {
-        empresaId: empresa.id,
+        usuarioId: usuario.id,
         apelido: parsed.data.apelido,
         chave: parsed.data.chave,
         tipoChave: parsed.data.tipoChave,
@@ -113,16 +108,15 @@ export class ChavesPixController {
 
   /** Remoção lógica — preserva o vínculo com saques já realizados. */
   @Delete(':chaveIdPublico')
+  @RequerPermissao(PERMISSOES.CHAVES_PIX_EXCLUIR)
   async remover(
-    @Param('empresaIdPublico') empresaIdPublico: string,
     @Param('chaveIdPublico') chaveIdPublico: string,
     @Req() req: Req,
   ) {
-    const empresa = await this.getEmpresa(empresaIdPublico, req.user);
-    const r = await this.prisma.chavePixEmpresa.updateMany({
+    const r = await this.prisma.chavePixUsuario.updateMany({
       where: {
         idPublico: chaveIdPublico,
-        empresaId: empresa.id,
+        usuarioId: BigInt(req.user.id),
         situacao: { not: SITUACAO_CHAVE_PIX.INATIVA },
       },
       data: { situacao: SITUACAO_CHAVE_PIX.INATIVA },
@@ -141,15 +135,9 @@ export class AdminChavesPixController {
     private readonly queues: QueuesService,
   ) {}
 
-  private assertAdmin(req: Req) {
-    if (!req.user.papeis.includes(PAPEIS.ADMINISTRADOR)) {
-      throw new ForbiddenException('Somente ADMINISTRADOR');
-    }
-  }
-
   @Get()
-  async listar(@Query('situacao') situacao: string | undefined, @Req() req: Req) {
-    this.assertAdmin(req);
+  @RequerPermissao(PERMISSOES.ADMIN_CHAVES_PIX_VER)
+  async listar(@Query('situacao') situacao: string | undefined) {
     const validas: string[] = [
       SITUACAO_CHAVE_PIX.PENDENTE,
       SITUACAO_CHAVE_PIX.APROVADA,
@@ -159,31 +147,45 @@ export class AdminChavesPixController {
     if (situacao && !validas.includes(situacao)) {
       throw new BadRequestException('situacao inválida');
     }
-    const rows = await this.prisma.chavePixEmpresa.findMany({
+    const rows = await this.prisma.chavePixUsuario.findMany({
       where: { situacao: (situacao as never) ?? SITUACAO_CHAVE_PIX.PENDENTE },
       orderBy: { criadoEm: 'asc' },
       take: 200,
       include: {
-        empresa: {
-          select: { idPublico: true, razaoSocial: true, cnpj: true, situacao: true },
+        usuario: {
+          select: {
+            idPublico: true,
+            nomeRazaoSocial: true,
+            cpfCnpj: true,
+            situacao: true,
+          },
         },
       },
     });
-    return rows.map((c) => ({ ...mapChave(c), empresa: c.empresa }));
+    return rows.map((c) => ({
+      ...mapChave(c),
+      cliente: {
+        idPublico: c.usuario.idPublico,
+        nome: c.usuario.nomeRazaoSocial,
+        cpfCnpj: c.usuario.cpfCnpj,
+        situacao: c.usuario.situacao,
+      },
+    }));
   }
 
   @Post(':chaveIdPublico/decidir')
+  @RequerPermissao(PERMISSOES.ADMIN_CHAVES_PIX_APROVAR)
   async decidir(
     @Param('chaveIdPublico') chaveIdPublico: string,
     @Body() body: unknown,
     @Req() req: Req,
   ) {
-    this.assertAdmin(req);
     const parsed = decidirChavePixSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
 
-    const chave = await this.prisma.chavePixEmpresa.findUnique({
+    const chave = await this.prisma.chavePixUsuario.findUnique({
       where: { idPublico: chaveIdPublico },
+      include: { usuario: { select: { email: true, nomeRazaoSocial: true } } },
     });
     if (!chave) throw new NotFoundException('Chave não encontrada');
     if (chave.situacao !== SITUACAO_CHAVE_PIX.PENDENTE) {
@@ -196,7 +198,7 @@ export class AdminChavesPixController {
     }
 
     const atualizada = await this.prisma.$transaction(async (tx) => {
-      const c = await tx.chavePixEmpresa.update({
+      const c = await tx.chavePixUsuario.update({
         where: { id: chave.id },
         data: {
           situacao: parsed.data.situacao,
@@ -210,12 +212,12 @@ export class AdminChavesPixController {
       });
       await tx.registroAuditoria.create({
         data: {
-          empresaAfetadaId: chave.empresaId,
+          usuarioAfetadoId: chave.usuarioId,
           usuarioAtorId: BigInt(req.user.id),
           origem: 'PAINEL',
           operacao: 'ACAO_NEGOCIO',
           acao: `CHAVE_PIX_${parsed.data.situacao}`,
-          nomeTabela: 'chaves_pix_empresas',
+          nomeTabela: 'chaves_pix_usuarios',
           chaveRegistro: chave.id.toString(),
         },
       });
@@ -223,24 +225,18 @@ export class AdminChavesPixController {
     });
 
     // O cliente precisa saber: sem chave aprovada ele não consegue sacar.
-    const dono = await this.prisma.empresa.findUnique({
-      where: { id: chave.empresaId },
-      include: { usuarioProprietario: { select: { email: true, nomeRazaoSocial: true } } },
+    await this.queues.enqueueEmail({
+      tipo:
+        parsed.data.situacao === SITUACAO_CHAVE_PIX.APROVADA
+          ? TIPOS_EMAIL.CHAVE_PIX_APROVADA
+          : TIPOS_EMAIL.CHAVE_PIX_REPROVADA,
+      para: chave.usuario.email,
+      nome: chave.usuario.nomeRazaoSocial,
+      dados: {
+        chave: chave.chave,
+        ...(parsed.data.motivo ? { motivo: parsed.data.motivo } : {}),
+      },
     });
-    if (dono) {
-      await this.queues.enqueueEmail({
-        tipo:
-          parsed.data.situacao === SITUACAO_CHAVE_PIX.APROVADA
-            ? TIPOS_EMAIL.CHAVE_PIX_APROVADA
-            : TIPOS_EMAIL.CHAVE_PIX_REPROVADA,
-        para: dono.usuarioProprietario.email,
-        nome: dono.usuarioProprietario.nomeRazaoSocial,
-        dados: {
-          chave: chave.chave,
-          ...(parsed.data.motivo ? { motivo: parsed.data.motivo } : {}),
-        },
-      });
-    }
 
     return mapChave(atualizada);
   }

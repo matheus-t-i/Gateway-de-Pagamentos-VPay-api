@@ -100,7 +100,7 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
       throw new Error(`Camada1 não confirmou pagamento: ${remote.status}`);
     }
 
-    const cfg = await this.configPix.resolverEfetiva(tx.empresaId);
+    const cfg = await this.configPix.resolverEfetiva(tx.usuarioId);
     const valorReserva = money(tx.valorReserva.toString());
     const valorLiquido = money(tx.valorLiquidacaoEmpresa.toString());
     const valorPrincipal = valorLiquido.minus(valorReserva);
@@ -140,7 +140,7 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
     }
 
     const ledgerResult = await this.ledger.aplicarMovimentacoes({
-      empresaId: tx.empresaId,
+      usuarioId: tx.usuarioId,
       permiteSaldoNegativo: cfg.permiteSaldoNegativo,
       entries,
       outbox: {
@@ -185,14 +185,14 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
           data: {
             situacao: SITUACAO_WEBHOOK_RECEBIDO.PROCESSADO,
             processadoEm: new Date(),
-            empresaId: tx.empresaId,
+            usuarioId: tx.usuarioId,
           },
         });
       }
       if (cfg.diasLiberacaoSaldo > 0) {
         await db.liberacaoSaldo.create({
           data: {
-            empresaId: tx.empresaId,
+            usuarioId: tx.usuarioId,
             transacaoId: tx.id,
             tipoLiberacao: 'SALDO_PRINCIPAL',
             valor: valorPrincipal.toFixed(2),
@@ -204,7 +204,7 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
       if (valorReserva.gt(0) && tx.liberarReservaEm) {
         await db.liberacaoSaldo.create({
           data: {
-            empresaId: tx.empresaId,
+            usuarioId: tx.usuarioId,
             transacaoId: tx.id,
             tipoLiberacao: 'RESERVA',
             valor: valorReserva.toFixed(2),

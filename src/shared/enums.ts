@@ -46,26 +46,25 @@ export const DOCUMENTOS_OBRIGATORIOS_USUARIO: TipoDocumento[] = [
   TIPOS_DOCUMENTO.SELFIE_COM_DOCUMENTO,
 ];
 
-/** Documentos da empresa — exigidos SOMENTE de PJ. */
-export const DOCUMENTOS_OBRIGATORIOS_EMPRESA_PJ: TipoDocumento[] = [
+/** Documentos da pessoa jurídica — exigidos SOMENTE de PJ. */
+export const DOCUMENTOS_OBRIGATORIOS_PJ: TipoDocumento[] = [
   TIPOS_DOCUMENTO.CONTRATO_SOCIAL,
   TIPOS_DOCUMENTO.CARTAO_CNPJ,
   TIPOS_DOCUMENTO.COMPROVANTE_ENDERECO_EMPRESA,
 ];
 
 /**
- * Para PF a "empresa" é a própria pessoa (mesmos dados), então não há
- * documentação de empresa a exigir — só a documentação pessoal.
+ * Lista completa exigida da conta. PF é só a documentação pessoal — a pessoa
+ * física É a conta e não há CNPJ a comprovar. PJ soma os documentos da empresa.
  */
-export function documentosObrigatoriosEmpresa(
-  tipoPessoa: 'PF' | 'PJ',
-): TipoDocumento[] {
-  return tipoPessoa === 'PJ' ? DOCUMENTOS_OBRIGATORIOS_EMPRESA_PJ : [];
+export function documentosObrigatorios(tipoPessoa: 'PF' | 'PJ'): TipoDocumento[] {
+  return tipoPessoa === 'PJ'
+    ? [...DOCUMENTOS_OBRIGATORIOS_USUARIO, ...DOCUMENTOS_OBRIGATORIOS_PJ]
+    : [...DOCUMENTOS_OBRIGATORIOS_USUARIO];
 }
 
-/** Situações de conta que emitem JWT no login (única aprovada). */
+/** Situação de conta que emite JWT no login (única aprovada). */
 export const SITUACAO_USUARIO_ATIVO = 'ATIVO';
-export const SITUACAO_EMPRESA_ATIVA = 'ATIVA';
 
 /**
  * Documentos legais aceitos eletronicamente no cadastro (assinatura digital

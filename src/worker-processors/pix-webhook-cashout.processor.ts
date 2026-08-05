@@ -94,7 +94,7 @@ export class PixWebhookCashoutProcessor extends WorkerHost {
               data: {
                 situacao: SITUACAO_WEBHOOK_RECEBIDO.PROCESSADO,
                 processadoEm: new Date(),
-                empresaId: tx.empresaId,
+                usuarioId: tx.usuarioId,
               },
             }),
           ]

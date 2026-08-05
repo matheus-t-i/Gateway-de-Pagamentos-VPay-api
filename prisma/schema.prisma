@@ -32,16 +32,6 @@ enum SituacaoUsuario {
   ENCERRADO
 }
 
-enum SituacaoEmpresa {
-  PENDENTE
-  EM_ANALISE
-  ATIVA
-  REPROVADA
-  SUSPENSA
-  BLOQUEADA
-  ENCERRADA
-}
-
 enum SituacaoDocumento {
   PENDENTE
   VALIDO
@@ -62,15 +52,16 @@ enum SituacaoProvedor {
   SUSPENSO
 }
 
+/// Quem pode escolher a adquirente no painel: TODOS os clientes ou apenas os
+/// que o administrador liberou um a um (`liberacoes_adquirente_usuario`).
+enum DisponibilidadeAdquirente {
+  TODOS
+  ESPECIFICOS
+}
+
 enum DirecaoTransacao {
   ENTRADA
   SAIDA
-}
-
-enum OrigemConfiguracao {
-  USUARIO
-  EMPRESA
-  MISTA
 }
 
 enum SituacaoTransacao {
@@ -135,9 +126,13 @@ enum SituacaoLiberacao {
 }
 
 // =========================================================
-// USUARIOS / EMPRESAS / RBAC
+// USUARIOS / RBAC
 // =========================================================
 
+/// O usuário É a conta: um cadastro, uma carteira, um conjunto de credenciais.
+/// Não existe entidade "empresa" separada — para PJ, `cpfCnpj`/`nomeRazaoSocial`
+/// são os dados da pessoa jurídica e `cpfResponsavel`/`nomeResponsavel` os do
+/// responsável; para PF os dois lados são a mesma pessoa.
 model Usuario {
   id                         BigInt         @id @default(autoincrement())
   idPublico                  String         @unique @default(uuid()) @map("id_publico") @db.Uuid
@@ -173,9 +168,6 @@ model Usuario {
 
   ativadoPor                 Usuario?       @relation("UsuarioAtivacao", fields: [ativadoPorUsuarioId], references: [id])
   ativados                   Usuario[]      @relation("UsuarioAtivacao")
-  empresasProprietario       Empresa[]      @relation("EmpresaProprietario")
-  empresasAtivadas           Empresa[]      @relation("EmpresaAtivacao")
-  empresasCriadas            Empresa[]      @relation("EmpresaCriacao")
   documentos                 DocumentoUsuario[]
   analises                   AnaliseCadastroUsuario[]
   historicosSituacao         HistoricoSituacaoUsuario[]
@@ -186,8 +178,15 @@ model Usuario {
   configuracaoPix            ConfiguracaoPixUsuario?
   contasProvedor             ContaProvedor[]
   aceitesLegais              AceiteDocumentoLegal[]
-  chavesPixAprovadas         ChavePixEmpresa[] @relation("ChavePixAprovacao")
+  chavesPix                  ChavePixUsuario[] @relation("ChavePixTitular")
+  chavesPixAprovadas         ChavePixUsuario[] @relation("ChavePixAprovacao")
+  saldo                      SaldoUsuario?
+  transacoes                 Transacao[]
+  casosMed                   CasoMed[]
+  adquirentesLiberadas       LiberacaoAdquirenteUsuario[]
+  falhasAdquirente           FalhaAdquirente[]
 
+  @@index([situacao])
   @@map("usuarios")
 }
 
@@ -227,10 +226,10 @@ enum TipoChavePix {
 
 /// Chave PIX de destino para saque. Saque pelo PAINEL só é permitido para
 /// chave APROVADA por um ADMINISTRADOR — o cliente cadastra, o gestor libera.
-model ChavePixEmpresa {
+model ChavePixUsuario {
   id                   BigInt           @id @default(autoincrement())
   idPublico            String           @unique @default(uuid()) @map("id_publico") @db.Uuid
-  empresaId            BigInt           @map("empresa_id")
+  usuarioId            BigInt           @map("usuario_id")
   apelido              String?          @db.VarChar(100)
   chave                String           @db.VarChar(255)
   tipoChave            TipoChavePix     @map("tipo_chave")
@@ -245,109 +244,17 @@ model ChavePixEmpresa {
   criadoEm             DateTime         @default(now()) @map("criado_em") @db.Timestamptz
   atualizadoEm         DateTime         @updatedAt @map("atualizado_em") @db.Timestamptz
 
-  empresa              Empresa          @relation(fields: [empresaId], references: [id])
+  usuario              Usuario          @relation("ChavePixTitular", fields: [usuarioId], references: [id])
   aprovadaPor          Usuario?         @relation("ChavePixAprovacao", fields: [aprovadaPorUsuarioId], references: [id])
 
-  @@unique([empresaId, chave])
-  @@index([empresaId, situacao])
-  @@map("chaves_pix_empresas")
+  @@unique([usuarioId, chave])
+  @@index([usuarioId, situacao])
+  @@map("chaves_pix_usuarios")
 }
 
-model Empresa {
-  id                     BigInt          @id @default(autoincrement())
-  idPublico              String          @unique @default(uuid()) @map("id_publico") @db.Uuid
-  usuarioProprietarioId  BigInt          @map("usuario_proprietario_id")
-  /// Documento da empresa. PJ = CNPJ (14, alfanumérico no novo padrão da Receita);
-  /// PF = CPF do titular (11), pois a 1ª empresa é a própria pessoa.
-  cnpj                   String          @unique @db.VarChar(14)
-  /// Espelha o tipo do proprietário: define quais documentos a empresa exige.
-  tipoPessoa             TipoPessoa      @default(PJ) @map("tipo_pessoa")
-  razaoSocial            String          @map("razao_social") @db.VarChar(255)
-  nomeFantasia           String?         @map("nome_fantasia") @db.VarChar(255)
-  email                  String?         @db.VarChar(255)
-  telefone               String?         @db.VarChar(20)
-  situacao               SituacaoEmpresa @default(PENDENTE)
-  motivoReprovacao       String?         @map("motivo_reprovacao")
-  ativadaPorUsuarioId    BigInt?         @map("ativada_por_usuario_id")
-  ativadaEm              DateTime?       @map("ativada_em") @db.Timestamptz
-  metadados              Json            @default("{}")
-  criadoPorUsuarioId     BigInt?         @map("criado_por_usuario_id")
-  criadoEm               DateTime        @default(now()) @map("criado_em") @db.Timestamptz
-  atualizadoEm           DateTime        @updatedAt @map("atualizado_em") @db.Timestamptz
-
-  usuarioProprietario    Usuario         @relation("EmpresaProprietario", fields: [usuarioProprietarioId], references: [id])
-  ativadaPor             Usuario?        @relation("EmpresaAtivacao", fields: [ativadaPorUsuarioId], references: [id])
-  criadoPor              Usuario?        @relation("EmpresaCriacao", fields: [criadoPorUsuarioId], references: [id])
-  documentos             DocumentoEmpresa[]
-  analises               AnaliseCadastroEmpresa[]
-  historicosSituacao     HistoricoSituacaoEmpresa[]
-  credenciaisApi         CredencialApi[]
-  credenciaisDoProprietario CredencialApi[] @relation("CredencialEmpresaProprietario")
-  configuracaoPix        ConfiguracaoPixEmpresa?
-  saldo                  SaldoEmpresa?
-  transacoes             Transacao[]
-  contasProvedor         ContaProvedor[]
-  chavesPix              ChavePixEmpresa[]
-  casosMed               CasoMed[]
-
-  @@unique([id, usuarioProprietarioId])
-  @@index([usuarioProprietarioId])
-  @@index([situacao])
-  @@map("empresas")
-}
-
-model DocumentoEmpresa {
-  id                   BigInt            @id @default(autoincrement())
-  empresaId            BigInt            @map("empresa_id")
-  tipoDocumento        String            @map("tipo_documento") @db.VarChar(60)
-  nomeArquivo          String            @map("nome_arquivo") @db.VarChar(255)
-  caminhoArquivo       String            @map("caminho_arquivo") @db.VarChar(500)
-  tipoMime             String?           @map("tipo_mime") @db.VarChar(100)
-  tamanhoBytes         BigInt?           @map("tamanho_bytes")
-  hashArquivo          String?           @map("hash_arquivo") @db.VarChar(128)
-  situacao             SituacaoDocumento @default(PENDENTE)
-  motivoInvalidacao    String?           @map("motivo_invalidacao")
-  enviadoEm            DateTime          @default(now()) @map("enviado_em") @db.Timestamptz
-  validadoPorUsuarioId BigInt?           @map("validado_por_usuario_id")
-  validadoEm           DateTime?         @map("validado_em") @db.Timestamptz
-
-  empresa              Empresa           @relation(fields: [empresaId], references: [id])
-
-  @@index([empresaId])
-  @@map("documentos_empresas")
-}
-
-model AnaliseCadastroEmpresa {
-  id                     BigInt         @id @default(autoincrement())
-  empresaId              BigInt         @map("empresa_id")
-  situacao               SituacaoAnalise @default(PENDENTE)
-  observacoes            String?
-  analisadoPorUsuarioId  BigInt?        @map("analisado_por_usuario_id")
-  analisadoEm            DateTime?      @map("analisado_em") @db.Timestamptz
-  criadoEm               DateTime       @default(now()) @map("criado_em") @db.Timestamptz
-  atualizadoEm           DateTime       @updatedAt @map("atualizado_em") @db.Timestamptz
-
-  empresa                Empresa        @relation(fields: [empresaId], references: [id])
-
-  @@map("analises_cadastro_empresas")
-}
-
-model HistoricoSituacaoEmpresa {
-  id               BigInt   @id @default(autoincrement())
-  empresaId        BigInt   @map("empresa_id")
-  situacaoAnterior String?  @map("situacao_anterior") @db.VarChar(30)
-  novaSituacao     String   @map("nova_situacao") @db.VarChar(30)
-  motivo           String?
-  usuarioAtorId    BigInt?  @map("usuario_ator_id")
-  enderecoIp       String?  @map("endereco_ip") @db.VarChar(45)
-  criadoEm         DateTime @default(now()) @map("criado_em") @db.Timestamptz
-
-  empresa          Empresa  @relation(fields: [empresaId], references: [id])
-
-  @@index([empresaId])
-  @@map("historicos_situacoes_empresas")
-}
-
+/// Documentos do cadastro — pessoais (RG/CNH, selfie, comprovante) e, para PJ,
+/// os da pessoa jurídica (contrato social, cartão CNPJ). Uma tabela só, porque a
+/// conta é uma só. O vocabulário de `tipoDocumento` vive em `src/shared/enums.ts`.
 model DocumentoUsuario {
   id                   BigInt            @id @default(autoincrement())
   usuarioId            BigInt            @map("usuario_id")
@@ -485,33 +392,30 @@ model AuditoriaAcesso {
 // =========================================================
 
 model CredencialApi {
-  id                BigInt    @id @default(autoincrement())
-  usuarioId         BigInt    @map("usuario_id")
-  empresaId         BigInt    @map("empresa_id")
-  criadoPorUsuarioId BigInt?  @map("criado_por_usuario_id")
-  nome              String    @db.VarChar(100)
-  chavePublica      String    @unique @map("chave_publica") @db.VarChar(150)
-  segredoHash       String    @map("segredo_hash") @db.VarChar(255)
-  escopos           Json      @default("[]")
-  ativo             Boolean   @default(true)
-  expiraEm          DateTime? @map("expira_em") @db.Timestamptz
-  revogadoEm        DateTime? @map("revogado_em") @db.Timestamptz
-  criadoEm          DateTime  @default(now()) @map("criado_em") @db.Timestamptz
-  atualizadoEm      DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz
+  id                 BigInt    @id @default(autoincrement())
+  usuarioId          BigInt    @map("usuario_id")
+  criadoPorUsuarioId BigInt?   @map("criado_por_usuario_id")
+  nome               String    @db.VarChar(100)
+  chavePublica       String    @unique @map("chave_publica") @db.VarChar(150)
+  segredoHash        String    @map("segredo_hash") @db.VarChar(255)
+  escopos            Json      @default("[]")
+  ativo              Boolean   @default(true)
+  expiraEm           DateTime? @map("expira_em") @db.Timestamptz
+  revogadoEm         DateTime? @map("revogado_em") @db.Timestamptz
+  criadoEm           DateTime  @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm       DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz
 
-  usuario           Usuario   @relation("CredencialTitular", fields: [usuarioId], references: [id])
-  empresa           Empresa   @relation(fields: [empresaId], references: [id])
-  /// Invariante de segurança: a credencial pertence ao MESMO usuário dono da
-  /// empresa. Declarada aqui (e não como SQL manual) porque toda execução de
-  /// `prisma migrate dev` dropava a constraint criada à mão.
-  empresaDoProprietario Empresa @relation("CredencialEmpresaProprietario", fields: [empresaId, usuarioId], references: [id, usuarioProprietarioId], map: "credenciais_api_empresa_usuario_fk")
-  ipsPermitidos     IpPermitidoApi[]
-  registrosAcesso   RegistroAcessoApi[]
-  transacoes        Transacao[]
+  /// A credencial pertence ao usuário e só movimenta o dinheiro DELE. Com a
+  /// conta sendo o próprio usuário o invariante virou estrutural — antes era uma
+  /// FK composta (empresa + usuário) só para garantir a mesma coisa.
+  usuario            Usuario   @relation("CredencialTitular", fields: [usuarioId], references: [id])
+  ipsPermitidos      IpPermitidoApi[]
+  registrosAcesso    RegistroAcessoApi[]
+  transacoes         Transacao[]
   chavesIdempotencia ChaveIdempotencia[]
 
-  @@unique([empresaId, nome])
-  @@index([empresaId])
+  @@unique([usuarioId, nome])
+  @@index([usuarioId])
   @@map("credenciais_api")
 }
 
@@ -530,7 +434,6 @@ model IpPermitidoApi {
 model RegistroAcessoApi {
   id                   BigInt   @id @default(autoincrement())
   usuarioId            BigInt?  @map("usuario_id")
-  empresaId            BigInt?  @map("empresa_id")
   credencialApiId      BigInt?  @map("credencial_api_id")
   enderecoIp           String?  @map("endereco_ip") @db.VarChar(45)
   metodo               String   @db.VarChar(10)
@@ -550,22 +453,49 @@ model RegistroAcessoApi {
 // =========================================================
 
 model ProvedorPagamento {
-  id                       BigInt           @id @default(autoincrement())
-  codigo                   String           @unique @db.VarChar(50)
-  nome                     String           @db.VarChar(255)
-  situacao                 SituacaoProvedor @default(ATIVO)
-  permitePixEntrada        Boolean          @default(false) @map("permite_pix_entrada")
-  permitePixSaida          Boolean          @default(false) @map("permite_pix_saida")
-  exigeAssinaturaWebhook   Boolean          @default(false) @map("exige_assinatura_webhook")
-  segredoWebhookHash       String?          @map("segredo_webhook_hash")
-  criadoEm                 DateTime         @default(now()) @map("criado_em") @db.Timestamptz
-  atualizadoEm             DateTime         @updatedAt @map("atualizado_em") @db.Timestamptz
+  id                        BigInt           @id @default(autoincrement())
+  codigo                    String           @unique @db.VarChar(50)
+  nome                      String           @db.VarChar(255)
+  /// Nome que o LOJISTA vê no painel. `nome` continua sendo o interno/operacional.
+  nomeFantasia              String?          @map("nome_fantasia") @db.VarChar(120)
+  /// Informativo ao cliente: esta liquidante trata MED (devolução/chargeback)?
+  temMed                    Boolean          @default(false) @map("tem_med")
+  /// Recado do administrador exibido junto da adquirente no painel do cliente.
+  observacaoCliente         String?          @map("observacao_cliente")
+  /// Quem pode escolher esta adquirente para o PIX in.
+  disponibilidadePixEntrada DisponibilidadeAdquirente @default(ESPECIFICOS) @map("disponibilidade_pix_entrada")
+  situacao                  SituacaoProvedor @default(ATIVO)
+  permitePixEntrada         Boolean          @default(false) @map("permite_pix_entrada")
+  permitePixSaida           Boolean          @default(false) @map("permite_pix_saida")
+  exigeAssinaturaWebhook    Boolean          @default(false) @map("exige_assinatura_webhook")
+  segredoWebhookHash        String?          @map("segredo_webhook_hash")
+  criadoEm                  DateTime         @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm              DateTime         @updatedAt @map("atualizado_em") @db.Timestamptz
 
-  contas                   ContaProvedor[]
-  ipsWebhook               IpPermitidoWebhookProvedor[]
-  webhooksRecebidos        WebhookRecebidoProvedor[]
+  contas                    ContaProvedor[]
+  ipsWebhook                IpPermitidoWebhookProvedor[]
+  webhooksRecebidos         WebhookRecebidoProvedor[]
+  liberacoes                LiberacaoAdquirenteUsuario[]
 
   @@map("provedores_pagamento")
+}
+
+/// Libera uma adquirente de PIX in para um cliente específico. Só é consultada
+/// quando `disponibilidadePixEntrada = ESPECIFICOS`; com TODOS a vitrine é
+/// aberta e estas linhas ficam apenas como histórico.
+model LiberacaoAdquirenteUsuario {
+  id                   BigInt   @id @default(autoincrement())
+  provedorPagamentoId  BigInt   @map("provedor_pagamento_id")
+  usuarioId            BigInt   @map("usuario_id")
+  liberadoPorUsuarioId BigInt?  @map("liberado_por_usuario_id")
+  criadoEm             DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  provedor             ProvedorPagamento @relation(fields: [provedorPagamentoId], references: [id], onDelete: Cascade)
+  usuario              Usuario           @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@unique([provedorPagamentoId, usuarioId])
+  @@index([usuarioId])
+  @@map("liberacoes_adquirente_usuario")
 }
 
 model IpPermitidoWebhookProvedor {
@@ -584,7 +514,6 @@ model ContaProvedor {
   id                         BigInt           @id @default(autoincrement())
   provedorPagamentoId        BigInt           @map("provedor_pagamento_id")
   usuarioId                  BigInt?          @map("usuario_id")
-  empresaId                  BigInt?          @map("empresa_id")
   nome                       String           @db.VarChar(100)
   identificadorContaExterna  String?          @map("identificador_conta_externa") @db.VarChar(255)
   chaveUnicaConta            String           @unique @map("chave_unica_conta") @db.VarChar(500)
@@ -602,19 +531,19 @@ model ContaProvedor {
 
   provedor                   ProvedorPagamento @relation(fields: [provedorPagamentoId], references: [id])
   usuario                    Usuario?          @relation(fields: [usuarioId], references: [id])
-  empresa                    Empresa?          @relation(fields: [empresaId], references: [id])
   custoPix                   CustoPixContaProvedor?
   configsPadraoEntrada       ConfiguracaoPadraoPixUsuario[] @relation("PadraoEntrada")
   configsPadraoSaida         ConfiguracaoPadraoPixUsuario[] @relation("PadraoSaida")
   configsUsuarioEntrada      ConfiguracaoPixUsuario[] @relation("UsuarioEntrada")
   configsUsuarioSaida        ConfiguracaoPixUsuario[] @relation("UsuarioSaida")
-  configsEmpresaEntrada      ConfiguracaoPixEmpresa[] @relation("EmpresaEntrada")
-  configsEmpresaSaida        ConfiguracaoPixEmpresa[] @relation("EmpresaSaida")
   transacoes                 Transacao[]
   tentativas                 TentativaTransacao[]
   saldo                      SaldoAdquirente?
   gatilhosSaque              GatilhoSaqueAdquirente[]
   execucoesGatilho           ExecucaoGatilhoSaque[]
+  contingencia               ContingenciaAdquirente?
+  falhas                     FalhaAdquirente[] @relation("FalhaOrigem")
+  falhasResolvidas           FalhaAdquirente[] @relation("FalhaResolucao")
 
   @@index([provedorPagamentoId])
   @@map("contas_provedor")
@@ -669,66 +598,42 @@ model ConfiguracaoPadraoPixUsuario {
   @@map("configuracoes_padrao_pix_usuarios")
 }
 
+/// Configuração efetiva do cliente. `contaProvedorPixEntradaId` é a adquirente
+/// de PIX in EM USO: o administrador define a inicial e o próprio cliente troca,
+/// dentro do que estiver liberado para ele (ver `LiberacaoAdquirenteUsuario`).
 model ConfiguracaoPixUsuario {
-  usuarioId                   BigInt              @id @map("usuario_id")
-  configuracaoPadraoOrigemId  BigInt?             @map("configuracao_padrao_origem_id")
-  contaProvedorPixEntradaId   BigInt              @map("conta_provedor_pix_entrada_id")
-  contaProvedorPixSaidaId     BigInt              @map("conta_provedor_pix_saida_id")
-  taxaPixEntradaPercentual    Decimal             @default(0) @map("taxa_pix_entrada_percentual") @db.Decimal(7, 4)
-  taxaPixEntradaFixa          Decimal             @default(0) @map("taxa_pix_entrada_fixa") @db.Decimal(19, 4)
-  taxaPixSaidaPercentual      Decimal             @default(0) @map("taxa_pix_saida_percentual") @db.Decimal(7, 4)
-  taxaPixSaidaFixa            Decimal             @default(0) @map("taxa_pix_saida_fixa") @db.Decimal(19, 4)
-  ticketMinimoPixEntrada      Decimal             @default(0) @map("ticket_minimo_pix_entrada") @db.Decimal(19, 2)
-  ticketMaximoPixEntrada      Decimal             @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
-  ticketMinimoPixSaida        Decimal             @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
-  ticketMaximoPixSaida        Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
-  permitirPixSaidaViaApi      Boolean             @default(false) @map("permitir_pix_saida_via_api")
-  diasLiberacaoSaldo          Int                 @default(0) @map("dias_liberacao_saldo")
-  percentualReserva           Decimal             @default(0) @map("percentual_reserva") @db.Decimal(7, 4)
-  baseCalculoReserva          BaseCalculoReserva  @default(VALOR_LIQUIDO_EMPRESA) @map("base_calculo_reserva")
-  diasRetencaoReserva         Int                 @default(0) @map("dias_retencao_reserva")
-  modoTratamentoMed           ModoTratamentoMed   @default(BLOQUEAR_SALDO) @map("modo_tratamento_med")
-  permiteSaldoNegativo        Boolean             @default(false) @map("permite_saldo_negativo")
-  atualizadoPorUsuarioId      BigInt?             @map("atualizado_por_usuario_id")
-  criadoEm                    DateTime            @default(now()) @map("criado_em") @db.Timestamptz
-  atualizadoEm                DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
+  usuarioId                     BigInt              @id @map("usuario_id")
+  configuracaoPadraoOrigemId    BigInt?             @map("configuracao_padrao_origem_id")
+  contaProvedorPixEntradaId     BigInt              @map("conta_provedor_pix_entrada_id")
+  contaProvedorPixSaidaId       BigInt              @map("conta_provedor_pix_saida_id")
+  /// Quando a adquirente de PIX in foi trocada pela última vez (cliente ou admin).
+  adquirentePixEntradaTrocadaEm DateTime?           @map("adquirente_pix_entrada_trocada_em") @db.Timestamptz
+  taxaPixEntradaPercentual      Decimal             @default(0) @map("taxa_pix_entrada_percentual") @db.Decimal(7, 4)
+  taxaPixEntradaFixa            Decimal             @default(0) @map("taxa_pix_entrada_fixa") @db.Decimal(19, 4)
+  taxaPixSaidaPercentual        Decimal             @default(0) @map("taxa_pix_saida_percentual") @db.Decimal(7, 4)
+  taxaPixSaidaFixa              Decimal             @default(0) @map("taxa_pix_saida_fixa") @db.Decimal(19, 4)
+  ticketMinimoPixEntrada        Decimal             @default(0) @map("ticket_minimo_pix_entrada") @db.Decimal(19, 2)
+  ticketMaximoPixEntrada        Decimal             @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
+  ticketMinimoPixSaida          Decimal             @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
+  ticketMaximoPixSaida          Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
+  permitirPixSaidaViaApi        Boolean             @default(false) @map("permitir_pix_saida_via_api")
+  diasLiberacaoSaldo            Int                 @default(0) @map("dias_liberacao_saldo")
+  percentualReserva             Decimal             @default(0) @map("percentual_reserva") @db.Decimal(7, 4)
+  baseCalculoReserva            BaseCalculoReserva  @default(VALOR_LIQUIDO_EMPRESA) @map("base_calculo_reserva")
+  diasRetencaoReserva           Int                 @default(0) @map("dias_retencao_reserva")
+  modoTratamentoMed             ModoTratamentoMed   @default(BLOQUEAR_SALDO) @map("modo_tratamento_med")
+  permiteSaldoNegativo          Boolean             @default(false) @map("permite_saldo_negativo")
+  atualizadoPorUsuarioId        BigInt?             @map("atualizado_por_usuario_id")
+  criadoEm                      DateTime            @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm                  DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
 
-  usuario                     Usuario             @relation(fields: [usuarioId], references: [id])
-  padraoOrigem                ConfiguracaoPadraoPixUsuario? @relation(fields: [configuracaoPadraoOrigemId], references: [id])
-  contaEntrada                ContaProvedor       @relation("UsuarioEntrada", fields: [contaProvedorPixEntradaId], references: [id])
-  contaSaida                  ContaProvedor       @relation("UsuarioSaida", fields: [contaProvedorPixSaidaId], references: [id])
+  usuario                       Usuario             @relation(fields: [usuarioId], references: [id])
+  padraoOrigem                  ConfiguracaoPadraoPixUsuario? @relation(fields: [configuracaoPadraoOrigemId], references: [id])
+  contaEntrada                  ContaProvedor       @relation("UsuarioEntrada", fields: [contaProvedorPixEntradaId], references: [id])
+  contaSaida                    ContaProvedor       @relation("UsuarioSaida", fields: [contaProvedorPixSaidaId], references: [id])
 
+  @@index([contaProvedorPixEntradaId])
   @@map("configuracoes_pix_usuarios")
-}
-
-model ConfiguracaoPixEmpresa {
-  empresaId                   BigInt              @id @map("empresa_id")
-  contaProvedorPixEntradaId   BigInt?             @map("conta_provedor_pix_entrada_id")
-  contaProvedorPixSaidaId     BigInt?             @map("conta_provedor_pix_saida_id")
-  taxaPixEntradaPercentual    Decimal?            @map("taxa_pix_entrada_percentual") @db.Decimal(7, 4)
-  taxaPixEntradaFixa          Decimal?            @map("taxa_pix_entrada_fixa") @db.Decimal(19, 4)
-  taxaPixSaidaPercentual      Decimal?            @map("taxa_pix_saida_percentual") @db.Decimal(7, 4)
-  taxaPixSaidaFixa            Decimal?            @map("taxa_pix_saida_fixa") @db.Decimal(19, 4)
-  ticketMinimoPixEntrada      Decimal?            @map("ticket_minimo_pix_entrada") @db.Decimal(19, 2)
-  ticketMaximoPixEntrada      Decimal?            @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
-  ticketMinimoPixSaida        Decimal?            @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
-  ticketMaximoPixSaida        Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
-  permitirPixSaidaViaApi      Boolean?            @map("permitir_pix_saida_via_api")
-  diasLiberacaoSaldo          Int?                @map("dias_liberacao_saldo")
-  percentualReserva           Decimal?            @map("percentual_reserva") @db.Decimal(7, 4)
-  baseCalculoReserva          BaseCalculoReserva? @map("base_calculo_reserva")
-  diasRetencaoReserva         Int?                @map("dias_retencao_reserva")
-  modoTratamentoMed           ModoTratamentoMed?  @map("modo_tratamento_med")
-  permiteSaldoNegativo        Boolean?            @map("permite_saldo_negativo")
-  atualizadoPorUsuarioId      BigInt?             @map("atualizado_por_usuario_id")
-  criadoEm                    DateTime            @default(now()) @map("criado_em") @db.Timestamptz
-  atualizadoEm                DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
-
-  empresa                     Empresa             @relation(fields: [empresaId], references: [id])
-  contaEntrada                ContaProvedor?      @relation("EmpresaEntrada", fields: [contaProvedorPixEntradaId], references: [id])
-  contaSaida                  ContaProvedor?      @relation("EmpresaSaida", fields: [contaProvedorPixSaidaId], references: [id])
-
-  @@map("configuracoes_pix_empresas")
 }
 
 // =========================================================
@@ -739,8 +644,7 @@ model Transacao {
   id                                  BigInt              @id @default(autoincrement())
   idTransacaoPublico                  String              @unique @default(uuid()) @map("id_transacao_publico") @db.Uuid
   idTransacaoPrivado                  String              @unique @default(uuid()) @map("id_transacao_privado") @db.Uuid
-  empresaId                           BigInt              @map("empresa_id")
-  usuarioSolicitanteId                BigInt?             @map("usuario_solicitante_id")
+  usuarioId                           BigInt              @map("usuario_id")
   credencialApiId                     BigInt?             @map("credencial_api_id")
   contaProvedorId                     BigInt?             @map("conta_provedor_id")
   transacaoOrigemId                   BigInt?             @map("transacao_origem_id")
@@ -750,7 +654,6 @@ model Transacao {
   /// um webhook cadastrado, a entrega acontece uma única vez.
   urlCallback                         String?             @map("url_callback")
   direcao                             DirecaoTransacao
-  origemConfiguracao                  OrigemConfiguracao  @default(USUARIO) @map("origem_configuracao")
   moeda                               String              @default("BRL") @db.VarChar(3)
   valorBruto                          Decimal             @map("valor_bruto") @db.Decimal(19, 2)
   tarifaPixPercentualAplicada         Decimal             @default(0) @map("tarifa_pix_percentual_aplicada") @db.Decimal(7, 4)
@@ -779,7 +682,7 @@ model Transacao {
   criadoEm                            DateTime            @default(now()) @map("criado_em") @db.Timestamptz
   atualizadoEm                        DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
 
-  empresa                             Empresa             @relation(fields: [empresaId], references: [id])
+  usuario                             Usuario             @relation(fields: [usuarioId], references: [id])
   credencialApi                       CredencialApi?      @relation(fields: [credencialApiId], references: [id])
   contaProvedor                       ContaProvedor?      @relation(fields: [contaProvedorId], references: [id])
   transacaoOrigem                     Transacao?          @relation("TransacaoDerivada", fields: [transacaoOrigemId], references: [id])
@@ -793,12 +696,13 @@ model Transacao {
   casosMed                            CasoMed[]
   devolucoes                          DevolucaoPix[]
   chavesIdempotencia                  ChaveIdempotencia[]
+  falhasAdquirente                    FalhaAdquirente[]
 
-  @@unique([empresaId, referenciaExterna])
-  @@index([empresaId])
+  @@unique([usuarioId, referenciaExterna])
+  @@index([usuarioId])
   @@index([situacao])
   @@index([criadoEm])
-  @@index([empresaId, criadoEm])
+  @@index([usuarioId, criadoEm])
   @@map("transacoes")
 }
 
@@ -899,7 +803,7 @@ model HistoricoSituacaoTransacao {
 
 model ChaveIdempotencia {
   id                BigInt    @id @default(autoincrement())
-  empresaId         BigInt    @map("empresa_id")
+  usuarioId         BigInt    @map("usuario_id")
   credencialApiId   BigInt?   @map("credencial_api_id")
   chaveIdempotencia String    @map("chave_idempotencia") @db.VarChar(255)
   hashRequisicao    String    @map("hash_requisicao") @db.VarChar(255)
@@ -912,7 +816,7 @@ model ChaveIdempotencia {
   credencialApi     CredencialApi? @relation(fields: [credencialApiId], references: [id])
   transacao         Transacao?     @relation(fields: [transacaoId], references: [id])
 
-  @@unique([empresaId, chaveIdempotencia])
+  @@unique([usuarioId, chaveIdempotencia])
   @@map("chaves_idempotencia")
 }
 
@@ -942,23 +846,23 @@ model DevolucaoPix {
 // LEDGER
 // =========================================================
 
-model SaldoEmpresa {
-  empresaId               BigInt   @id @map("empresa_id")
+model SaldoUsuario {
+  usuarioId               BigInt   @id @map("usuario_id")
   saldoDisponivel         Decimal  @default(0) @map("saldo_disponivel") @db.Decimal(19, 2)
   saldoPendenteLiberacao  Decimal  @default(0) @map("saldo_pendente_liberacao") @db.Decimal(19, 2)
   saldoReservado          Decimal  @default(0) @map("saldo_reservado") @db.Decimal(19, 2)
   saldoBloqueadoMed       Decimal  @default(0) @map("saldo_bloqueado_med") @db.Decimal(19, 2)
   atualizadoEm            DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
 
-  empresa                 Empresa  @relation(fields: [empresaId], references: [id])
+  usuario                 Usuario  @relation(fields: [usuarioId], references: [id])
 
-  @@map("saldos_empresas")
+  @@map("saldos_usuarios")
 }
 
 model MovimentacaoSaldo {
   id                         BigInt               @id @default(autoincrement())
   idPublico                  String               @unique @default(uuid()) @map("id_publico") @db.Uuid
-  empresaId                  BigInt               @map("empresa_id")
+  usuarioId                  BigInt               @map("usuario_id")
   transacaoId                BigInt?              @map("transacao_id")
   devolucaoPixId             BigInt?              @map("devolucao_pix_id")
   casoMedId                  BigInt?              @map("caso_med_id")
@@ -981,7 +885,7 @@ model MovimentacaoSaldo {
   relacionadas               MovimentacaoSaldo[]  @relation("MovRelacionada")
   liberacoes                 LiberacaoSaldo[]
 
-  @@index([empresaId])
+  @@index([usuarioId])
   @@index([transacaoId])
   @@index([ocorridoEm])
   @@map("movimentacoes_saldo")
@@ -989,7 +893,7 @@ model MovimentacaoSaldo {
 
 model LiberacaoSaldo {
   id                      BigInt            @id @default(autoincrement())
-  empresaId               BigInt            @map("empresa_id")
+  usuarioId               BigInt            @map("usuario_id")
   transacaoId             BigInt            @map("transacao_id")
   tipoLiberacao           TipoLiberacao     @map("tipo_liberacao")
   valor                   Decimal           @db.Decimal(19, 2)
@@ -1013,7 +917,7 @@ model LiberacaoSaldo {
 model BloqueioSaldo {
   id                  BigInt   @id @default(autoincrement())
   idPublico           String   @unique @default(uuid()) @map("id_publico") @db.Uuid
-  empresaId           BigInt   @map("empresa_id")
+  usuarioId           BigInt   @map("usuario_id")
   casoMedId           BigInt?  @map("caso_med_id")
   tipo                String   @db.VarChar(30)
   valorSolicitado     Decimal  @map("valor_solicitado") @db.Decimal(19, 2)
@@ -1039,7 +943,7 @@ model BloqueioSaldo {
 model CasoMed {
   id                        BigInt            @id @default(autoincrement())
   idPublico                 String            @unique @default(uuid()) @map("id_publico") @db.Uuid
-  empresaId                 BigInt            @map("empresa_id")
+  usuarioId                 BigInt            @map("usuario_id")
   transacaoId               BigInt            @map("transacao_id")
   contaProvedorId           BigInt?           @map("conta_provedor_id")
   webhookRecebidoId         BigInt?           @map("webhook_recebido_id")
@@ -1060,7 +964,7 @@ model CasoMed {
   criadoEm                  DateTime          @default(now()) @map("criado_em") @db.Timestamptz
   atualizadoEm              DateTime          @updatedAt @map("atualizado_em") @db.Timestamptz
 
-  empresa                   Empresa           @relation(fields: [empresaId], references: [id])
+  usuario                   Usuario           @relation(fields: [usuarioId], references: [id])
   transacao                 Transacao         @relation(fields: [transacaoId], references: [id])
   webhookRecebido           WebhookRecebidoProvedor? @relation(fields: [webhookRecebidoId], references: [id])
   historicos                HistoricoCasoMed[]
@@ -1096,9 +1000,9 @@ model HistoricoCasoMed {
 // WEBHOOKS / OUTBOX
 // =========================================================
 
-model ConfiguracaoWebhookEmpresa {
+model ConfiguracaoWebhookUsuario {
   id                     BigInt   @id @default(autoincrement())
-  empresaId              BigInt   @map("empresa_id")
+  usuarioId              BigInt   @map("usuario_id")
   nome                   String   @db.VarChar(100)
   urlDestino             String   @map("url_destino")
   /// Header que o lojista quer receber para conferir a origem do callback
@@ -1115,14 +1019,15 @@ model ConfiguracaoWebhookEmpresa {
 
   entregas               EntregaWebhook[]
 
-  @@map("configuracoes_webhook_empresa")
+  @@index([usuarioId])
+  @@map("configuracoes_webhook_usuario")
 }
 
 model WebhookRecebidoProvedor {
   id                        BigInt   @id @default(autoincrement())
   provedorPagamentoId       BigInt   @map("provedor_pagamento_id")
   contaProvedorId           BigInt?  @map("conta_provedor_id")
-  empresaId                 BigInt?  @map("empresa_id")
+  usuarioId                 BigInt?  @map("usuario_id")
   identificadorEventoExterno String? @map("identificador_evento_externo") @db.VarChar(255)
   chaveIdempotencia         String   @unique @map("chave_idempotencia") @db.VarChar(255)
   tipoEvento                String   @map("tipo_evento") @db.VarChar(100)
@@ -1142,7 +1047,7 @@ model WebhookRecebidoProvedor {
 model EventoOutbox {
   id                            BigInt    @id @default(autoincrement())
   eventoUuid                    String    @unique @default(uuid()) @map("evento_uuid") @db.Uuid
-  empresaId                     BigInt?   @map("empresa_id")
+  usuarioId                     BigInt?   @map("usuario_id")
   tipoAgregado                  String    @map("tipo_agregado") @db.VarChar(100)
   identificadorAgregado         String    @map("identificador_agregado") @db.VarChar(100)
   tipoEvento                    String    @map("tipo_evento") @db.VarChar(150)
@@ -1168,7 +1073,7 @@ model EntregaWebhook {
   /// URL efetivamente chamada — a config pode ser editada depois e o histórico
   /// precisa dizer para onde a entrega foi de fato.
   urlDestino             String?   @map("url_destino")
-  empresaId              BigInt    @map("empresa_id")
+  usuarioId              BigInt    @map("usuario_id")
   numeroTentativa        Int       @map("numero_tentativa")
   situacao               String    @db.VarChar(30)
   statusHttp             Int?      @map("status_http")
@@ -1181,7 +1086,7 @@ model EntregaWebhook {
   criadoEm               DateTime  @default(now()) @map("criado_em") @db.Timestamptz
 
   eventoOutbox           EventoOutbox @relation(fields: [eventoOutboxId], references: [id])
-  configuracao           ConfiguracaoWebhookEmpresa? @relation(fields: [configuracaoWebhookId], references: [id])
+  configuracao           ConfiguracaoWebhookUsuario? @relation(fields: [configuracaoWebhookId], references: [id])
 
   @@unique([eventoOutboxId, configuracaoWebhookId, numeroTentativa])
   @@map("entregas_webhook")
@@ -1194,7 +1099,6 @@ model EntregaWebhook {
 model RegistroAuditoria {
   id                      BigInt   @id @default(autoincrement())
   usuarioAfetadoId        BigInt?  @map("usuario_afetado_id")
-  empresaAfetadaId        BigInt?  @map("empresa_afetada_id")
   usuarioAtorId           BigInt?  @map("usuario_ator_id")
   credencialApiId         BigInt?  @map("credencial_api_id")
   origem                  String   @db.VarChar(30)
@@ -1222,7 +1126,6 @@ model RegistroAuditoria {
 model PoliticaLimiteRequisicoes {
   id                      BigInt   @id @default(autoincrement())
   usuarioId               BigInt?  @map("usuario_id")
-  empresaId               BigInt?  @map("empresa_id")
   escopo                  String   @db.VarChar(30)
   caminhoRota             String?  @map("caminho_rota") @db.VarChar(500)
   quantidadeMaxima        Int      @map("quantidade_maxima")
@@ -1238,7 +1141,6 @@ model PoliticaLimiteRequisicoes {
 model BloqueioAcesso {
   id                 BigInt    @id @default(autoincrement())
   usuarioId          BigInt?   @map("usuario_id")
-  empresaId          BigInt?   @map("empresa_id")
   credencialApiId    BigInt?   @map("credencial_api_id")
   tipoAlvo           String    @map("tipo_alvo") @db.VarChar(30)
   valorAlvo          String    @map("valor_alvo") @db.VarChar(255)
@@ -1258,7 +1160,6 @@ model BloqueioAcesso {
 model EventoSeguranca {
   id                  BigInt   @id @default(autoincrement())
   usuarioId           BigInt?  @map("usuario_id")
-  empresaId           BigInt?  @map("empresa_id")
   credencialApiId     BigInt?  @map("credencial_api_id")
   tipoEvento          String   @map("tipo_evento") @db.VarChar(50)
   severidade          String   @db.VarChar(20)
@@ -1280,7 +1181,7 @@ model EventoSeguranca {
 
 /// Último saldo conhecido da NOSSA conta em cada adquirente. O valor é da
 /// adquirente (consulta na API dela), não do ledger do lojista — por isso vive
-/// fora de `saldos_empresas`. É um cache/snapshot: a fonte de verdade continua
+/// fora de `saldos_usuarios`. É um cache/snapshot: a fonte de verdade continua
 /// sendo a adquirente, e cada consulta faz upsert aqui.
 model SaldoAdquirente {
   contaProvedorId  BigInt   @id @map("conta_provedor_id")
@@ -1365,4 +1266,71 @@ model ExecucaoGatilhoSaque {
   @@index([situacao])
   @@index([criadoEm])
   @@map("execucoes_gatilho_saque")
+}
+
+// =========================================================
+// CONTINGENCIA DE ADQUIRENTE
+// =========================================================
+
+/// Cadeia de contingência: ordem em que as adquirentes são tentadas quando a
+/// principal do lojista falha ao criar a cobrança. Existe para NÃO PERDER A
+/// VENDA — o cliente final não pode ficar sem código PIX porque uma liquidante
+/// caiu.
+///
+/// A cadeia é sobre `contas_provedor` (e não sobre `provedores_pagamento`)
+/// porque é a conta que carrega credencial, custo e habilitação de cash-in.
+model ContingenciaAdquirente {
+  id              BigInt   @id @default(autoincrement())
+  contaProvedorId BigInt   @unique @map("conta_provedor_id")
+  /// Posição na fila de tentativa (1 = primeira contingência).
+  ordem           Int      @unique
+  ativo           Boolean  @default(true)
+  observacao      String?  @db.VarChar(255)
+  criadoEm        DateTime @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm    DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  contaProvedor   ContaProvedor @relation(fields: [contaProvedorId], references: [id])
+
+  @@map("contingencia_adquirente")
+}
+
+/// Falha de uma adquirente ao criar a cobrança, com o response cru guardado
+/// para conferência com a liquidante.
+///
+/// Uma venda gera uma linha POR TENTATIVA falha: a da principal e a de cada
+/// contingência que também falhou. `resolvidaPorContaProvedorId` responde
+/// "onde a cobrança acabou sendo gerada" — nulo quando nem a contingência
+/// salvou e a venda foi perdida de fato.
+model FalhaAdquirente {
+  id                          BigInt   @id @default(autoincrement())
+  idPublico                   String   @unique @default(uuid()) @map("id_publico") @db.Uuid
+  /// Nula quando a falha derruba a criação antes de a transação existir.
+  transacaoId                 BigInt?  @map("transacao_id")
+  contaProvedorId             BigInt   @map("conta_provedor_id")
+  usuarioId                   BigInt?  @map("usuario_id")
+  /// TIMEOUT | ERRO_PROVEDOR | SEM_CODIGO_PIX
+  tipo                        String   @db.VarChar(30)
+  /// Ordem da tentativa: 0 = adquirente principal do lojista, 1+ = contingência.
+  ordemTentativa              Int      @default(0) @map("ordem_tentativa")
+  mensagem                    String?
+  statusHttp                  Int?     @map("status_http")
+  codigoErro                  String?  @map("codigo_erro") @db.VarChar(100)
+  dadosRequisicao             Json?    @map("dados_requisicao")
+  /// Response cru da liquidante — é o que se leva para a mesa de suporte dela.
+  dadosResposta               Json?    @map("dados_resposta")
+  latenciaMs                  Int?     @map("latencia_ms")
+  resolvidaPorContaProvedorId BigInt?  @map("resolvida_por_conta_provedor_id")
+  resolvidaEm                 DateTime? @map("resolvida_em") @db.Timestamptz
+  criadoEm                    DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  transacao                   Transacao?    @relation(fields: [transacaoId], references: [id])
+  contaProvedor               ContaProvedor @relation("FalhaOrigem", fields: [contaProvedorId], references: [id])
+  resolvidaPor                ContaProvedor? @relation("FalhaResolucao", fields: [resolvidaPorContaProvedorId], references: [id])
+  usuario                     Usuario?      @relation(fields: [usuarioId], references: [id])
+
+  @@index([criadoEm])
+  @@index([contaProvedorId, criadoEm])
+  @@index([tipo])
+  @@index([transacaoId])
+  @@map("falhas_adquirente")
 }

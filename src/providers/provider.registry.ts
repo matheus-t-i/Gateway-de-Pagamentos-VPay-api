@@ -1,13 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { PaymentProviderPort } from './payment-provider.port';
 import { MockPaymentProvider } from './mock/mock.client';
+import { ValorionPaymentProvider } from './valorion/valorion.client';
 
 @Injectable()
 export class ProviderRegistry {
   private readonly map = new Map<string, PaymentProviderPort>();
 
-  constructor(mock: MockPaymentProvider) {
+  constructor(mock: MockPaymentProvider, valorion: ValorionPaymentProvider) {
     this.map.set(mock.code, mock);
+    this.map.set(valorion.code, valorion);
   }
 
   get(code: string): PaymentProviderPort {

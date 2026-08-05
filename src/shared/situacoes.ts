@@ -4,7 +4,7 @@
  * Fonte única para todo status usado em código — nunca escrever a string
  * literal ("PENDENTE", "CONCLUIDA", …) direto em controller/service/processor.
  *
- * Os grupos que têm enum no banco (SituacaoUsuario, SituacaoEmpresa, …)
+ * Os grupos que têm enum no banco (SituacaoUsuario, SituacaoTransacao, …)
  * espelham exatamente os valores do schema.prisma; os demais são colunas
  * VarChar cujo vocabulário oficial é ESTE arquivo.
  */
@@ -22,20 +22,7 @@ export const SITUACAO_USUARIO = {
 export type SituacaoUsuarioValor =
   (typeof SITUACAO_USUARIO)[keyof typeof SITUACAO_USUARIO];
 
-/** empresas.situacao — enum SituacaoEmpresa no banco. */
-export const SITUACAO_EMPRESA = {
-  PENDENTE: 'PENDENTE',
-  EM_ANALISE: 'EM_ANALISE',
-  ATIVA: 'ATIVA',
-  REPROVADA: 'REPROVADA',
-  SUSPENSA: 'SUSPENSA',
-  BLOQUEADA: 'BLOQUEADA',
-  ENCERRADA: 'ENCERRADA',
-} as const;
-export type SituacaoEmpresaValor =
-  (typeof SITUACAO_EMPRESA)[keyof typeof SITUACAO_EMPRESA];
-
-/** documentos_*.situacao — enum SituacaoDocumento no banco. */
+/** documentos_usuarios.situacao — enum SituacaoDocumento no banco. */
 export const SITUACAO_DOCUMENTO = {
   PENDENTE: 'PENDENTE',
   VALIDO: 'VALIDO',
@@ -43,7 +30,7 @@ export const SITUACAO_DOCUMENTO = {
   EXPIRADO: 'EXPIRADO',
 } as const;
 
-/** analises_cadastro_*.situacao — enum SituacaoAnalise no banco. */
+/** analises_cadastro_usuarios.situacao — enum SituacaoAnalise no banco. */
 export const SITUACAO_ANALISE = {
   PENDENTE: 'PENDENTE',
   EM_ANALISE: 'EM_ANALISE',
@@ -70,7 +57,7 @@ export const SITUACAO_PROVEDOR = {
   SUSPENSO: 'SUSPENSO',
 } as const;
 
-/** chaves_pix_empresas.situacao — enum SituacaoChavePix no banco. */
+/** chaves_pix_usuarios.situacao — enum SituacaoChavePix no banco. */
 export const SITUACAO_CHAVE_PIX = {
   PENDENTE: 'PENDENTE',
   APROVADA: 'APROVADA',
@@ -123,6 +110,19 @@ export const SITUACAO_TENTATIVA = {
   FALHA: 'FALHA',
 } as const;
 
+/**
+ * falhas_adquirente.tipo — VarChar(30). O que fez a adquirente ser considerada
+ * indisponível e acionar a contingência.
+ */
+export const TIPO_FALHA_ADQUIRENTE = {
+  /** Estourou `CONTINGENCIA_TIMEOUT_SEGUNDOS` sem responder. */
+  TIMEOUT: 'TIMEOUT',
+  /** Respondeu erro HTTP ou o client do provedor lançou exceção. */
+  ERRO_PROVEDOR: 'ERRO_PROVEDOR',
+  /** Respondeu 200 mas sem código PIX — inútil para o pagador. */
+  SEM_CODIGO_PIX: 'SEM_CODIGO_PIX',
+} as const;
+
 /** execucoes_gatilho_saque.situacao — VarChar(30); vocabulário oficial. */
 export const SITUACAO_EXECUCAO_SAQUE = {
   PENDENTE: 'PENDENTE',
@@ -148,6 +148,18 @@ export const SITUACAO_LIBERACAO = {
   BLOQUEADA_MED: 'BLOQUEADA_MED',
   FALHA: 'FALHA',
 } as const;
+
+/**
+ * provedores_pagamento.disponibilidade_pix_entrada — enum
+ * DisponibilidadeAdquirente no banco. Define quem vê a adquirente na vitrine do
+ * painel do cliente.
+ */
+export const DISPONIBILIDADE_ADQUIRENTE = {
+  TODOS: 'TODOS',
+  ESPECIFICOS: 'ESPECIFICOS',
+} as const;
+export type DisponibilidadeAdquirenteValor =
+  (typeof DISPONIBILIDADE_ADQUIRENTE)[keyof typeof DISPONIBILIDADE_ADQUIRENTE];
 
 /** Eventos de webhook enviados ao lojista (tiposEvento das configs). */
 export const EVENTOS_LOJISTA = {

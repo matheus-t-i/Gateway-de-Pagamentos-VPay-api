@@ -56,13 +56,13 @@ export class PixWebhookSendProcessor extends WorkerHost {
     const payload = job.data.payload as {
       tipoEvento: string;
       idPublico: string;
-      empresaId: string;
+      usuarioId: string;
       eventoOutboxId?: string;
       conteudo?: unknown;
     };
     this.logger.log(`entregando webhook lojista evento=${payload.tipoEvento}`);
 
-    // Corpo público enviado ao lojista: nunca vazar ids internos (empresaId,
+    // Corpo público enviado ao lojista: nunca vazar ids internos (usuarioId,
     // eventoOutboxId). A transação é referenciada apenas como idTransacao.
     const corpoEnvio = JSON.stringify({
       tipoEvento: payload.tipoEvento,
@@ -71,7 +71,7 @@ export class PixWebhookSendProcessor extends WorkerHost {
       ocorridoEm: new Date().toISOString(),
     });
 
-    const empresaId = BigInt(payload.empresaId);
+    const usuarioId = BigInt(payload.usuarioId);
 
     let eventoOutboxId = payload.eventoOutboxId
       ? BigInt(payload.eventoOutboxId)
@@ -80,7 +80,7 @@ export class PixWebhookSendProcessor extends WorkerHost {
     if (!eventoOutboxId) {
       const outbox = await this.prisma.eventoOutbox.findFirst({
         where: {
-          empresaId,
+          usuarioId,
           identificadorAgregado: payload.idPublico,
           tipoEvento: payload.tipoEvento,
         },
@@ -91,7 +91,7 @@ export class PixWebhookSendProcessor extends WorkerHost {
     if (!eventoOutboxId) return { ok: true, entregas: 0, motivo: 'sem evento outbox' };
 
     const destinos = await this.resolverDestinos(
-      empresaId,
+      usuarioId,
       payload.idPublico,
       payload.tipoEvento,
     );
@@ -101,7 +101,7 @@ export class PixWebhookSendProcessor extends WorkerHost {
     let primeiroErro: unknown = null;
     for (const destino of destinos) {
       try {
-        await this.entregar(destino, eventoOutboxId, empresaId, corpoEnvio);
+        await this.entregar(destino, eventoOutboxId, usuarioId, corpoEnvio);
       } catch (e) {
         primeiroErro ??= e;
       }
@@ -119,12 +119,12 @@ export class PixWebhookSendProcessor extends WorkerHost {
    * porque é ele que carrega o header de autenticação.
    */
   private async resolverDestinos(
-    empresaId: bigint,
+    usuarioId: bigint,
     idTransacaoPublico: string,
     tipoEvento: string,
   ): Promise<Destino[]> {
-    const configs = await this.prisma.configuracaoWebhookEmpresa.findMany({
-      where: { empresaId, ativo: true },
+    const configs = await this.prisma.configuracaoWebhookUsuario.findMany({
+      where: { usuarioId, ativo: true },
       orderBy: { id: 'asc' },
     });
 
@@ -147,7 +147,7 @@ export class PixWebhookSendProcessor extends WorkerHost {
     }
 
     const tx = await this.prisma.transacao.findFirst({
-      where: { idTransacaoPublico, empresaId },
+      where: { idTransacaoPublico, usuarioId },
       select: { urlCallback: true },
     });
     if (tx?.urlCallback && !vistos.has(chaveUrl(tx.urlCallback))) {
@@ -181,7 +181,7 @@ export class PixWebhookSendProcessor extends WorkerHost {
   private async entregar(
     destino: Destino,
     eventoOutboxId: bigint,
-    empresaId: bigint,
+    usuarioId: bigint,
     corpoEnvio: string,
   ) {
     const tentativa =
@@ -207,7 +207,7 @@ export class PixWebhookSendProcessor extends WorkerHost {
           eventoOutboxId,
           configuracaoWebhookId: destino.configuracaoWebhookId,
           urlDestino: destino.url,
-          empresaId,
+          usuarioId,
           numeroTentativa: tentativa,
           situacao: res.ok
             ? SITUACAO_ENTREGA_WEBHOOK.SUCESSO
@@ -226,7 +226,7 @@ export class PixWebhookSendProcessor extends WorkerHost {
           eventoOutboxId,
           configuracaoWebhookId: destino.configuracaoWebhookId,
           urlDestino: destino.url,
-          empresaId,
+          usuarioId,
           numeroTentativa: tentativa,
           situacao: SITUACAO_ENTREGA_WEBHOOK.FALHA,
           mensagemErro: erro,
@@ -281,7 +281,7 @@ export class OutboxPublisherProcessor extends WorkerHost {
           payload: {
             tipoEvento: ev.tipoEvento,
             idPublico: ev.identificadorAgregado,
-            empresaId: ev.empresaId?.toString() ?? '',
+            usuarioId: ev.usuarioId?.toString() ?? '',
             eventoOutboxId: ev.id.toString(),
             conteudo: ev.conteudo,
           },
@@ -335,7 +335,7 @@ export class LiberacaoSaldoProcessor extends WorkerHost {
         const from =
           lib.tipoLiberacao === 'RESERVA' ? 'RESERVADO' : 'PENDENTE_LIBERACAO';
         const result = await this.ledger.aplicarMovimentacoes({
-          empresaId: lib.empresaId,
+          usuarioId: lib.usuarioId,
           entries: [
             {
               tipoSaldo: from,

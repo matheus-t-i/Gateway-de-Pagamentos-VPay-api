@@ -21,7 +21,6 @@ export type ConfigPixEfetiva = {
   diasRetencaoReserva: number;
   modoTratamentoMed: 'BLOQUEAR_SALDO' | 'DEBITAR_IMEDIATAMENTE' | 'ANALISE_MANUAL';
   permiteSaldoNegativo: boolean;
-  origemConfiguracao: 'USUARIO' | 'EMPRESA' | 'MISTA';
 };
 
 type LedgerEntry = {
@@ -50,61 +49,38 @@ type LedgerEntry = {
 export class ConfigPixService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async resolverEfetiva(empresaId: bigint): Promise<ConfigPixEfetiva> {
-    const rows = await this.prisma.$queryRaw<
-      Array<Record<string, unknown>>
-    >`
-      SELECT
-        COALESCE(e.conta_provedor_pix_entrada_id, u.conta_provedor_pix_entrada_id) AS conta_provedor_pix_entrada_id,
-        COALESCE(e.conta_provedor_pix_saida_id, u.conta_provedor_pix_saida_id) AS conta_provedor_pix_saida_id,
-        COALESCE(e.taxa_pix_entrada_percentual, u.taxa_pix_entrada_percentual) AS taxa_pix_entrada_percentual,
-        COALESCE(e.taxa_pix_entrada_fixa, u.taxa_pix_entrada_fixa) AS taxa_pix_entrada_fixa,
-        COALESCE(e.taxa_pix_saida_percentual, u.taxa_pix_saida_percentual) AS taxa_pix_saida_percentual,
-        COALESCE(e.taxa_pix_saida_fixa, u.taxa_pix_saida_fixa) AS taxa_pix_saida_fixa,
-        COALESCE(e.ticket_minimo_pix_entrada, u.ticket_minimo_pix_entrada) AS ticket_minimo_pix_entrada,
-        COALESCE(e.ticket_maximo_pix_entrada, u.ticket_maximo_pix_entrada) AS ticket_maximo_pix_entrada,
-        COALESCE(e.ticket_minimo_pix_saida, u.ticket_minimo_pix_saida) AS ticket_minimo_pix_saida,
-        COALESCE(e.ticket_maximo_pix_saida, u.ticket_maximo_pix_saida) AS ticket_maximo_pix_saida,
-        COALESCE(e.permitir_pix_saida_via_api, u.permitir_pix_saida_via_api) AS permitir_pix_saida_via_api,
-        COALESCE(e.dias_liberacao_saldo, u.dias_liberacao_saldo) AS dias_liberacao_saldo,
-        COALESCE(e.percentual_reserva, u.percentual_reserva) AS percentual_reserva,
-        COALESCE(e.base_calculo_reserva, u.base_calculo_reserva) AS base_calculo_reserva,
-        COALESCE(e.dias_retencao_reserva, u.dias_retencao_reserva) AS dias_retencao_reserva,
-        COALESCE(e.modo_tratamento_med, u.modo_tratamento_med) AS modo_tratamento_med,
-        COALESCE(e.permite_saldo_negativo, u.permite_saldo_negativo) AS permite_saldo_negativo,
-        CASE WHEN e.empresa_id IS NULL THEN 'USUARIO'
-             WHEN e.taxa_pix_entrada_percentual IS NOT NULL OR e.conta_provedor_pix_entrada_id IS NOT NULL THEN 'MISTA'
-             ELSE 'EMPRESA' END AS origem_configuracao
-      FROM empresas emp
-      JOIN configuracoes_pix_usuarios u ON u.usuario_id = emp.usuario_proprietario_id
-      LEFT JOIN configuracoes_pix_empresas e ON e.empresa_id = emp.id
-      WHERE emp.id = ${empresaId}
-    `;
-    if (!rows[0]) {
-      throw new BadRequestException('Configuração PIX do usuário ausente');
+  /**
+   * Configuração efetiva do cliente. Com a conta sendo o próprio usuário não há
+   * mais override por empresa — a linha de `configuracoes_pix_usuarios` É a
+   * configuração, sem COALESCE.
+   */
+  async resolverEfetiva(usuarioId: bigint): Promise<ConfigPixEfetiva> {
+    const cfg = await this.prisma.configuracaoPixUsuario.findUnique({
+      where: { usuarioId },
+    });
+    if (!cfg) {
+      throw new BadRequestException('Configuração PIX do cliente ausente');
     }
-    const r = rows[0];
     return {
-      contaProvedorPixEntradaId: BigInt(String(r.conta_provedor_pix_entrada_id)),
-      contaProvedorPixSaidaId: BigInt(String(r.conta_provedor_pix_saida_id)),
-      taxaPixEntradaPercentual: money(String(r.taxa_pix_entrada_percentual)),
-      taxaPixEntradaFixa: money(String(r.taxa_pix_entrada_fixa)),
-      taxaPixSaidaPercentual: money(String(r.taxa_pix_saida_percentual)),
-      taxaPixSaidaFixa: money(String(r.taxa_pix_saida_fixa)),
-      ticketMinimoPixEntrada: money(String(r.ticket_minimo_pix_entrada)),
-      ticketMaximoPixEntrada: money(String(r.ticket_maximo_pix_entrada)),
-      ticketMinimoPixSaida: money(String(r.ticket_minimo_pix_saida)),
-      ticketMaximoPixSaida: r.ticket_maximo_pix_saida
-        ? money(String(r.ticket_maximo_pix_saida))
+      contaProvedorPixEntradaId: cfg.contaProvedorPixEntradaId,
+      contaProvedorPixSaidaId: cfg.contaProvedorPixSaidaId,
+      taxaPixEntradaPercentual: money(cfg.taxaPixEntradaPercentual.toString()),
+      taxaPixEntradaFixa: money(cfg.taxaPixEntradaFixa.toString()),
+      taxaPixSaidaPercentual: money(cfg.taxaPixSaidaPercentual.toString()),
+      taxaPixSaidaFixa: money(cfg.taxaPixSaidaFixa.toString()),
+      ticketMinimoPixEntrada: money(cfg.ticketMinimoPixEntrada.toString()),
+      ticketMaximoPixEntrada: money(cfg.ticketMaximoPixEntrada.toString()),
+      ticketMinimoPixSaida: money(cfg.ticketMinimoPixSaida.toString()),
+      ticketMaximoPixSaida: cfg.ticketMaximoPixSaida
+        ? money(cfg.ticketMaximoPixSaida.toString())
         : null,
-      permitirPixSaidaViaApi: Boolean(r.permitir_pix_saida_via_api),
-      diasLiberacaoSaldo: Number(r.dias_liberacao_saldo),
-      percentualReserva: money(String(r.percentual_reserva)),
-      baseCalculoReserva: String(r.base_calculo_reserva) as ConfigPixEfetiva['baseCalculoReserva'],
-      diasRetencaoReserva: Number(r.dias_retencao_reserva),
-      modoTratamentoMed: String(r.modo_tratamento_med) as ConfigPixEfetiva['modoTratamentoMed'],
-      permiteSaldoNegativo: Boolean(r.permite_saldo_negativo),
-      origemConfiguracao: String(r.origem_configuracao) as ConfigPixEfetiva['origemConfiguracao'],
+      permitirPixSaidaViaApi: cfg.permitirPixSaidaViaApi,
+      diasLiberacaoSaldo: cfg.diasLiberacaoSaldo,
+      percentualReserva: money(cfg.percentualReserva.toString()),
+      baseCalculoReserva: cfg.baseCalculoReserva,
+      diasRetencaoReserva: cfg.diasRetencaoReserva,
+      modoTratamentoMed: cfg.modoTratamentoMed,
+      permiteSaldoNegativo: cfg.permiteSaldoNegativo,
     };
   }
 
@@ -133,10 +109,10 @@ export class LedgerService {
 
   /**
    * Único ponto de escrita de saldo.
-   * SELECT FOR UPDATE em saldos_empresas + movimentações + outbox no mesmo commit.
+   * SELECT FOR UPDATE em saldos_usuarios + movimentações + outbox no mesmo commit.
    */
   async aplicarMovimentacoes(params: {
-    empresaId: bigint;
+    usuarioId: bigint;
     entries: LedgerEntry[];
     outbox?: {
       tipoAgregado: string;
@@ -149,21 +125,21 @@ export class LedgerService {
     return this.prisma.$transaction(async (tx) => {
       const saldos = await tx.$queryRaw<
         Array<{
-          empresa_id: bigint;
+          usuario_id: bigint;
           saldo_disponivel: Prisma.Decimal;
           saldo_pendente_liberacao: Prisma.Decimal;
           saldo_reservado: Prisma.Decimal;
           saldo_bloqueado_med: Prisma.Decimal;
         }>
       >`
-        SELECT empresa_id, saldo_disponivel, saldo_pendente_liberacao,
+        SELECT usuario_id, saldo_disponivel, saldo_pendente_liberacao,
                saldo_reservado, saldo_bloqueado_med
-        FROM saldos_empresas
-        WHERE empresa_id = ${params.empresaId}
+        FROM saldos_usuarios
+        WHERE usuario_id = ${params.usuarioId}
         FOR UPDATE
       `;
       if (!saldos[0]) {
-        throw new BadRequestException('Saldo da empresa não encontrado');
+        throw new BadRequestException('Carteira do cliente não encontrada');
       }
 
       let disponivel = money(saldos[0].saldo_disponivel.toString());
@@ -214,7 +190,7 @@ export class LedgerService {
 
         const mov = await tx.movimentacaoSaldo.create({
           data: {
-            empresaId: params.empresaId,
+            usuarioId: params.usuarioId,
             transacaoId: entry.transacaoId,
             casoMedId: entry.casoMedId,
             devolucaoPixId: entry.devolucaoPixId,
@@ -230,8 +206,8 @@ export class LedgerService {
         created.push(mov);
       }
 
-      await tx.saldoEmpresa.update({
-        where: { empresaId: params.empresaId },
+      await tx.saldoUsuario.update({
+        where: { usuarioId: params.usuarioId },
         data: {
           saldoDisponivel: disponivel.toFixed(2),
           saldoPendenteLiberacao: pendente.toFixed(2),
@@ -244,7 +220,7 @@ export class LedgerService {
       if (params.outbox) {
         const outbox = await tx.eventoOutbox.create({
           data: {
-            empresaId: params.empresaId,
+            usuarioId: params.usuarioId,
             tipoAgregado: params.outbox.tipoAgregado,
             identificadorAgregado: params.outbox.identificadorAgregado,
             tipoEvento: params.outbox.tipoEvento,
