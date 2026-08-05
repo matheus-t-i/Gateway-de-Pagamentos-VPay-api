@@ -343,6 +343,90 @@ async function main() {
   });
 
   console.log('Seed OK — admin:', adminEmail);
+
+  /**
+   * Cliente de teste (somente desenvolvimento). Conta ATIVA com papel CLIENTE,
+   * config PIX apontando para a adquirente mock e carteira zerada — suficiente
+   * para validar o painel na visão do cliente (incl. /adquirentes).
+   */
+  if (!PRODUCAO) {
+    const clientePapel = await prisma.papel.findUniqueOrThrow({
+      where: { nome: 'CLIENTE' },
+    });
+    const clienteEmail = process.env.CLIENTE_EMAIL ?? 'cliente@vpay.local';
+    const clientePassword = process.env.CLIENTE_PASSWORD ?? 'Cliente@123456';
+    const clienteSenhaHash = await argon2.hash(clientePassword);
+    const padrao = await prisma.configuracaoPadraoPixUsuario.findFirstOrThrow({
+      where: { padraoSistema: true },
+    });
+
+    const cliente = await prisma.usuario.upsert({
+      where: { email: clienteEmail },
+      create: {
+        tipoPessoa: 'PF',
+        cpfCnpj: '52998224725',
+        nomeRazaoSocial: 'Cliente Teste VPay',
+        nomeFantasia: 'Cliente Teste',
+        cpfResponsavel: '52998224725',
+        nomeResponsavel: 'Cliente Teste VPay',
+        email: clienteEmail,
+        senhaHash: clienteSenhaHash,
+        situacao: 'ATIVO',
+        temaPreferido: 'PADRAO',
+        ativadoEm: new Date(),
+      },
+      // NÃO reescreve senhaHash (mesmo critério do admin).
+      update: { situacao: 'ATIVO' },
+    });
+
+    await prisma.usuarioPapel.upsert({
+      where: {
+        usuarioId_papelId: {
+          usuarioId: cliente.id,
+          papelId: clientePapel.id,
+        },
+      },
+      create: { usuarioId: cliente.id, papelId: clientePapel.id },
+      update: {},
+    });
+
+    await prisma.configuracaoPixUsuario.upsert({
+      where: { usuarioId: cliente.id },
+      create: {
+        usuarioId: cliente.id,
+        configuracaoPadraoOrigemId: padrao.id,
+        contaProvedorPixEntradaId: padrao.contaProvedorPixEntradaId,
+        contaProvedorPixSaidaId: padrao.contaProvedorPixSaidaId,
+        taxaPixEntradaPercentual: padrao.taxaPixEntradaPercentual,
+        taxaPixEntradaFixa: padrao.taxaPixEntradaFixa,
+        taxaPixSaidaPercentual: padrao.taxaPixSaidaPercentual,
+        taxaPixSaidaFixa: padrao.taxaPixSaidaFixa,
+        ticketMinimoPixEntrada: padrao.ticketMinimoPixEntrada,
+        ticketMaximoPixEntrada: padrao.ticketMaximoPixEntrada,
+        ticketMinimoPixSaida: padrao.ticketMinimoPixSaida,
+        ticketMaximoPixSaida: padrao.ticketMaximoPixSaida,
+        permitirPixSaidaViaApi: padrao.permitirPixSaidaViaApi,
+        diasLiberacaoSaldo: padrao.diasLiberacaoSaldo,
+        percentualReserva: padrao.percentualReserva,
+        baseCalculoReserva: padrao.baseCalculoReserva,
+        diasRetencaoReserva: padrao.diasRetencaoReserva,
+        modoTratamentoMed: padrao.modoTratamentoMed,
+        permiteSaldoNegativo: padrao.permiteSaldoNegativo,
+      },
+      update: {
+        contaProvedorPixEntradaId: padrao.contaProvedorPixEntradaId,
+        contaProvedorPixSaidaId: padrao.contaProvedorPixSaidaId,
+      },
+    });
+
+    await prisma.saldoUsuario.upsert({
+      where: { usuarioId: cliente.id },
+      create: { usuarioId: cliente.id },
+      update: {},
+    });
+
+    console.log('Seed OK — cliente:', clienteEmail, `(senha: ${clientePassword})`);
+  }
 }
 
 main()

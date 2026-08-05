@@ -41,6 +41,8 @@ export const PERMISSOES = {
   // ---- Operação (cliente) ----
   DASHBOARD_VER: 'dashboard.ver',
 
+  FATURAMENTO_VER: 'faturamento.ver',
+
   TRANSACOES_VER: 'transacoes.ver',
   TRANSACOES_CRIAR: 'transacoes.criar',
 
@@ -145,6 +147,19 @@ export const CATALOGO_PERMISSOES: RecursoCatalogo[] = [
         acao: ACOES.VER,
         codigo: PERMISSOES.DASHBOARD_VER,
         descricao: 'Abrir o dashboard e ver os indicadores',
+      },
+    ],
+  },
+  {
+    chave: 'faturamento',
+    rotulo: 'Faturamento',
+    grupo: 'Operação',
+    telas: ['/faturamento'],
+    acoes: [
+      {
+        acao: ACOES.VER,
+        codigo: PERMISSOES.FATURAMENTO_VER,
+        descricao: 'Ver GMV acumulado e marcos de premiação',
       },
     ],
   },
@@ -543,6 +558,7 @@ export const PERFIS_SISTEMA: string[] = ['ADMINISTRADOR', 'CLIENTE'];
 /** Permissões do perfil CLIENTE recém-cadastrado. */
 export const PERMISSOES_PADRAO_CLIENTE: CodigoPermissao[] = [
   PERMISSOES.DASHBOARD_VER,
+  PERMISSOES.FATURAMENTO_VER,
   PERMISSOES.TRANSACOES_VER,
   PERMISSOES.TRANSACOES_CRIAR,
   PERMISSOES.ADQUIRENTES_VER,

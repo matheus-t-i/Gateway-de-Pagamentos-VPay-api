@@ -18,6 +18,7 @@ import { PixModule } from './pix/pix.module';
 import { MedModule } from './med/med.module';
 import { OpsModule } from './ops/ops.module';
 import { PerfisModule } from './perfis/perfis.module';
+import { FaturamentoModule } from './faturamento/faturamento.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -60,6 +61,7 @@ import { HealthController } from './health.controller';
     MedModule,
     OpsModule,
     PerfisModule,
+    FaturamentoModule,
   ],
   controllers: [HealthController],
   providers: [

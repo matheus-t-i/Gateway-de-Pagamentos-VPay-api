@@ -27,13 +27,25 @@ Pré-requisitos: Node 20+, Docker Desktop.
 
 ```bash
 docker compose up -d          # Postgres 16 + Redis 7 (só infra; a app roda fora do Docker)
-npm install
-npm run db:generate
+cp .env.example .env          # no Windows: copy .env.example .env
+npm install                   # ou: npx pnpm@9.15.0 install
+npm run db:generate           # obrigatório — sem isso o TypeScript quebra (Prisma Client stub)
 npx prisma migrate dev
 npm run db:seed
 npm run dev:api               # API em http://localhost:3001 (prefixo /api)
 npm run dev:worker            # em outro terminal
 ```
+
+**Por que `db:generate` é obrigatório:** o `npm install` instala o pacote `@prisma/client`, mas o client tipado só existe depois do `prisma generate` (lê `prisma/schema.prisma` e gera os tipos em `node_modules/.prisma`). Sem esse passo, o Nest sobe com dezenas/centenas de erros `TS7006` / `TS2694` (`implicitly has an 'any' type`, `Prisma.X does not exist`). Rode de novo sempre que o schema mudar (ou após um clone/`install` limpo).
+
+**Proxy / certificado SSL (rede corporativa):** se `prisma generate` falhar com `unable to get local issuer certificate` ao baixar engines de `binaries.prisma.sh`, use no PowerShell só nessa sessão:
+
+```powershell
+$env:NODE_TLS_REJECT_UNAUTHORIZED='0'
+npm run db:generate
+```
+
+Preferível a longo prazo: apontar o CA corporativo com `NODE_EXTRA_CA_CERTS` em vez de desligar a verificação TLS.
 
 - Admin seed: `admin@vpay.local` / `Admin@123456` (sobrescrevível por `ADMIN_EMAIL`/`ADMIN_PASSWORD`; reexecutar o seed não reseta a senha).
 - Health check: `GET /health` (fora do prefixo `/api`).
@@ -48,7 +60,7 @@ npm run dev:worker            # em outro terminal
 | `dev:worker` | Worker em watch mode (`--entryFile worker`) |
 | `build` | Compila para `dist/` |
 | `start` / `start:worker` | API / Worker em produção (`node dist/main.js` / `node dist/worker.js`) |
-| `db:generate` | Gera o Prisma Client |
+| `db:generate` | Gera o Prisma Client tipado — **obrigatório** após install / mudança de schema |
 | `db:migrate` | `prisma migrate dev` |
 | `db:deploy` | `prisma migrate deploy` (produção) |
 | `db:seed` | Roda `prisma/seed.ts` (tsx) |
