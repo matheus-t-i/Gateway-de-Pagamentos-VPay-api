@@ -5,9 +5,11 @@ import {
   DEFAULT_WEBHOOK_JOB_OPTIONS,
   DevolucaoPixJobPayload,
   EmailJobPayload,
+  IntegracaoEnvioJobPayload,
   PixJobPayload,
   QUEUE_NAMES,
   SaqueAutomaticoJobPayload,
+  WebhookReenvioJobPayload,
 } from '../shared';
 
 @Injectable()
@@ -33,7 +35,38 @@ export class QueuesService {
     private readonly devolucaoPix: Queue,
     @InjectQueue(QUEUE_NAMES.SAQUE_AUTOMATICO)
     private readonly saqueAutomatico: Queue,
+    @InjectQueue(QUEUE_NAMES.WEBHOOK_REENVIO)
+    private readonly webhookReenvio: Queue,
+    @InjectQueue(QUEUE_NAMES.INTEGRACAO_ENVIO)
+    private readonly integracaoEnvio: Queue,
   ) {}
+
+  /**
+   * Envio para um app conectado pelo lojista. Nunca lança: app de terceiro fora
+   * do ar (ou Redis instável) não pode derrubar a criação da venda nem a
+   * publicação do outbox, que são o caminho do dinheiro. O envio fica gravado
+   * como PENDENTE e o lojista reenvia pela tela.
+   */
+  async enqueueIntegracaoEnvio(data: IntegracaoEnvioJobPayload) {
+    try {
+      return await this.integracaoEnvio.add(
+        'enviar',
+        data,
+        DEFAULT_WEBHOOK_JOB_OPTIONS,
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Reenvio manual do callback ao lojista. Fila própria — não vai para a
+   * `2-pix-webhook-send` justamente para o reprocessamento sob demanda não se
+   * misturar ao fluxo automático.
+   */
+  enqueueWebhookReenvio(data: WebhookReenvioJobPayload) {
+    return this.webhookReenvio.add('reenviar', data, DEFAULT_WEBHOOK_JOB_OPTIONS);
+  }
 
   enqueueSaqueAutomatico(data: SaqueAutomaticoJobPayload) {
     return this.saqueAutomatico.add('executar', data, DEFAULT_WEBHOOK_JOB_OPTIONS);

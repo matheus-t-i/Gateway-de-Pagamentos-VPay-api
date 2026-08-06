@@ -45,6 +45,8 @@ export const PERMISSOES = {
 
   TRANSACOES_VER: 'transacoes.ver',
   TRANSACOES_CRIAR: 'transacoes.criar',
+  /** Reenviar o callback (webhook) de uma transação da PRÓPRIA conta. */
+  TRANSACOES_EXECUTAR: 'transacoes.executar',
 
   // ---- Conta ----
   ADQUIRENTES_VER: 'adquirentes.ver',
@@ -53,11 +55,18 @@ export const PERMISSOES = {
   // ---- Desenvolvedores ----
   CHAVES_API_VER: 'chaves_api.ver',
   CHAVES_API_CRIAR: 'chaves_api.criar',
+  CHAVES_API_EDITAR: 'chaves_api.editar',
   CHAVES_API_EXCLUIR: 'chaves_api.excluir',
 
   WEBHOOKS_VER: 'webhooks.ver',
   WEBHOOKS_CRIAR: 'webhooks.criar',
   WEBHOOKS_EXCLUIR: 'webhooks.excluir',
+
+  /** Apps conectados pelo lojista (Utmify e afins). */
+  INTEGRACOES_VER: 'integracoes.ver',
+  INTEGRACOES_CRIAR: 'integracoes.criar',
+  INTEGRACOES_EDITAR: 'integracoes.editar',
+  INTEGRACOES_EXCLUIR: 'integracoes.excluir',
 
   CHAVES_PIX_VER: 'chaves_pix.ver',
   CHAVES_PIX_CRIAR: 'chaves_pix.criar',
@@ -91,8 +100,12 @@ export const PERMISSOES = {
    * diferentes e nem todo perfil que acompanha um precisa ver o outro.
    */
   ADMIN_CARTEIRAS_VER: 'admin.carteiras.ver',
+  /** Bloqueio administrativo de saldo (calote): bloquear, liberar e debitar. */
+  ADMIN_CARTEIRAS_EXECUTAR: 'admin.carteiras.executar',
 
   ADMIN_RELATORIOS_VER: 'admin.relatorios.ver',
+  /** Liberar venda retida pelo método de retenção (cash-in). */
+  ADMIN_RELATORIOS_EDITAR: 'admin.relatorios.editar',
 
   ADMIN_ADQUIRENTES_VER: 'admin.adquirentes.ver',
   ADMIN_ADQUIRENTES_CRIAR: 'admin.adquirentes.criar',
@@ -105,6 +118,13 @@ export const PERMISSOES = {
   ADMIN_FILAS_EXECUTAR: 'admin.filas.executar',
 
   ADMIN_AUDITORIA_VER: 'admin.auditoria.ver',
+
+  /** Parâmetros globais do método de retenção (Plataforma). */
+  ADMIN_RETENCAO_VER: 'admin.retencao.ver',
+  ADMIN_RETENCAO_EDITAR: 'admin.retencao.editar',
+
+  ADMIN_MED_AUTOMATICO_VER: 'admin.med_automatico.ver',
+  ADMIN_MED_AUTOMATICO_EDITAR: 'admin.med_automatico.editar',
 
   /**
    * Escopo de leitura global: enxergar dados de QUALQUER cliente, e não
@@ -179,6 +199,11 @@ export const CATALOGO_PERMISSOES: RecursoCatalogo[] = [
         codigo: PERMISSOES.TRANSACOES_CRIAR,
         descricao: 'Gerar depósitos e solicitar saques pelo painel',
       },
+      {
+        acao: ACOES.EXECUTAR,
+        codigo: PERMISSOES.TRANSACOES_EXECUTAR,
+        descricao: 'Reenviar o callback (webhook) de uma transação da conta',
+      },
     ],
   },
   {
@@ -203,7 +228,7 @@ export const CATALOGO_PERMISSOES: RecursoCatalogo[] = [
     chave: 'chaves_api',
     rotulo: 'Chaves de API',
     grupo: 'Desenvolvedores',
-    telas: ['/desenvolvedores/chaves', '/desenvolvedores/integracoes'],
+    telas: ['/desenvolvedores/chaves'],
     acoes: [
       {
         acao: ACOES.VER,
@@ -214,6 +239,11 @@ export const CATALOGO_PERMISSOES: RecursoCatalogo[] = [
         acao: ACOES.CRIAR,
         codigo: PERMISSOES.CHAVES_API_CRIAR,
         descricao: 'Emitir nova credencial de API',
+      },
+      {
+        acao: ACOES.EDITAR,
+        codigo: PERMISSOES.CHAVES_API_EDITAR,
+        descricao: 'Alterar nome e IPs permitidos de uma credencial',
       },
       {
         acao: ACOES.EXCLUIR,
@@ -242,6 +272,34 @@ export const CATALOGO_PERMISSOES: RecursoCatalogo[] = [
         acao: ACOES.EXCLUIR,
         codigo: PERMISSOES.WEBHOOKS_EXCLUIR,
         descricao: 'Desativar webhook',
+      },
+    ],
+  },
+  {
+    chave: 'integracoes',
+    rotulo: 'Integrações',
+    grupo: 'Desenvolvedores',
+    telas: ['/desenvolvedores/integracoes'],
+    acoes: [
+      {
+        acao: ACOES.VER,
+        codigo: PERMISSOES.INTEGRACOES_VER,
+        descricao: 'Listar os apps conectados e o histórico de envio',
+      },
+      {
+        acao: ACOES.CRIAR,
+        codigo: PERMISSOES.INTEGRACOES_CRIAR,
+        descricao: 'Conectar um app à conta',
+      },
+      {
+        acao: ACOES.EDITAR,
+        codigo: PERMISSOES.INTEGRACOES_EDITAR,
+        descricao: 'Editar credencial, eventos e situação da integração; reenviar pedido',
+      },
+      {
+        acao: ACOES.EXCLUIR,
+        codigo: PERMISSOES.INTEGRACOES_EXCLUIR,
+        descricao: 'Desconectar app',
       },
     ],
   },
@@ -403,6 +461,12 @@ export const CATALOGO_PERMISSOES: RecursoCatalogo[] = [
         descricao:
           'Ver o saldo dos clientes (disponível, a liberar, reservado e bloqueado no MED)',
       },
+      {
+        acao: ACOES.EXECUTAR,
+        codigo: PERMISSOES.ADMIN_CARTEIRAS_EXECUTAR,
+        descricao:
+          'Bloqueio administrativo de saldo: bloquear valor de cliente, liberar e debitar',
+      },
     ],
   },
   {
@@ -413,12 +477,19 @@ export const CATALOGO_PERMISSOES: RecursoCatalogo[] = [
       '/admin/relatorios/cash-in',
       '/admin/relatorios/cash-out',
       '/admin/relatorios/resultado',
+      '/admin/relatorios/metodo',
     ],
     acoes: [
       {
         acao: ACOES.VER,
         codigo: PERMISSOES.ADMIN_RELATORIOS_VER,
-        descricao: 'Cash-in, cash-out, Lucro × Custo e dashboard administrativo',
+        descricao:
+          'Cash-in, cash-out, Lucro × Custo, Relatório Método e dashboard administrativo',
+      },
+      {
+        acao: ACOES.EDITAR,
+        codigo: PERMISSOES.ADMIN_RELATORIOS_EDITAR,
+        descricao: 'Liberar venda retida pelo método de retenção no cash-in',
       },
     ],
   },
@@ -461,6 +532,42 @@ export const CATALOGO_PERMISSOES: RecursoCatalogo[] = [
         acao: ACOES.EDITAR,
         codigo: PERMISSOES.ADMIN_CONTINGENCIA_EDITAR,
         descricao: 'Definir a ordem das adquirentes de contingência',
+      },
+    ],
+  },
+  {
+    chave: 'admin.retencao',
+    rotulo: 'Retenção (método)',
+    grupo: 'Administração',
+    telas: ['/admin/retencao'],
+    acoes: [
+      {
+        acao: ACOES.VER,
+        codigo: PERMISSOES.ADMIN_RETENCAO_VER,
+        descricao: 'Ver parâmetros globais do método de retenção',
+      },
+      {
+        acao: ACOES.EDITAR,
+        codigo: PERMISSOES.ADMIN_RETENCAO_EDITAR,
+        descricao: 'Alterar parâmetros e percentuais por adquirente',
+      },
+    ],
+  },
+  {
+    chave: 'admin.med_automatico',
+    rotulo: 'MED automático',
+    grupo: 'Administração',
+    telas: ['/admin/med-automatico'],
+    acoes: [
+      {
+        acao: ACOES.VER,
+        codigo: PERMISSOES.ADMIN_MED_AUTOMATICO_VER,
+        descricao: 'Ver parâmetros globais do MED automático',
+      },
+      {
+        acao: ACOES.EDITAR,
+        codigo: PERMISSOES.ADMIN_MED_AUTOMATICO_EDITAR,
+        descricao: 'Alterar offset, tolerância e contenção do MED automático',
       },
     ],
   },
@@ -561,14 +668,20 @@ export const PERMISSOES_PADRAO_CLIENTE: CodigoPermissao[] = [
   PERMISSOES.FATURAMENTO_VER,
   PERMISSOES.TRANSACOES_VER,
   PERMISSOES.TRANSACOES_CRIAR,
+  PERMISSOES.TRANSACOES_EXECUTAR,
   PERMISSOES.ADQUIRENTES_VER,
   PERMISSOES.ADQUIRENTES_EDITAR,
   PERMISSOES.CHAVES_API_VER,
   PERMISSOES.CHAVES_API_CRIAR,
+  PERMISSOES.CHAVES_API_EDITAR,
   PERMISSOES.CHAVES_API_EXCLUIR,
   PERMISSOES.WEBHOOKS_VER,
   PERMISSOES.WEBHOOKS_CRIAR,
   PERMISSOES.WEBHOOKS_EXCLUIR,
+  PERMISSOES.INTEGRACOES_VER,
+  PERMISSOES.INTEGRACOES_CRIAR,
+  PERMISSOES.INTEGRACOES_EDITAR,
+  PERMISSOES.INTEGRACOES_EXCLUIR,
   PERMISSOES.CHAVES_PIX_VER,
   PERMISSOES.CHAVES_PIX_CRIAR,
   PERMISSOES.CHAVES_PIX_EXCLUIR,

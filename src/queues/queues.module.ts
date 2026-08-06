@@ -7,6 +7,7 @@ import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { ALL_QUEUE_NAMES, QUEUE_NAMES } from '../shared';
 import { AuthModule } from '../auth/auth.module';
 import { QueuesService } from './queues.service';
+import { ReenvioWebhookService } from './reenvio-webhook.service';
 import { BullBoardAuthMiddleware } from './bull-board.middleware';
 
 const queueRegistrations = ALL_QUEUE_NAMES.map((name) =>
@@ -43,8 +44,8 @@ export class QueuesModule {
         }),
         ...boardQueues,
       ],
-      providers: [QueuesService, BullBoardAuthMiddleware],
-      exports: [BullModule, QueuesService],
+      providers: [QueuesService, ReenvioWebhookService, BullBoardAuthMiddleware],
+      exports: [BullModule, QueuesService, ReenvioWebhookService],
     };
   }
 

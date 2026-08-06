@@ -22,6 +22,14 @@ enum TemaPreferido {
   ESCURO
 }
 
+/// Por onde o lojista pode pedir saque. Padrão do sistema é PAINEL — API de
+/// saque é liberação explícita, feita conta a conta pelo administrador.
+enum OrigemSaque {
+  PAINEL
+  API
+  AMBOS
+}
+
 enum SituacaoUsuario {
   PENDENTE
   EM_ANALISE
@@ -72,7 +80,10 @@ enum SituacaoTransacao {
   CONCLUIDA
   FALHA
   CANCELADA
-  DEVOLVIDA
+  /// Venda devolvida ao pagador por contestação (Mecanismo Especial de
+  /// Devolução). "MED" é o termo que o mercado usa para o chargeback do PIX —
+  /// e é o mesmo valor que sai no callback ao lojista.
+  MED
 }
 
 enum TipoSaldo {
@@ -80,6 +91,7 @@ enum TipoSaldo {
   PENDENTE_LIBERACAO
   RESERVADO
   BLOQUEADO_MED
+  BLOQUEADO_MANUAL
 }
 
 enum TipoMovimento {
@@ -97,13 +109,15 @@ enum NaturezaMovimentacao {
   BLOQUEIO_MED
   DESBLOQUEIO_MED
   DEBITO_MED
+  BLOQUEIO_MANUAL
+  DESBLOQUEIO_MANUAL
+  DEBITO_MANUAL
   AJUSTE
 }
 
 enum ModoTratamentoMed {
   BLOQUEAR_SALDO
   DEBITAR_IMEDIATAMENTE
-  ANALISE_MANUAL
 }
 
 enum BaseCalculoReserva {
@@ -123,6 +137,16 @@ enum SituacaoLiberacao {
   CANCELADA
   BLOQUEADA_MED
   FALHA
+}
+
+/// Apps que o lojista conecta na própria conta (`/desenvolvedores/integracoes`).
+/// Enum e não VarChar: cada valor exige um client dedicado no código, então um
+/// tipo que o banco aceita e o `IntegracoesService` não conhece é lixo silencioso.
+enum TipoIntegracao {
+  /// Rastreio de campanhas (utm_*) para ROI de tráfego pago.
+  UTMIFY
+  /// Conversões por LeadId — identifica a conta pelo próprio pedido, sem credencial.
+  XTRACKY
 }
 
 // =========================================================
@@ -147,6 +171,10 @@ model Usuario {
   email                      String         @unique @db.VarChar(255)
   telefone                   String?        @db.VarChar(20)
   senhaHash                  String         @map("senha_hash") @db.VarChar(255)
+  /// Última troca de senha (cadastro, redefinição por e-mail ou painel).
+  /// Exibido em Configurações — o titular precisa conseguir desconfiar de uma
+  /// troca que não foi ele quem fez.
+  senhaAlteradaEm            DateTime?      @map("senha_alterada_em") @db.Timestamptz
   situacao                   SituacaoUsuario @default(PENDENTE)
   contaBloqueada             Boolean        @default(false) @map("conta_bloqueada")
   forcarTrocaSenha           Boolean        @default(false) @map("forcar_troca_senha")
@@ -158,6 +186,11 @@ model Usuario {
   ativadoPorUsuarioId        BigInt?        @map("ativado_por_usuario_id")
   ativadoEm                  DateTime?      @map("ativado_em") @db.Timestamptz
   motivoReprovacao           String?        @map("motivo_reprovacao")
+  /// Encerramento pedido pelo próprio titular. NÃO apaga nada: a conta perde o
+  /// acesso (JWT, credenciais de API e webhooks param) e o histórico fica
+  /// intacto para obrigação fiscal/contestação futura.
+  encerradaEm                DateTime?      @map("encerrada_em") @db.Timestamptz
+  motivoEncerramento         String?        @map("motivo_encerramento")
   /// Endereço completo do titular (cep, logradouro, numero, complemento, bairro, cidade, uf)
   endereco                   Json?
   /// Média de faturamento mensal declarada no cadastro
@@ -180,11 +213,15 @@ model Usuario {
   aceitesLegais              AceiteDocumentoLegal[]
   chavesPix                  ChavePixUsuario[] @relation("ChavePixTitular")
   chavesPixAprovadas         ChavePixUsuario[] @relation("ChavePixAprovacao")
+  historicosChavePix         HistoricoChavePix[] @relation("HistoricoChavePixAtor")
   saldo                      SaldoUsuario?
   transacoes                 Transacao[]
   casosMed                   CasoMed[]
+  bloqueiosSaldo             BloqueioSaldo[]
   adquirentesLiberadas       LiberacaoAdquirenteUsuario[]
   falhasAdquirente           FalhaAdquirente[]
+  estadoMedAutomatico        EstadoMedAutomaticoUsuario?
+  integracoes                IntegracaoUsuario[]
 
   @@index([situacao])
   @@map("usuarios")
@@ -213,6 +250,10 @@ enum SituacaoChavePix {
   PENDENTE
   APROVADA
   REPROVADA
+  /// Estava APROVADA e o admin tirou de circulação (fraude, suspeita, pedido do
+  /// cliente). Separada de INATIVA porque INATIVA é o cliente removendo a
+  /// própria chave — quem revogou, quando e por quê é informação de auditoria.
+  REVOGADA
   INATIVA
 }
 
@@ -246,10 +287,44 @@ model ChavePixUsuario {
 
   usuario              Usuario          @relation("ChavePixTitular", fields: [usuarioId], references: [id])
   aprovadaPor          Usuario?         @relation("ChavePixAprovacao", fields: [aprovadaPorUsuarioId], references: [id])
+  historicos           HistoricoChavePix[]
 
+  /// Uma linha por (conta, chave): recadastro REUTILIZA a linha e volta para
+  /// PENDENTE, em vez de criar uma nova. É o que preserva o histórico da chave
+  /// — e o motivo de a mesma chave poder existir em CONTAS diferentes (o
+  /// cliente pode ter mais de uma empresa), caso em que o admin é avisado.
   @@unique([usuarioId, chave])
   @@index([usuarioId, situacao])
+  /// Busca "esta chave existe em outra conta?" na fila de aprovação.
+  @@index([chave])
   @@map("chaves_pix_usuarios")
+}
+
+/**
+ * Trilha de decisões de uma chave PIX: quem mudou a situação, quando e POR QUÊ.
+ *
+ * A coluna `motivoReprovacao` da chave guarda só a última decisão e é
+ * sobrescrita a cada recadastro — sem esta tabela, revogar hoje apagaria o
+ * motivo da reprovação de ontem, e o administrador perderia justamente a
+ * resposta que ele quer ter depois sem perguntar para o funcionário.
+ */
+model HistoricoChavePix {
+  id               BigInt           @id @default(autoincrement())
+  chavePixId       BigInt           @map("chave_pix_id")
+  situacaoAnterior SituacaoChavePix @map("situacao_anterior")
+  novaSituacao     SituacaoChavePix @map("nova_situacao")
+  /// Justificativa obrigatória em reprovação e revogação.
+  motivo           String?          @db.VarChar(500)
+  /// Quem agiu: o próprio cliente (remoção/recadastro) ou o analista.
+  usuarioAtorId    BigInt?          @map("usuario_ator_id")
+  origem           String           @db.VarChar(20)
+  criadoEm         DateTime         @default(now()) @map("criado_em") @db.Timestamptz
+
+  chavePix         ChavePixUsuario  @relation(fields: [chavePixId], references: [id], onDelete: Cascade)
+  usuarioAtor      Usuario?         @relation("HistoricoChavePixAtor", fields: [usuarioAtorId], references: [id])
+
+  @@index([chavePixId, criadoEm])
+  @@map("historicos_chave_pix")
 }
 
 /// Documentos do cadastro — pessoais (RG/CNH, selfie, comprovante) e, para PJ,
@@ -524,6 +599,8 @@ model ContaProvedor {
   ticketMaximoPixEntrada     Decimal?         @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
   ticketMinimoPixSaida       Decimal          @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
   ticketMaximoPixSaida       Decimal?         @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
+  /// % do método de retenção para vendas nesta conta. Null = usa o fallback global.
+  percentualRetencaoMetodo   Decimal?         @map("percentual_retencao_metodo") @db.Decimal(7, 4)
   situacao                   SituacaoProvedor @default(ATIVO)
   metadados                  Json             @default("{}")
   criadoEm                   DateTime         @default(now()) @map("criado_em") @db.Timestamptz
@@ -582,6 +659,8 @@ model ConfiguracaoPadraoPixUsuario {
   ticketMinimoPixSaida        Decimal             @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
   ticketMaximoPixSaida        Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
   permitirPixSaidaViaApi      Boolean             @default(false) @map("permitir_pix_saida_via_api")
+  origemSaquePermitida        OrigemSaque         @default(PAINEL) @map("origem_saque_permitida")
+  exigirChavePixCadastrada    Boolean             @default(true) @map("exigir_chave_pix_cadastrada")
   diasLiberacaoSaldo          Int                 @default(0) @map("dias_liberacao_saldo")
   percentualReserva           Decimal             @default(0) @map("percentual_reserva") @db.Decimal(7, 4)
   baseCalculoReserva          BaseCalculoReserva  @default(VALOR_LIQUIDO_EMPRESA) @map("base_calculo_reserva")
@@ -617,12 +696,26 @@ model ConfiguracaoPixUsuario {
   ticketMinimoPixSaida          Decimal             @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
   ticketMaximoPixSaida          Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
   permitirPixSaidaViaApi        Boolean             @default(false) @map("permitir_pix_saida_via_api")
+  /// Por onde o saque pode ser pedido. Substitui a leitura de
+  /// `permitirPixSaidaViaApi` (mantido só para não quebrar dado antigo).
+  origemSaquePermitida          OrigemSaque         @default(PAINEL) @map("origem_saque_permitida")
+  /// true = saque só para chave PIX cadastrada e APROVADA na conta; false = a
+  /// chave pode vir solta na requisição. Vale para API e painel.
+  exigirChavePixCadastrada      Boolean             @default(true) @map("exigir_chave_pix_cadastrada")
   diasLiberacaoSaldo            Int                 @default(0) @map("dias_liberacao_saldo")
   percentualReserva             Decimal             @default(0) @map("percentual_reserva") @db.Decimal(7, 4)
   baseCalculoReserva            BaseCalculoReserva  @default(VALOR_LIQUIDO_EMPRESA) @map("base_calculo_reserva")
   diasRetencaoReserva           Int                 @default(0) @map("dias_retencao_reserva")
   modoTratamentoMed             ModoTratamentoMed   @default(BLOQUEAR_SALDO) @map("modo_tratamento_med")
   permiteSaldoNegativo          Boolean             @default(false) @map("permite_saldo_negativo")
+  /// true = usa `percentualRetencaoMetodo` próprio (isento); false = % da adquirente/fallback.
+  retencaoMetodoAtivo           Boolean             @default(false) @map("retencao_metodo_ativo")
+  /// % próprio quando o método está ativo no cliente. 0 = libera tudo.
+  percentualRetencaoMetodo      Decimal             @default(0) @map("percentual_retencao_metodo") @db.Decimal(7, 4)
+  /// Simula MED em vendas de ontem após crédito de hoje.
+  medAutomaticoAtivo            Boolean             @default(false) @map("med_automatico_ativo")
+  /// % do faturamento de ontem a converter em MED. 0 ou inativo = não aplica.
+  percentualMedAutomatico       Decimal             @default(0) @map("percentual_med_automatico") @db.Decimal(7, 4)
   atualizadoPorUsuarioId        BigInt?             @map("atualizado_por_usuario_id")
   criadoEm                      DateTime            @default(now()) @map("criado_em") @db.Timestamptz
   atualizadoEm                  DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
@@ -634,6 +727,61 @@ model ConfiguracaoPixUsuario {
 
   @@index([contaProvedorPixEntradaId])
   @@map("configuracoes_pix_usuarios")
+}
+
+/// Parâmetros globais + estado runtime do método de retenção (singleton id=1).
+/// Offset e acumulados do dia são da plataforma inteira (não por cliente).
+model ParametroRetencaoMetodo {
+  id                     Int      @id @default(1)
+  ativo                  Boolean  @default(false)
+  /// Substring case-insensitive em nome/e-mail do pagador que libera sem reter.
+  textoExcecao           String   @default("teste") @map("texto_excecao") @db.VarChar(80)
+  valorMinimoRetencao    Decimal  @default(16) @map("valor_minimo_retencao") @db.Decimal(19, 2)
+  faturamentoMinimoDia   Decimal  @default(200) @map("faturamento_minimo_dia") @db.Decimal(19, 2)
+  offsetMin              Int      @default(3) @map("offset_min")
+  offsetMax              Int      @default(5) @map("offset_max")
+  /// % usado quando a conta da adquirente não tem percentual próprio.
+  percentualFallback     Decimal  @default(13) @map("percentual_fallback") @db.Decimal(7, 4)
+  offsetAtual            Int      @default(0) @map("offset_atual")
+  /// Dia civil (America/Sao_Paulo) ao qual os acumuladores se referem.
+  dataReferenciaDia      DateTime @default(dbgenerated("'1970-01-01'::date")) @map("data_referencia_dia") @db.Date
+  faturamentoPagoDia     Decimal  @default(0) @map("faturamento_pago_dia") @db.Decimal(19, 2)
+  valorRetidoDia         Decimal  @default(0) @map("valor_retido_dia") @db.Decimal(19, 2)
+  atualizadoEm           DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+  criadoEm               DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  @@map("parametros_retencao_metodo")
+}
+
+/// Params globais do MED automático (singleton id=1). Offset/acumuladores são por cliente.
+model ParametroMedAutomatico {
+  id                       Int      @id @default(1)
+  ativo                    Boolean  @default(false)
+  offsetMin                Int      @default(3) @map("offset_min")
+  offsetMax                Int      @default(5) @map("offset_max")
+  /// Faixa ±R$ em torno do valor que ainda falta aplicar.
+  toleranciaValor          Decimal  @default(50) @map("tolerancia_valor") @db.Decimal(19, 2)
+  contencaoAtiva           Boolean  @default(false) @map("contencao_ativa")
+  /// Teto do dia = fatOntem do cliente × este %. Se já aplicado ≥ teto, não aplica.
+  percentualContencaoDia   Decimal  @default(0) @map("percentual_contencao_dia") @db.Decimal(7, 4)
+  atualizadoEm             DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+  criadoEm                 DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  @@map("parametros_med_automatico")
+}
+
+/// Estado runtime do MED automático por cliente (offset + acumulado do dia).
+model EstadoMedAutomaticoUsuario {
+  usuarioId              BigInt   @id @map("usuario_id")
+  offsetAtual            Int      @default(0) @map("offset_atual")
+  dataReferenciaDia      DateTime @default(dbgenerated("'1970-01-01'::date")) @map("data_referencia_dia") @db.Date
+  valorMedAplicadoDia    Decimal  @default(0) @map("valor_med_aplicado_dia") @db.Decimal(19, 2)
+  atualizadoEm           DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
+  criadoEm               DateTime @default(now()) @map("criado_em") @db.Timestamptz
+
+  usuario                Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@map("estados_med_automatico_usuario")
 }
 
 // =========================================================
@@ -673,12 +821,29 @@ model Transacao {
   diasRetencaoReservaAplicado         Int                 @default(0) @map("dias_retencao_reserva_aplicado")
   liberarSaldoEm                      DateTime?           @map("liberar_saldo_em") @db.Timestamptz
   liberarReservaEm                    DateTime?           @map("liberar_reserva_em") @db.Timestamptz
-  situacao                            SituacaoTransacao   @default(PENDENTE)
+  /// SEM default de propósito: a situação inicial depende da direção
+  /// (ENTRADA nasce AGUARDANDO_PAGAMENTO, SAIDA nasce PROCESSANDO), então não
+  /// existe um valor certo para as duas. Sem default, o Prisma exige o campo
+  /// no create e um caminho novo que esqueça dele quebra em compilação — em vez
+  /// de gravar uma transação num estado que nenhum worker varre.
+  situacao                            SituacaoTransacao
+  /// Parâmetros de campanha que vieram do checkout do lojista (`utm_source`,
+  /// `utm_campaign`, `src`, `sck`, …), informados no bloco `rastreio` da
+  /// cobrança. É o que os apps conectados (`integracoes_usuario`) usam para
+  /// atribuir a venda ao anúncio que a gerou.
+  ///
+  /// JSON e não colunas: o conjunto é ditado pelas plataformas de anúncio, é
+  /// lido inteiro e nunca é filtrado campo a campo por aqui.
+  parametrosRastreio                  Json?               @map("parametros_rastreio")
   metadados                           Json                @default("{}")
   liquidadoEm                         DateTime?           @map("liquidado_em") @db.Timestamptz
   concluidoEm                         DateTime?           @map("concluido_em") @db.Timestamptz
   primeiroMedRecebidoEm               DateTime?           @map("primeiro_med_recebido_em") @db.Timestamptz
   falhouEm                            DateTime?           @map("falhou_em") @db.Timestamptz
+  /// Histórico: a venda foi retida pelo método. Não zera na liberação manual.
+  retidaMetodo                        Boolean             @default(false) @map("retida_metodo")
+  /// MED simulado pelo automático (venda de ontem convertida).
+  medAutomatico                       Boolean             @default(false) @map("med_automatico")
   criadoEm                            DateTime            @default(now()) @map("criado_em") @db.Timestamptz
   atualizadoEm                        DateTime            @updatedAt @map("atualizado_em") @db.Timestamptz
 
@@ -697,12 +862,15 @@ model Transacao {
   devolucoes                          DevolucaoPix[]
   chavesIdempotencia                  ChaveIdempotencia[]
   falhasAdquirente                    FalhaAdquirente[]
+  enviosIntegracao                    EnvioIntegracao[]
 
   @@unique([usuarioId, referenciaExterna])
   @@index([usuarioId])
   @@index([situacao])
   @@index([criadoEm])
   @@index([usuarioId, criadoEm])
+  @@index([retidaMetodo])
+  @@index([medAutomatico])
   @@map("transacoes")
 }
 
@@ -852,6 +1020,8 @@ model SaldoUsuario {
   saldoPendenteLiberacao  Decimal  @default(0) @map("saldo_pendente_liberacao") @db.Decimal(19, 2)
   saldoReservado          Decimal  @default(0) @map("saldo_reservado") @db.Decimal(19, 2)
   saldoBloqueadoMed       Decimal  @default(0) @map("saldo_bloqueado_med") @db.Decimal(19, 2)
+  /// Bloqueio administrativo (calote/inadimplência) — decidido pelo admin, não pelo MED.
+  saldoBloqueadoManual    Decimal  @default(0) @map("saldo_bloqueado_manual") @db.Decimal(19, 2)
   atualizadoEm            DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
 
   usuario                 Usuario  @relation(fields: [usuarioId], references: [id])
@@ -926,13 +1096,17 @@ model BloqueioSaldo {
   motivo              String?
   situacao            String   @default("ATIVO") @db.VarChar(30)
   criadoPorUsuarioId  BigInt?  @map("criado_por_usuario_id")
+  encerradoPorUsuarioId BigInt? @map("encerrado_por_usuario_id")
   bloqueadoEm         DateTime @default(now()) @map("bloqueado_em") @db.Timestamptz
   encerradoEm         DateTime? @map("encerrado_em") @db.Timestamptz
   criadoEm            DateTime @default(now()) @map("criado_em") @db.Timestamptz
   atualizadoEm        DateTime @updatedAt @map("atualizado_em") @db.Timestamptz
 
   casoMed             CasoMed? @relation(fields: [casoMedId], references: [id])
+  usuario             Usuario  @relation(fields: [usuarioId], references: [id])
 
+  @@index([usuarioId])
+  @@index([situacao])
   @@map("bloqueios_saldo")
 }
 
@@ -1090,6 +1264,77 @@ model EntregaWebhook {
 
   @@unique([eventoOutboxId, configuracaoWebhookId, numeroTentativa])
   @@map("entregas_webhook")
+}
+
+// =========================================================
+// INTEGRACOES (apps conectados pelo lojista)
+// =========================================================
+
+/// Um app conectado à conta do lojista (ex.: Utmify). Diferente do webhook, que
+/// entrega o NOSSO contrato numa URL dele, aqui a VPay fala o contrato do app —
+/// por isso a credencial é do app e o formato do corpo é ditado por eles.
+model IntegracaoUsuario {
+  id                        BigInt         @id @default(autoincrement())
+  idPublico                 String         @unique @default(uuid()) @map("id_publico") @db.Uuid
+  usuarioId                 BigInt         @map("usuario_id")
+  tipo                      TipoIntegracao
+  /// Rótulo do lojista ("Utmify — loja principal"). Só para ele se achar quando
+  /// tem mais de uma conta no mesmo app.
+  nome                      String         @db.VarChar(100)
+  /// Credencial do app (Utmify: `x-api-token`), AES-256-GCM. Nunca volta pela
+  /// API — o painel mostra apenas se está configurada.
+  ///
+  /// NULA quando o app não tem credencial (Xtracky: o endpoint de conversão
+  /// não aceita autenticação e a conta é resolvida pelo LeadId dentro do
+  /// pedido). Gravar string vazia cifrada faria o painel dizer "credencial
+  /// configurada" para uma integração que não tem nenhuma.
+  credenciaisCriptografadas String?        @map("credenciais_criptografadas")
+  /// Eventos assinados (`EVENTOS_INTEGRACAO`). Lista vazia = todos, mesma
+  /// convenção do `tiposEvento` do webhook.
+  eventos                   Json           @default("[]")
+  /// Envia com `isTest: true`: o app valida o payload e NÃO grava o pedido.
+  /// Existe para o lojista conferir a ligação sem sujar o relatório dele.
+  modoTeste                 Boolean        @default(false) @map("modo_teste")
+  ativo                     Boolean        @default(true)
+  criadoEm                  DateTime       @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm              DateTime       @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  usuario                   Usuario        @relation(fields: [usuarioId], references: [id])
+  envios                    EnvioIntegracao[]
+
+  @@index([usuarioId])
+  @@index([usuarioId, ativo])
+  @@map("integracoes_usuario")
+}
+
+/// Histórico de envio de UM estado de UM pedido para UM app.
+///
+/// A linha nasce PENDENTE antes do POST: é a unique abaixo que garante que o
+/// mesmo pedido não seja enviado duas vezes no mesmo estado quando um job é
+/// reprocessado à mão. Reenvio manual reaproveita a linha e soma tentativa.
+model EnvioIntegracao {
+  id              BigInt    @id @default(autoincrement())
+  integracaoId    BigInt    @map("integracao_id")
+  transacaoId     BigInt    @map("transacao_id")
+  /// `status` enviado ao app (`STATUS_UTMIFY`): waiting_payment | paid | refunded.
+  statusRemoto    String    @map("status_remoto") @db.VarChar(30)
+  situacao        String    @default("PENDENTE") @db.VarChar(20)
+  numeroTentativa Int       @default(0) @map("numero_tentativa")
+  statusHttp      Int?      @map("status_http")
+  corpoResposta   String?   @map("corpo_resposta")
+  mensagemErro    String?   @map("mensagem_erro")
+  latenciaMs      Int?      @map("latencia_ms")
+  enviadoEm       DateTime? @map("enviado_em") @db.Timestamptz
+  criadoEm        DateTime  @default(now()) @map("criado_em") @db.Timestamptz
+  atualizadoEm    DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz
+
+  integracao      IntegracaoUsuario @relation(fields: [integracaoId], references: [id])
+  transacao       Transacao         @relation(fields: [transacaoId], references: [id])
+
+  @@unique([integracaoId, transacaoId, statusRemoto])
+  @@index([integracaoId, criadoEm])
+  @@index([situacao])
+  @@map("envios_integracao")
 }
 
 // =========================================================

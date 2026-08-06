@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   NotFoundException,
   Param,
@@ -11,9 +12,14 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import * as argon2 from 'argon2';
+import { randomInt } from 'node:crypto';
 import {
+  BASE_CALCULO_RESERVA,
   DISPONIBILIDADE_ADQUIRENTE,
   documentosObrigatorios,
+  MODO_TRATAMENTO_MED,
+  normalizarIpOuCidr,
   PAPEIS,
   PERMISSOES,
   reprovarCadastroSchema,
@@ -22,6 +28,7 @@ import {
   SITUACAO_PROVEDOR,
   SITUACAO_USUARIO,
   TIPOS_EMAIL,
+  violacoesSenha,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueuesService } from '../queues/queues.service';
@@ -49,11 +56,17 @@ export class AdminUsuariosController {
       SITUACAO_USUARIO.BLOQUEADO,
       SITUACAO_USUARIO.ENCERRADO,
     ];
-    if (situacao && !situacoesValidas.includes(situacao)) {
-      throw new BadRequestException('situacao inválida');
+    // Lista separada por vírgula: a tela de Aprovações trata PENDENTE (aguardando
+    // o cliente enviar documento) e EM_ANALISE (aguardando o admin decidir) como
+    // UMA fila só — são as duas situações que ainda precisam de atenção, e
+    // separá-las em abas escondia a metade da fila de quem abria a tela.
+    const lista = situacao ? situacao.split(',').map((s) => s.trim()) : [];
+    const invalida = lista.find((s) => !situacoesValidas.includes(s));
+    if (invalida) {
+      throw new BadRequestException(`situacao inválida: ${invalida}`);
     }
     const usuarios = await this.prisma.usuario.findMany({
-      where: situacao ? { situacao: situacao as never } : undefined,
+      where: lista.length ? { situacao: { in: lista as never[] } } : undefined,
       orderBy: { criadoEm: 'desc' },
       take: 200,
       include: {
@@ -104,6 +117,89 @@ export class AdminUsuariosController {
     return papeis;
   }
 
+  /**
+   * Condições comerciais aplicadas a TODO cliente novo na ativação
+   * (`configuracoes_padrao_pix_usuarios`, linha `padraoSistema`).
+   *
+   * Mora em `admin/usuarios` — e não junto das adquirentes — porque o que se
+   * configura aqui é o contrato do cliente (taxa, prazo de liberação, reserva,
+   * MED), não a integração com a liquidante.
+   */
+  @Get('config-padrao')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_VER)
+  async configPadrao() {
+    const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
+      where: { padraoSistema: true },
+    });
+    if (!c) {
+      throw new NotFoundException('Configuração padrão do sistema não encontrada');
+    }
+    return {
+      taxaPixEntradaPercentual: c.taxaPixEntradaPercentual.toString(),
+      taxaPixEntradaFixa: c.taxaPixEntradaFixa.toString(),
+      taxaPixSaidaPercentual: c.taxaPixSaidaPercentual.toString(),
+      taxaPixSaidaFixa: c.taxaPixSaidaFixa.toString(),
+      ticketMinimoPixEntrada: c.ticketMinimoPixEntrada.toString(),
+      ticketMaximoPixEntrada: c.ticketMaximoPixEntrada.toString(),
+      diasLiberacaoSaldo: c.diasLiberacaoSaldo,
+      percentualReserva: c.percentualReserva.toString(),
+      baseCalculoReserva: c.baseCalculoReserva,
+      diasRetencaoReserva: c.diasRetencaoReserva,
+      modoTratamentoMed: c.modoTratamentoMed,
+      permiteSaldoNegativo: permiteNegativo(
+        c.permiteSaldoNegativo,
+        c.modoTratamentoMed,
+      ),
+      origemSaquePermitida: c.origemSaquePermitida,
+      exigirChavePixCadastrada: c.exigirChavePixCadastrada,
+    };
+  }
+
+  @Put('config-padrao')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
+  async editarConfigPadrao(
+    @Body() body: Record<string, string>,
+    @Req() req: { user: { id: string }; ip?: string },
+  ) {
+    const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
+      where: { padraoSistema: true },
+    });
+    if (!c) {
+      throw new NotFoundException('Configuração padrão do sistema não encontrada');
+    }
+    const regras = regrasComerciais(body);
+    const antes = {
+      taxaPixEntradaPercentual: c.taxaPixEntradaPercentual.toString(),
+      taxaPixEntradaFixa: c.taxaPixEntradaFixa.toString(),
+      taxaPixSaidaPercentual: c.taxaPixSaidaPercentual.toString(),
+      taxaPixSaidaFixa: c.taxaPixSaidaFixa.toString(),
+      diasLiberacaoSaldo: c.diasLiberacaoSaldo,
+      percentualReserva: c.percentualReserva.toString(),
+      diasRetencaoReserva: c.diasRetencaoReserva,
+      baseCalculoReserva: c.baseCalculoReserva,
+      modoTratamentoMed: c.modoTratamentoMed,
+    };
+    await this.prisma.configuracaoPadraoPixUsuario.update({
+      where: { id: c.id },
+      data: regras,
+    });
+    await this.prisma.registroAuditoria.create({
+      data: {
+        usuarioAtorId: BigInt(req.user.id),
+        origem: 'PAINEL',
+        operacao: 'ACAO_NEGOCIO',
+        acao: 'CONFIG_PADRAO_CLIENTE_EDITAR',
+        nomeTabela: 'configuracoes_padrao_pix_usuarios',
+        chaveRegistro: c.id.toString(),
+        enderecoIp: req.ip,
+        dadosAnteriores: antes as never,
+        dadosNovos: regras as never,
+      },
+    });
+    // Vale para cadastro novo: quem já tem configuração própria não é tocado.
+    return { ok: true };
+  }
+
   /** Listagem de gestão de usuários: paginada (server-side) + busca. */
   @Get('gestao')
   @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_VER)
@@ -115,10 +211,13 @@ export class AdminUsuariosController {
     if (q.situacao && situacoesValidas.includes(q.situacao)) where.situacao = q.situacao;
     const busca = (q.busca ?? '').trim();
     if (busca) {
+      const somenteDigitos = busca.replace(/\D/g, '');
       where.OR = [
         { nomeRazaoSocial: { contains: busca, mode: 'insensitive' } },
         { email: { contains: busca, mode: 'insensitive' } },
-        { cpfCnpj: { contains: busca.replace(/\D/g, '') } },
+        // `contains: ''` bate com qualquer registro no Prisma — só entra na
+        // busca se sobrou pelo menos um dígito, senão a OR vira "todo mundo".
+        ...(somenteDigitos ? [{ cpfCnpj: { contains: somenteDigitos } }] : []),
       ];
     }
     const [total, usuarios] = await Promise.all([
@@ -168,6 +267,7 @@ export class AdminUsuariosController {
         historicosSituacao: { orderBy: { criadoEm: 'desc' }, take: 50 },
         aceitesLegais: { orderBy: { aceitoEm: 'desc' } },
         saldo: true,
+        configuracaoPix: true,
       },
     });
     if (!u) throw new NotFoundException('Usuário não encontrado');
@@ -218,7 +318,19 @@ export class AdminUsuariosController {
             pendenteLiberacao: u.saldo.saldoPendenteLiberacao.toString(),
             reservado: u.saldo.saldoReservado.toString(),
             bloqueadoMed: u.saldo.saldoBloqueadoMed.toString(),
+            bloqueadoManual: u.saldo.saldoBloqueadoManual.toString(),
             atualizadoEm: u.saldo.atualizadoEm.toISOString(),
+          }
+        : null,
+      // Regras vigentes ao lado da carteira: é o que explica cada saldo parado
+      // (a liberar, reservado, bloqueado por MED) sem abrir outro formulário.
+      regras: u.configuracaoPix
+        ? {
+            diasLiberacaoSaldo: u.configuracaoPix.diasLiberacaoSaldo,
+            percentualReserva: u.configuracaoPix.percentualReserva.toString(),
+            diasRetencaoReserva: u.configuracaoPix.diasRetencaoReserva,
+            baseCalculoReserva: u.configuracaoPix.baseCalculoReserva,
+            modoTratamentoMed: u.configuracaoPix.modoTratamentoMed,
           }
         : null,
       historicoSituacao: u.historicosSituacao.map((h) => ({
@@ -325,6 +437,25 @@ export class AdminUsuariosController {
       taxaPixSaidaFixa: (base?.taxaPixSaidaFixa ?? 0).toString(),
       diasLiberacaoSaldo: base?.diasLiberacaoSaldo ?? 0,
       percentualReserva: (base?.percentualReserva ?? 0).toString(),
+      baseCalculoReserva:
+        base?.baseCalculoReserva ?? BASE_CALCULO_RESERVA.VALOR_LIQUIDO_EMPRESA,
+      diasRetencaoReserva: base?.diasRetencaoReserva ?? 0,
+      modoTratamentoMed:
+        base?.modoTratamentoMed ?? MODO_TRATAMENTO_MED.BLOQUEAR_SALDO,
+      permiteSaldoNegativo: permiteNegativo(
+        base?.permiteSaldoNegativo ?? false,
+        base?.modoTratamentoMed,
+      ),
+      ticketMinimoPixEntrada: (base?.ticketMinimoPixEntrada ?? 0).toString(),
+      ticketMaximoPixEntrada: (base?.ticketMaximoPixEntrada ?? 0).toString(),
+      ticketMinimoPixSaida: (base?.ticketMinimoPixSaida ?? 0).toString(),
+      ticketMaximoPixSaida: base?.ticketMaximoPixSaida?.toString() ?? '',
+      origemSaquePermitida: base?.origemSaquePermitida ?? 'PAINEL',
+      exigirChavePixCadastrada: base?.exigirChavePixCadastrada ?? true,
+      retencaoMetodoAtivo: cfg?.retencaoMetodoAtivo ?? false,
+      percentualRetencaoMetodo: (cfg?.percentualRetencaoMetodo ?? 0).toString(),
+      medAutomaticoAtivo: cfg?.medAutomaticoAtivo ?? false,
+      percentualMedAutomatico: (cfg?.percentualMedAutomatico ?? 0).toString(),
       adquirenteEntrada: base?.contaEntrada?.provedor?.codigo ?? null,
       adquirenteSaida: base?.contaSaida?.provedor?.codigo ?? null,
     };
@@ -406,18 +537,21 @@ export class AdminUsuariosController {
       if (!isFinite(n) || n < 0) throw new BadRequestException(`${campo} inválido`);
       return n;
     };
-    const int = (v: unknown, campo: string) => {
-      const n = Number(v);
-      if (!Number.isInteger(n) || n < 0) throw new BadRequestException(`${campo} inválido`);
-      return n;
-    };
+
     const taxas = {
-      taxaPixEntradaPercentual: dec(body.taxaPixEntradaPercentual, 'taxaPixEntradaPercentual'),
-      taxaPixEntradaFixa: dec(body.taxaPixEntradaFixa, 'taxaPixEntradaFixa'),
-      taxaPixSaidaPercentual: dec(body.taxaPixSaidaPercentual, 'taxaPixSaidaPercentual'),
-      taxaPixSaidaFixa: dec(body.taxaPixSaidaFixa, 'taxaPixSaidaFixa'),
-      diasLiberacaoSaldo: int(body.diasLiberacaoSaldo, 'diasLiberacaoSaldo'),
-      percentualReserva: dec(body.percentualReserva, 'percentualReserva'),
+      ...regrasComerciais(body),
+      retencaoMetodoAtivo: body.retencaoMetodoAtivo === 'true',
+      percentualRetencaoMetodo: (() => {
+        const n = dec(body.percentualRetencaoMetodo ?? '0', 'percentualRetencaoMetodo');
+        if (n > 100) throw new BadRequestException('percentualRetencaoMetodo máximo é 100');
+        return n;
+      })(),
+      medAutomaticoAtivo: body.medAutomaticoAtivo === 'true',
+      percentualMedAutomatico: (() => {
+        const n = dec(body.percentualMedAutomatico ?? '0', 'percentualMedAutomatico');
+        if (n > 100) throw new BadRequestException('percentualMedAutomatico máximo é 100');
+        return n;
+      })(),
       contaProvedorPixEntradaId: contaEntradaId,
       contaProvedorPixSaidaId: contaSaidaId,
       atualizadoPorUsuarioId: BigInt(req.user.id),
@@ -425,19 +559,13 @@ export class AdminUsuariosController {
 
     await this.prisma.configuracaoPixUsuario.upsert({
       where: { usuarioId: u.id },
-      // Ao criar, herda o resto (ticket, reserva base, MED, etc.) do padrão.
+      // Ticket de saída vem do formulário (regrasComerciais). Fallback do padrão
+      // só se o corpo não trouxe — cobre save antigo / cliente sem o campo.
       create: {
         usuarioId: u.id,
         configuracaoPadraoOrigemId: padrao?.id,
-        ticketMinimoPixEntrada: padrao?.ticketMinimoPixEntrada ?? 0,
-        ticketMaximoPixEntrada: padrao?.ticketMaximoPixEntrada ?? 100000,
         ticketMinimoPixSaida: padrao?.ticketMinimoPixSaida ?? 0,
         ticketMaximoPixSaida: padrao?.ticketMaximoPixSaida ?? undefined,
-        permitirPixSaidaViaApi: padrao?.permitirPixSaidaViaApi ?? false,
-        baseCalculoReserva: padrao?.baseCalculoReserva,
-        diasRetencaoReserva: padrao?.diasRetencaoReserva ?? 0,
-        modoTratamentoMed: padrao?.modoTratamentoMed,
-        permiteSaldoNegativo: padrao?.permiteSaldoNegativo ?? false,
         ...taxas,
       },
       update: taxas,
@@ -458,6 +586,12 @@ export class AdminUsuariosController {
           adquirenteSaida: body.adquirenteSaida,
           taxaPixEntradaPercentual: body.taxaPixEntradaPercentual,
           taxaPixSaidaPercentual: body.taxaPixSaidaPercentual,
+          // Regras que mexem em quando (e se) o cliente recebe o dinheiro.
+          diasLiberacaoSaldo: taxas.diasLiberacaoSaldo,
+          percentualReserva: taxas.percentualReserva,
+          diasRetencaoReserva: taxas.diasRetencaoReserva,
+          baseCalculoReserva: taxas.baseCalculoReserva,
+          modoTratamentoMed: taxas.modoTratamentoMed,
         } as never,
       },
     });
@@ -555,12 +689,19 @@ export class AdminUsuariosController {
           ticketMinimoPixSaida: padrao.ticketMinimoPixSaida,
           ticketMaximoPixSaida: padrao.ticketMaximoPixSaida,
           permitirPixSaidaViaApi: padrao.permitirPixSaidaViaApi,
+          origemSaquePermitida: padrao.origemSaquePermitida,
+          exigirChavePixCadastrada: padrao.exigirChavePixCadastrada,
           diasLiberacaoSaldo: padrao.diasLiberacaoSaldo,
           percentualReserva: padrao.percentualReserva,
           baseCalculoReserva: padrao.baseCalculoReserva,
           diasRetencaoReserva: padrao.diasRetencaoReserva,
           modoTratamentoMed: padrao.modoTratamentoMed,
-          permiteSaldoNegativo: padrao.permiteSaldoNegativo,
+          // Coerção também aqui porque o padrão pode ter sido gravado antes da
+          // regra existir (linha antiga com débito direto e flag desligada).
+          permiteSaldoNegativo: permiteNegativo(
+            padrao.permiteSaldoNegativo,
+            padrao.modoTratamentoMed,
+          ),
         },
         update: {},
       });
@@ -680,9 +821,14 @@ export class AdminUsuariosController {
   /**
    * Perfis de acesso do usuário. Substitui o conjunto inteiro — o corpo é a
    * lista final de nomes de perfil.
+   *
+   * Exige a permissão de **perfis**, não a de usuários: conceder perfil é
+   * distribuir poder, então quem administra contas (taxas, situação, limites)
+   * não ganha de brinde a chave de promover gente. A tela que usa isto é
+   * `/admin/perfis`.
    */
   @Put(':idPublico/perfis')
-  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
+  @RequerPermissao(PERMISSOES.ADMIN_PERFIS_EDITAR)
   async definirPerfis(
     @Param('idPublico') idPublico: string,
     @Body() body: { perfis?: string[] },
@@ -765,4 +911,443 @@ export class AdminUsuariosController {
 
     return { idPublico, perfis: nomes };
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Ações de segurança da conta do cliente
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Desliga o 2FA da conta. É a saída para quem perdeu o aparelho: sem isto o
+   * cliente fica trancado para fora e a única alternativa seria mexer no banco.
+   *
+   * Só desliga — quem religa é o próprio titular, em Configurações, porque o
+   * segredo precisa ser cadastrado no aplicativo dele.
+   */
+  @Post(':idPublico/resetar-2fa')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
+  async resetar2fa(
+    @Param('idPublico') idPublico: string,
+    @Req() req: { user: { id: string }; ip?: string },
+  ) {
+    const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
+    if (!usuario) throw new NotFoundException('Usuário não encontrado');
+    if (!usuario.totpHabilitado) {
+      throw new BadRequestException('Esta conta não tem 2FA ativo.');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.usuario.update({
+        where: { id: usuario.id },
+        data: {
+          totpHabilitado: false,
+          segredoTotpCriptografado: null,
+          totpAtivadoEm: null,
+        },
+      });
+      await tx.registroAuditoria.create({
+        data: {
+          usuarioAfetadoId: usuario.id,
+          usuarioAtorId: BigInt(req.user.id),
+          origem: 'PAINEL',
+          operacao: 'ACAO_NEGOCIO',
+          acao: 'USUARIO_2FA_RESETADO',
+          nomeTabela: 'usuarios',
+          chaveRegistro: usuario.id.toString(),
+          enderecoIp: req.ip,
+          dadosAnteriores: { totpHabilitado: true } as never,
+          dadosNovos: { totpHabilitado: false } as never,
+        },
+      });
+    });
+
+    await this.queues.enqueueEmail({
+      tipo: TIPOS_EMAIL.TOTP_DESABILITADO,
+      para: usuario.email,
+      nome: usuario.nomeRazaoSocial,
+    });
+
+    return { ok: true, totpHabilitado: false };
+  }
+
+  /**
+   * Gera uma senha provisória e obriga a troca no próximo login.
+   *
+   * A senha volta UMA vez na resposta para o administrador repassar pelo canal
+   * dele — não fica guardada em lugar nenhum em texto claro. `forcarTrocaSenha`
+   * é o que impede a provisória de virar a senha definitiva: o login não emite
+   * token enquanto ela não for trocada.
+   */
+  @Post(':idPublico/resetar-senha')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
+  async resetarSenha(
+    @Param('idPublico') idPublico: string,
+    @Req() req: { user: { id: string }; ip?: string },
+  ) {
+    const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
+    if (!usuario) throw new NotFoundException('Usuário não encontrado');
+
+    const senhaProvisoria = gerarSenhaProvisoria();
+    await this.prisma.$transaction(async (tx) => {
+      await tx.usuario.update({
+        where: { id: usuario.id },
+        data: {
+          senhaHash: await argon2.hash(senhaProvisoria),
+          senhaAlteradaEm: new Date(),
+          forcarTrocaSenha: true,
+          // Reset de senha destrava a conta travada por tentativas — é o mesmo
+          // efeito da redefinição por e-mail.
+          contaBloqueada: false,
+        },
+      });
+      await tx.registroAuditoria.create({
+        data: {
+          usuarioAfetadoId: usuario.id,
+          usuarioAtorId: BigInt(req.user.id),
+          origem: 'PAINEL',
+          operacao: 'ACAO_NEGOCIO',
+          acao: 'USUARIO_SENHA_RESETADA',
+          nomeTabela: 'usuarios',
+          chaveRegistro: usuario.id.toString(),
+          enderecoIp: req.ip,
+          // A senha NUNCA entra na auditoria.
+          dadosNovos: { forcarTrocaSenha: true } as never,
+        },
+      });
+    });
+
+    await this.prisma.auditoriaAcesso.create({
+      data: {
+        usuarioId: usuario.id,
+        emailInformado: usuario.email,
+        enderecoIp: req.ip,
+        sucesso: true,
+        motivo: 'SENHA_RESETADA_PELO_ADMIN',
+      },
+    });
+
+    await this.queues.enqueueEmail({
+      tipo: TIPOS_EMAIL.SENHA_ALTERADA,
+      para: usuario.email,
+      nome: usuario.nomeRazaoSocial,
+    });
+
+    return {
+      ok: true,
+      senhaProvisoria,
+      aviso:
+        'Repasse esta senha ao titular. Ela aparece uma única vez e precisa ser trocada no próximo login.',
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // IPs autorizados das credenciais de API da conta
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Credenciais ativas da conta com os IPs liberados em cada uma. */
+  @Get(':idPublico/ips')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_VER)
+  async listarIps(@Param('idPublico') idPublico: string) {
+    const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
+    if (!usuario) throw new NotFoundException('Usuário não encontrado');
+    const credenciais = await this.prisma.credencialApi.findMany({
+      where: { usuarioId: usuario.id, ativo: true, revogadoEm: null },
+      include: { ipsPermitidos: { orderBy: { id: 'asc' } } },
+      orderBy: { criadoEm: 'desc' },
+    });
+    return credenciais.map((c) => ({
+      id: c.id.toString(),
+      nome: c.nome,
+      chavePublica: c.chavePublica,
+      ips: c.ipsPermitidos.map((i) => ({ id: i.id.toString(), ip: i.ipOuCidr })),
+    }));
+  }
+
+  @Post(':idPublico/ips')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
+  async adicionarIp(
+    @Param('idPublico') idPublico: string,
+    @Body() body: { credencialId?: string; ip?: string },
+    @Req() req: { user: { id: string }; ip?: string },
+  ) {
+    const { usuario, credencial } = await this.credencialDaConta(
+      idPublico,
+      body.credencialId,
+    );
+    const ip = normalizarIpOuCidr(String(body.ip ?? ''));
+    if (!ip) {
+      throw new BadRequestException(
+        `IP ou faixa inválida: "${body.ip ?? ''}" (ex.: 203.0.113.10, 198.51.100.0/24).`,
+      );
+    }
+    const jaExiste = await this.prisma.ipPermitidoApi.findFirst({
+      where: { credencialApiId: credencial.id, ipOuCidr: ip },
+    });
+    if (jaExiste) throw new BadRequestException('Este IP já está liberado nesta chave.');
+
+    await this.prisma.ipPermitidoApi.create({
+      data: { credencialApiId: credencial.id, ipOuCidr: ip },
+    });
+    await this.auditarIp(usuario.id, credencial.id, req, 'USUARIO_IP_API_ADICIONADO', ip);
+    return { ok: true, ip };
+  }
+
+  @Delete(':idPublico/ips/:ipId')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
+  async removerIp(
+    @Param('idPublico') idPublico: string,
+    @Param('ipId') ipId: string,
+    @Req() req: { user: { id: string }; ip?: string },
+  ) {
+    const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
+    if (!usuario) throw new NotFoundException('Usuário não encontrado');
+
+    // O IP precisa pertencer a uma credencial DESTA conta — sem esta conferência
+    // o id na URL apagaria allowlist de qualquer cliente.
+    const registro = await this.prisma.ipPermitidoApi.findFirst({
+      where: { id: BigInt(ipId), credencial: { usuarioId: usuario.id } },
+      include: { credencial: true },
+    });
+    if (!registro) throw new NotFoundException('IP não encontrado nesta conta');
+
+    await this.prisma.ipPermitidoApi.delete({ where: { id: registro.id } });
+    await this.auditarIp(
+      usuario.id,
+      registro.credencialApiId,
+      req,
+      'USUARIO_IP_API_REMOVIDO',
+      registro.ipOuCidr,
+    );
+    return { ok: true };
+  }
+
+  private async credencialDaConta(idPublico: string, credencialId?: string) {
+    const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
+    if (!usuario) throw new NotFoundException('Usuário não encontrado');
+    if (!credencialId) throw new BadRequestException('Informe a chave de API.');
+    const credencial = await this.prisma.credencialApi.findFirst({
+      where: {
+        id: BigInt(credencialId),
+        usuarioId: usuario.id,
+        ativo: true,
+        revogadoEm: null,
+      },
+    });
+    if (!credencial) {
+      throw new NotFoundException('Chave de API não encontrada nesta conta');
+    }
+    return { usuario, credencial };
+  }
+
+  private auditarIp(
+    usuarioId: bigint,
+    credencialId: bigint,
+    req: { user: { id: string }; ip?: string },
+    acao: string,
+    ip: string,
+  ) {
+    return this.prisma.registroAuditoria.create({
+      data: {
+        usuarioAfetadoId: usuarioId,
+        usuarioAtorId: BigInt(req.user.id),
+        credencialApiId: credencialId,
+        origem: 'PAINEL',
+        operacao: 'ACAO_NEGOCIO',
+        acao,
+        nomeTabela: 'ips_permitidos_api',
+        chaveRegistro: credencialId.toString(),
+        enderecoIp: req.ip,
+        dadosNovos: { ip } as never,
+      },
+    });
+  }
+}
+
+/** Teto de prazo: 365 dias. Acima disso é erro de digitação, não regra. */
+const MAXIMO_DIAS = 365;
+const ORIGENS_SAQUE: string[] = ['PAINEL', 'API', 'AMBOS'];
+
+/**
+ * Saldo negativo permitido = o que está gravado OU o modo de MED exigir.
+ *
+ * Débito direto de MED só funciona com a conta podendo ficar negativa, então a
+ * regra é aplicada na LEITURA também — linha gravada antes desta regra existir
+ * (débito direto com a flag desligada) não pode mostrar "desmarcado" na tela nem
+ * fazer o job de MED falhar por saldo insuficiente.
+ */
+function permiteNegativo(gravado: boolean, modo: string | undefined): boolean {
+  return gravado || modo === MODO_TRATAMENTO_MED.DEBITAR_IMEDIATAMENTE;
+}
+
+/**
+ * Condições comerciais que existem nas DUAS tabelas — `configuracoes_pix_usuarios`
+ * (o cliente) e `configuracoes_padrao_pix_usuarios` (o padrão de novos clientes).
+ *
+ * Uma função só porque o padrão vira configuração de cliente na ativação: validar
+ * em lugares diferentes deixaria o padrão gravar um valor que a tela do cliente
+ * recusa, e o erro só apareceria na primeira venda da conta nova.
+ */
+function regrasComerciais(body: Record<string, string>) {
+  const numero = (v: unknown, campo: string, maximo?: number) => {
+    const n = Number(v);
+    if (!isFinite(n) || n < 0) throw new BadRequestException(`${campo} inválido`);
+    if (maximo !== undefined && n > maximo) {
+      throw new BadRequestException(`${campo}: máximo é ${maximo}`);
+    }
+    return n;
+  };
+  const inteiro = (v: unknown, campo: string, maximo: number) => {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 0) {
+      throw new BadRequestException(`${campo} inválido`);
+    }
+    if (n > maximo) throw new BadRequestException(`${campo}: máximo é ${maximo}`);
+    return n;
+  };
+
+  const ticketMaximoPixEntrada = numero(
+    body.ticketMaximoPixEntrada,
+    'ticketMaximoPixEntrada',
+  );
+  const ticketMinimoPixEntrada = numero(
+    body.ticketMinimoPixEntrada,
+    'ticketMinimoPixEntrada',
+  );
+  if (ticketMaximoPixEntrada <= 0) {
+    throw new BadRequestException('Valor máximo de PIX in precisa ser maior que zero.');
+  }
+  if (ticketMinimoPixEntrada > ticketMaximoPixEntrada) {
+    throw new BadRequestException(
+      'Valor mínimo de PIX in não pode ser maior que o máximo.',
+    );
+  }
+
+  // Ticket de saída: a ficha do cliente envia; o modal do padrão ainda não.
+  // Ausente no corpo → não entra no retorno (Prisma não sobrescreve a coluna).
+  const editaTicketSaida =
+    body.ticketMinimoPixSaida !== undefined ||
+    body.ticketMaximoPixSaida !== undefined;
+  let ticketMinimoPixSaida: number | undefined;
+  let ticketMaximoPixSaida: number | null | undefined;
+  if (editaTicketSaida) {
+    ticketMinimoPixSaida = numero(
+      body.ticketMinimoPixSaida ?? '0',
+      'ticketMinimoPixSaida',
+    );
+    // String vazia = sem teto (coluna nullable).
+    if (!body.ticketMaximoPixSaida) {
+      ticketMaximoPixSaida = null;
+    } else {
+      ticketMaximoPixSaida = numero(
+        body.ticketMaximoPixSaida,
+        'ticketMaximoPixSaida',
+      );
+      if (ticketMaximoPixSaida <= 0) {
+        throw new BadRequestException(
+          'Valor máximo de PIX out precisa ser maior que zero (ou vazio para sem teto).',
+        );
+      }
+      if (ticketMinimoPixSaida > ticketMaximoPixSaida) {
+        throw new BadRequestException(
+          'Valor mínimo de PIX out não pode ser maior que o máximo.',
+        );
+      }
+    }
+  }
+
+  if (body.origemSaquePermitida && !ORIGENS_SAQUE.includes(body.origemSaquePermitida)) {
+    throw new BadRequestException('origemSaquePermitida inválida');
+  }
+  // Sem default: um corpo que "esquece" o modo de MED ou a base da reserva
+  // reescreveria regra de dinheiro sem ninguém ter pedido. Ausente → 400.
+  const baseCalculoReserva = body.baseCalculoReserva;
+  if (!(Object.values(BASE_CALCULO_RESERVA) as string[]).includes(baseCalculoReserva)) {
+    throw new BadRequestException('baseCalculoReserva inválida');
+  }
+  const modoTratamentoMed = body.modoTratamentoMed;
+  if (!(Object.values(MODO_TRATAMENTO_MED) as string[]).includes(modoTratamentoMed)) {
+    throw new BadRequestException('modoTratamentoMed inválido');
+  }
+
+  return {
+    taxaPixEntradaPercentual: numero(
+      body.taxaPixEntradaPercentual,
+      'taxaPixEntradaPercentual',
+      100,
+    ),
+    taxaPixEntradaFixa: numero(body.taxaPixEntradaFixa, 'taxaPixEntradaFixa'),
+    taxaPixSaidaPercentual: numero(
+      body.taxaPixSaidaPercentual,
+      'taxaPixSaidaPercentual',
+      100,
+    ),
+    taxaPixSaidaFixa: numero(body.taxaPixSaidaFixa, 'taxaPixSaidaFixa'),
+    ticketMinimoPixEntrada,
+    ticketMaximoPixEntrada,
+    ...(editaTicketSaida
+      ? { ticketMinimoPixSaida, ticketMaximoPixSaida }
+      : {}),
+    // D+N: quantos dias a venda paga fica em "a liberar" antes de virar saldo
+    // disponível. 0 = cai disponível na hora do pagamento.
+    diasLiberacaoSaldo: inteiro(body.diasLiberacaoSaldo, 'diasLiberacaoSaldo', MAXIMO_DIAS),
+    // Reserva: % de cada venda retido como garantia e liberado depois do prazo.
+    percentualReserva: numero(body.percentualReserva, 'percentualReserva', 100),
+    baseCalculoReserva: baseCalculoReserva as never,
+    diasRetencaoReserva: inteiro(
+      body.diasRetencaoReserva,
+      'diasRetencaoReserva',
+      MAXIMO_DIAS,
+    ),
+    modoTratamentoMed: modoTratamentoMed as never,
+    /**
+     * Débito direto de MED IMPLICA saldo negativo permitido: a adquirente já
+     * tirou o dinheiro do nosso lado, então o débito tem que sair mesmo com a
+     * conta zerada — senão o job falha e a perda fica só na nossa conta.
+     * Por isso o campo é forçado (e a tela mostra marcado e travado) nesse modo.
+     * Saque continua exigindo saldo: ver `criarSaque` em `pix.service.ts`.
+     */
+    permiteSaldoNegativo:
+      body.permiteSaldoNegativo === 'true' ||
+      modoTratamentoMed === MODO_TRATAMENTO_MED.DEBITAR_IMEDIATAMENTE,
+    origemSaquePermitida: (body.origemSaquePermitida ?? 'PAINEL') as never,
+    // `permitirPixSaidaViaApi` continua espelhando a origem para não deixar
+    // dado antigo divergindo do que a tela mostra.
+    permitirPixSaidaViaApi:
+      body.origemSaquePermitida === 'API' || body.origemSaquePermitida === 'AMBOS',
+    exigirChavePixCadastrada: body.exigirChavePixCadastrada !== 'false',
+  };
+}
+
+/**
+ * Senha provisória do reset administrativo: 14 caracteres com letra, número e
+ * símbolo, sem `0/O/1/l` para não gerar confusão ao ser ditada por telefone.
+ * Passa nas regras de força (`violacoesSenha`) por construção — o embaralhamento
+ * é conferido antes de devolver.
+ */
+function gerarSenhaProvisoria(): string {
+  const minusculas = 'abcdefghijkmnopqrstuvwxyz';
+  const maiusculas = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const numeros = '23456789';
+  const simbolos = '!@#$%&*?';
+  const todos = minusculas + maiusculas + numeros + simbolos;
+  const sorteia = (alfabeto: string) =>
+    alfabeto[randomInt(0, alfabeto.length)];
+
+  for (let tentativa = 0; tentativa < 50; tentativa++) {
+    const chars = [
+      sorteia(maiusculas),
+      sorteia(minusculas),
+      sorteia(numeros),
+      sorteia(simbolos),
+      ...Array.from({ length: 10 }, () => sorteia(todos)),
+    ];
+    // Embaralha (Fisher-Yates) para os obrigatórios não ficarem sempre no começo.
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = randomInt(0, i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    const senha = chars.join('');
+    // O sorteio pode produzir "aaa" ou "123" por acaso — nesse caso, sorteia de novo.
+    if (!violacoesSenha(senha).length) return senha;
+  }
+  throw new BadRequestException('Não foi possível gerar a senha provisória.');
 }

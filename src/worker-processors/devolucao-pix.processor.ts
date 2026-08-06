@@ -103,10 +103,10 @@ export class DevolucaoPixProcessor extends WorkerHost {
           },
         });
 
-        // Transação vira DEVOLVIDA quando o total devolvido cobre o valor bruto.
+        // Transação vira MED quando o total devolvido cobre o valor bruto.
         // O aggregate roda DEPOIS do update acima, então já inclui esta
         // devolução — somar devolucao.valor outra vez contaria em dobro e
-        // marcaria DEVOLVIDA com devolução apenas parcial.
+        // marcaria MED com devolução apenas parcial.
         const concluido = await tx.devolucaoPix.aggregate({
           where: {
             transacaoId: devolucao.transacaoId,
@@ -118,13 +118,13 @@ export class DevolucaoPixProcessor extends WorkerHost {
         if (somaAtual.gte(money(devolucao.transacao.valorBruto.toString()))) {
           await tx.transacao.update({
             where: { id: devolucao.transacaoId },
-            data: { situacao: SITUACAO_TRANSACAO.DEVOLVIDA },
+            data: { situacao: SITUACAO_TRANSACAO.MED },
           });
           await tx.historicoSituacaoTransacao.create({
             data: {
               transacaoId: devolucao.transacaoId,
               situacaoAnterior: devolucao.transacao.situacao,
-              novaSituacao: SITUACAO_TRANSACAO.DEVOLVIDA,
+              novaSituacao: SITUACAO_TRANSACAO.MED,
               origem: 'WORKER',
               motivo: 'Devolução MED concluída na liquidante',
             },

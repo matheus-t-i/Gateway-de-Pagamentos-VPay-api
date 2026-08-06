@@ -1,0 +1,11 @@
+-- Transação não tem mais situação padrão.
+--
+-- A coluna é compartilhada pelas duas direções e cada uma nasce diferente
+-- (ENTRADA em AGUARDANDO_PAGAMENTO, SAIDA em PROCESSANDO), então 'PENDENTE'
+-- não era o estado inicial de ninguém: era só o que sobrava se o INSERT
+-- omitisse a coluna — e uma transação em PENDENTE não é varrida por nenhum
+-- worker (a conciliação olha AGUARDANDO_PAGAMENTO e PROCESSANDO).
+--
+-- Sem default, o Prisma passa a exigir `situacao` no create.
+-- Operação não destrutiva: não altera nenhuma linha existente.
+ALTER TABLE "transacoes" ALTER COLUMN "situacao" DROP DEFAULT;

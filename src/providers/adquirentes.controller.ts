@@ -122,6 +122,7 @@ export class AdminAdquirentesVitrineController {
     const pagina = Math.max(1, Number(q.page) || 1);
     const limite = Math.min(1000, Math.max(5, Number(q.limit) || 10));
     const busca = (q.busca ?? '').trim();
+    const documentoBusca = busca.replace(/[^0-9A-Za-z]/g, '');
     const where = {
       provedorPagamentoId: provedor.id,
       ...(busca
@@ -130,7 +131,9 @@ export class AdminAdquirentesVitrineController {
               OR: [
                 { nomeRazaoSocial: { contains: busca, mode: 'insensitive' as const } },
                 { email: { contains: busca, mode: 'insensitive' as const } },
-                { cpfCnpj: { contains: busca.replace(/[^0-9A-Za-z]/g, '') } },
+                // `contains: ''` bate com qualquer registro no Prisma — só entra
+                // na busca se sobrou algo depois de tirar a pontuação.
+                ...(documentoBusca ? [{ cpfCnpj: { contains: documentoBusca } }] : []),
               ],
             },
           }

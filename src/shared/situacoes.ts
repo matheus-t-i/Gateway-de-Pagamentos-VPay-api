@@ -47,7 +47,13 @@ export const SITUACAO_TRANSACAO = {
   CONCLUIDA: 'CONCLUIDA',
   FALHA: 'FALHA',
   CANCELADA: 'CANCELADA',
-  DEVOLVIDA: 'DEVOLVIDA',
+  /**
+   * Venda devolvida ao pagador por contestação (Mecanismo Especial de
+   * Devolução). O nome é o termo de mercado do chargeback PIX e é exatamente o
+   * que sai no callback ao lojista — situação interna e status público são o
+   * mesmo valor, sem tradução.
+   */
+  MED: 'MED',
 } as const;
 
 /** provedores_pagamento.situacao / contas_provedor.situacao — enum SituacaoProvedor. */
@@ -61,8 +67,29 @@ export const SITUACAO_PROVEDOR = {
 export const SITUACAO_CHAVE_PIX = {
   PENDENTE: 'PENDENTE',
   APROVADA: 'APROVADA',
+  /** O analista recusou a chave ainda na análise. */
   REPROVADA: 'REPROVADA',
+  /** Estava APROVADA e o admin cortou o acesso (com justificativa). */
+  REVOGADA: 'REVOGADA',
+  /** O próprio cliente removeu a chave do painel dele. */
   INATIVA: 'INATIVA',
+} as const;
+
+/**
+ * Situações a partir das quais o cliente pode RECADASTRAR a mesma chave: já
+ * saíram de circulação, então uma nova solicitação é legítima e volta para a
+ * fila do analista (reutilizando a linha, ver `ChavePixUsuario`).
+ */
+export const SITUACOES_CHAVE_PIX_RECADASTRAVEIS: string[] = [
+  SITUACAO_CHAVE_PIX.REPROVADA,
+  SITUACAO_CHAVE_PIX.REVOGADA,
+  SITUACAO_CHAVE_PIX.INATIVA,
+];
+
+/** Quem originou a mudança de situação de uma chave (historicos_chave_pix). */
+export const ORIGEM_HISTORICO_CHAVE_PIX = {
+  CLIENTE: 'CLIENTE',
+  ADMIN: 'ADMIN',
 } as const;
 
 /** casos_med.situacao — VarChar(40); vocabulário oficial. */
@@ -88,7 +115,19 @@ export const SITUACAO_DEVOLUCAO = {
 /** bloqueios_saldo.situacao — VarChar(30); vocabulário oficial. */
 export const SITUACAO_BLOQUEIO = {
   ATIVO: 'ATIVO',
+  /** Encerramento genérico (fluxo MED: a decisão do caso é quem resolve o dinheiro). */
   ENCERRADO: 'ENCERRADO',
+  /** Bloqueio manual desfeito — o valor voltou ao disponível do cliente. */
+  LIBERADO: 'LIBERADO',
+  /** Bloqueio manual debitado — o valor saiu da carteira do cliente. */
+  DEBITADO: 'DEBITADO',
+} as const;
+
+/** bloqueios_saldo.tipo — VarChar(30); vocabulário oficial. */
+export const TIPO_BLOQUEIO = {
+  MED: 'MED',
+  /** Bloqueio administrativo decidido pelo admin (calote/inadimplência). */
+  MANUAL: 'MANUAL',
 } as const;
 
 /** webhooks_recebidos_provedor.situacao — VarChar(30); vocabulário oficial. */
@@ -103,6 +142,20 @@ export const SITUACAO_ENTREGA_WEBHOOK = {
   SUCESSO: 'SUCESSO',
   FALHA: 'FALHA',
 } as const;
+
+/**
+ * envios_integracao.situacao — VarChar(20); vocabulário oficial.
+ *
+ * Tem `PENDENTE` (que a entrega de webhook não tem) porque a linha nasce ANTES
+ * do POST: é ela que faz o dedupe pela unique `(integracao, transacao, status)`.
+ */
+export const SITUACAO_ENVIO_INTEGRACAO = {
+  PENDENTE: 'PENDENTE',
+  SUCESSO: 'SUCESSO',
+  FALHA: 'FALHA',
+} as const;
+export type SituacaoEnvioIntegracaoValor =
+  (typeof SITUACAO_ENVIO_INTEGRACAO)[keyof typeof SITUACAO_ENVIO_INTEGRACAO];
 
 /** tentativas_transacoes.situacao — VarChar; vocabulário oficial. */
 export const SITUACAO_TENTATIVA = {
@@ -160,6 +213,34 @@ export const DISPONIBILIDADE_ADQUIRENTE = {
 } as const;
 export type DisponibilidadeAdquirenteValor =
   (typeof DISPONIBILIDADE_ADQUIRENTE)[keyof typeof DISPONIBILIDADE_ADQUIRENTE];
+
+/**
+ * configuracoes_pix_usuarios.modo_tratamento_med — enum ModoTratamentoMed.
+ *
+ * MED sempre desconta saldo: `BLOQUEAR_SALDO` move disponível→bloqueado e manda
+ * o caso para a fila de `/admin/med`; `DEBITAR_IMEDIATAMENTE` tira o valor na
+ * hora e ENCERRA o caso — não há análise, e por isso não existe saldo bloqueado
+ * por MED nessa conta. Não existe modo que só sinalize sem tocar no dinheiro.
+ */
+export const MODO_TRATAMENTO_MED = {
+  BLOQUEAR_SALDO: 'BLOQUEAR_SALDO',
+  DEBITAR_IMEDIATAMENTE: 'DEBITAR_IMEDIATAMENTE',
+} as const;
+export type ModoTratamentoMedValor =
+  (typeof MODO_TRATAMENTO_MED)[keyof typeof MODO_TRATAMENTO_MED];
+
+/** Modos que deixam o caso MED aguardando decisão do analista. */
+export const MODOS_MED_COM_ANALISE: string[] = [
+  MODO_TRATAMENTO_MED.BLOQUEAR_SALDO,
+];
+
+/** configuracoes_pix_usuarios.base_calculo_reserva — enum BaseCalculoReserva. */
+export const BASE_CALCULO_RESERVA = {
+  VALOR_BRUTO: 'VALOR_BRUTO',
+  VALOR_LIQUIDO_EMPRESA: 'VALOR_LIQUIDO_EMPRESA',
+} as const;
+export type BaseCalculoReservaValor =
+  (typeof BASE_CALCULO_RESERVA)[keyof typeof BASE_CALCULO_RESERVA];
 
 /** Eventos de webhook enviados ao lojista (tiposEvento das configs). */
 export const EVENTOS_LOJISTA = {

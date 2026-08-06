@@ -95,6 +95,13 @@ export function montarEmail(
         `${p(ola)}${p('A senha da sua conta acabou de ser alterada.')}${p('<strong>Se não foi você</strong>, fale com o suporte imediatamente.')}`,
       );
 
+    case TIPOS_EMAIL.CONTA_ENCERRADA:
+      return montar(
+        'Sua conta foi encerrada',
+        `${ola} Sua conta foi encerrada a seu pedido. O acesso ao painel, as credenciais de API e os webhooks foram desligados. O histórico das suas operações continua guardado.`,
+        `${p(ola)}${p('Sua conta foi <strong>encerrada</strong> a seu pedido.')}${p('O acesso ao painel, as credenciais de API e os webhooks foram desligados imediatamente.')}${p('Seu histórico de operações continua guardado — nada foi apagado. Para reabrir a conta, fale com o suporte.')}${p('<strong>Se não foi você</strong>, entre em contato imediatamente.')}`,
+      );
+
     case TIPOS_EMAIL.TOTP_HABILITADO:
       return montar(
         'Verificação em duas etapas ativada',
@@ -121,6 +128,13 @@ export function montarEmail(
         'Chave PIX não aprovada',
         `${ola} A chave PIX ${dados.chave ?? ''} não foi aprovada. Motivo: ${dados.motivo ?? 'não informado'}.`,
         `${p(ola)}${p('A chave PIX <strong>' + (dados.chave ?? '') + '</strong> não foi aprovada.')}${p('<strong>Motivo:</strong> ' + (dados.motivo ?? 'não informado'))}`,
+      );
+
+    case TIPOS_EMAIL.CHAVE_PIX_REVOGADA:
+      return montar(
+        'Chave PIX desativada',
+        `${ola} A chave PIX ${dados.chave ?? ''} foi desativada e não pode mais ser usada para saques. Motivo: ${dados.motivo ?? 'não informado'}.`,
+        `${p(ola)}${p('A chave PIX <strong>' + (dados.chave ?? '') + '</strong> foi desativada e <strong>não pode mais ser usada para saques</strong>.')}${p('<strong>Motivo:</strong> ' + (dados.motivo ?? 'não informado'))}${p('Se precisar usá-la de novo, cadastre a chave outra vez no painel — ela passará por uma nova análise.')}`,
       );
 
     case TIPOS_EMAIL.MED_RECEBIDO:

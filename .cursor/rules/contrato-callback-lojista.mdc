@@ -1,0 +1,87 @@
+---
+description: Contrato público do callback ao lojista — status e payload são congelados
+alwaysApply: true
+globs: "**/callback-lojista*,**/entrega-webhook*,**/worker-processors/**,**/documentacao/**,**/situacoes*"
+---
+
+# Contrato do callback ao lojista (PÚBLICO — não quebrar)
+
+O corpo do callback e o vocabulário de `status` são **API pública**. O lojista
+escreve `if (status === 'CONCLUIDA')` no sistema dele. Mudar um valor não gera
+erro em lugar nenhum: o webhook continua entregando 200 e o `if` do cliente
+simplesmente para de casar. É falha silenciosa em produção, com dinheiro.
+
+> **Estágio atual: PRÉ-PRODUÇÃO.** Ainda não existe lojista integrado, então
+> mudar o contrato é decisão de produto normal — não precisa de plano de
+> migração nem de período de convivência. Ao entrar em produção, apague este
+> aviso: a partir daí valem as regras abaixo na forma estrita, porque cada
+> mudança passa a quebrar integração de terceiro.
+
+## Fonte única
+
+| O quê | Onde |
+|-------|------|
+| Enum das situações | `Gateway-de-Pagamentos-VPay-api/src/shared/situacoes.ts` (`SITUACAO_TRANSACAO`) |
+| Conjuntos e mapeamento | `Gateway-de-Pagamentos-VPay-api/src/shared/callback-lojista.ts` |
+| Espelho para a documentação | `Gateway-de-Pagamentos-VPay-web/src/lib/callback-lojista.ts` |
+| Montagem do corpo | `EntregaWebhookService.montarCorpo` |
+| Documentação exibida | `/desenvolvedores/documentacao` (lê `STATUS_CALLBACK_DOC`) |
+
+Nunca escrever a situação nem `'cash_in'` como string literal em
+controller/service/processor — usar `SITUACAO_TRANSACAO`, `OPERACAO_CALLBACK`,
+`statusCallback()`, `operacaoCallback()`, `STATUS_CASH_IN`, `STATUS_CASH_OUT`.
+
+## Regras
+
+1. **O status é a situação do sistema.** O callback envia `SITUACAO_TRANSACAO` —
+   o mesmo valor do painel. NUNCA criar vocabulário paralelo/traduzido
+   (`PAID_OUT`, `COMPLETED`, `WAITING_PAYMENT` e afins não existem aqui).
+2. **Conjunto por direção, sem exceção:**
+   - Cash-in: `AGUARDANDO_PAGAMENTO`, `CONCLUIDA`, `FALHA`, `MED`.
+     Não existe `PENDENTE`, `PROCESSANDO` nem `CANCELADA` em cash-in.
+   - Cash-out: `PROCESSANDO`, `CONCLUIDA`, `FALHA`, `CANCELADA`.
+3. **Renomear é decisão do dono do produto, nunca iniciativa da IA.** Em
+   pré-produção o rename é livre desde que feito por inteiro (enum + migration +
+   espelho + doc + regras) e nunca sugerido pela IA por conta própria. Depois do
+   go-live: **só acrescentar** — valor existente não é renomeado, removido nem
+   ressignificado; precisa de um estado novo, adicione e mapeie.
+   Referência de rename bem-feito: `DEVOLVIDA` → `MED`, migration
+   `20260806030000_situacao_transacao_devolvida_para_med`, com
+   `ALTER TYPE ... RENAME VALUE` (atômico, não reescreve as linhas existentes).
+4. **Os dois arquivos andam juntos.** Mexeu no da API, mexeu no espelho do web
+   na mesma alteração, incluindo `STATUS_CALLBACK_DOC`. Doc dessincronizada faz
+   o cliente tratar status que nunca chega — ou ignorar um que chega.
+5. **Estados internos não vazam.** `LIQUIDADA` (passo intermediário do crédito) e
+   `PENDENTE` (default da coluna) são convertidos nos mapas. Situação nova no
+   enum exige entrada nos DOIS mapas; depender do fallback é bug.
+6. **Campos do payload também são contrato.** Os nomes (`valor_bruto`,
+   `referencia_externa`, `deposito_liquido`, `valor_liquidado`, `data_med`, …)
+   são snake_case por compatibilidade. Campo novo pode ser acrescentado;
+   renomear/remover, não.
+7. **Um corpo por destino.** `urlcallback` no payload é o destino daquela
+   entrega — o corpo é montado dentro do laço de destinos, nunca uma vez só.
+8. **Dois destinos = duas entregas.** Webhook do painel + `urlCallback` da
+   operação em URLs diferentes entregam o mesmo evento duas vezes, por
+   definição. URLs iguais (normalizando barra final e host) entregam uma vez.
+   Isso é comportamento documentado — não "corrigir".
+
+## Máquina de estados (o que gera cada status)
+
+**Cash-in:** nasce `AGUARDANDO_PAGAMENTO`. Liquidante falhou → contingência gera
+em outra e o status **continua** `AGUARDANDO_PAGAMENTO` (mudam só txid e
+copia-e-cola). Esgotou tudo → `FALHA`. Pago → `CONCLUIDA`. Contestação → `MED`.
+
+**Cash-out:** nasce `PROCESSANDO`, que já significa **saldo debitado** — o débito
+acontece em `criarSaque`, antes de enfileirar.
+
+## Saque: um por vez, revalidar sempre
+
+`4-pix-cash-out` roda com `concurrency: 1`. `PixCashOutProcessor` NUNCA confia no
+que foi validado na criação — o job pode ser reprocessado à mão muito depois.
+Antes de enviar, revalida: tentativa de SUCESSO anterior (trava anti-pagamento
+duplo), situação enviável, conta ATIVA, provedor ativo, débito presente em
+`movimentacoes_saldo`, ticket min/máx, e — conforme a origem — credencial ativa
+com escopo `pix.saque.criar` (API) ou chave PIX cadastrada e **APROVADA** (painel).
+
+Regra violada → `throw`, job falha e fica visível. **Nunca** devolver saldo nem
+corrigir sozinho: mexer em dinheiro automaticamente é decisão humana.

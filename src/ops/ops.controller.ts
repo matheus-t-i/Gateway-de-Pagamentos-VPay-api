@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   Param,
   Post,
@@ -11,15 +12,19 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { z } from 'zod';
 import {
   configuracaoWebhookSchema,
   EVENTOS_LOJISTA,
+  MODO_TRATAMENTO_MED,
   money,
   PERMISSOES,
+  resumoProduto,
   DISPONIBILIDADE_ADQUIRENTE,
   SITUACAO_PROVEDOR,
   SITUACAO_TRANSACAO,
   SITUACAO_USUARIO,
+  normalizarIpOuCidr as normalizarRede,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -29,10 +34,13 @@ import {
 } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
 import { QueuesService } from '../queues/queues.service';
+import { ReenvioWebhookService } from '../queues/reenvio-webhook.service';
 import { getRastreio } from '../common/request-context';
 import { encryptText } from '../common/crypto.util';
 import { AdquirentesService } from '../providers/adquirentes.service';
-import * as ipaddr from 'ipaddr.js';
+import { validarTotp } from '../auth/totp.controller';
+import { CashInCreditoService } from '../retencao/cashin-credito.service';
+import { RelatorioMetodoService } from './relatorio-metodo.service';
 
 /**
  * Valida um IP ou CIDR (IPv4 e IPv6, ex.: `2804:14c::/64`) e devolve a forma
@@ -40,34 +48,13 @@ import * as ipaddr from 'ipaddr.js';
  * de blocos inteiros — recusar CIDR obrigaria a cadastrar IP por IP.
  */
 function normalizarIpOuCidr(valor: string): string {
-  const v = valor.trim();
-  if (!v) throw new BadRequestException('IP vazio.');
-  try {
-    if (v.includes('/')) {
-      const [addr, prefixo] = ipaddr.parseCIDR(v);
-      return `${addr.toString()}/${prefixo}`;
-    }
-    return ipaddr.parse(v).toString();
-  } catch {
+  const ip = normalizarRede(valor);
+  if (!ip) {
     throw new BadRequestException(
-      `IP ou CIDR inválido: "${v}" (ex.: 187.10.0.5, 187.10.0.0/24, 2804:14c::/64).`,
+      `IP ou CIDR inválido: "${valor.trim()}" (ex.: 187.10.0.5, 187.10.0.0/24, 2804:14c::/64).`,
     );
   }
-}
-
-/**
- * Rótulo da coluna "Produto" de uma venda. Com vários itens mostra o primeiro
- * e quantos mais existem — a lista completa vai no detalhe expansível.
- * Sem itens (depósito do painel ou cobrança anterior ao modelo de produtos),
- * cai na referência externa.
- */
-function resumoProduto(
-  itens: Array<{ titulo: string }>,
-  referenciaExterna: string | null,
-): string {
-  if (itens.length === 1) return itens[0].titulo;
-  if (itens.length > 1) return `${itens[0].titulo} +${itens.length - 1}`;
-  return referenciaExterna ?? '—';
+  return ip;
 }
 
 @Controller('painel/webhooks')
@@ -167,6 +154,9 @@ export class AdminOpsController {
     private readonly prisma: PrismaService,
     private readonly queues: QueuesService,
     private readonly adquirentes: AdquirentesService,
+    private readonly reenvioWebhook: ReenvioWebhookService,
+    private readonly cashInCredito: CashInCreditoService,
+    private readonly relatorioMetodo: RelatorioMetodoService,
   ) {}
 
   /**
@@ -230,6 +220,22 @@ export class AdminOpsController {
         qtd: Number(r.qtd),
       })),
     };
+  }
+
+  /**
+   * Relatório Método — dashboard operacional de cash-in PIX (volume, conversão,
+   * saúde PIX, breakdown por adquirente/usuário e gráfico de faturamento).
+   */
+  @Get('relatorios/metodo')
+  @RequerPermissao(PERMISSOES.ADMIN_RELATORIOS_VER)
+  async relatorioMetodoEndpoint(@Query() q: Record<string, string>) {
+    return this.relatorioMetodo.gerar({
+      dataInicial: q.dataInicial,
+      dataFinal: q.dataFinal,
+      adquirente: q.adquirente,
+      usuario: q.usuario ?? q.user,
+      ocultarRetidas: q.ocultarRetidas === '1' || q.ocultarRetidas === 'true',
+    });
   }
 
   /**
@@ -504,32 +510,80 @@ export class AdminOpsController {
       where.criadoEm = { ...(gte ? { gte } : {}), ...(lte ? { lte } : {}) };
     }
     if (q.situacao) where.situacao = q.situacao;
+
+    // Cada filtro de texto vira um grupo `OR` próprio; os grupos se combinam
+    // por AND — senão o `OR` da busca por referência sobrescreveria o `OR`
+    // da busca por cliente (e vice-versa).
+    const condicoesE: Array<Record<string, unknown>> = [];
+
     const busca = (q.busca ?? '').trim();
     if (busca) {
-      // `idTransacaoPublico` é coluna UUID: o Postgres não faz LIKE em uuid e o
-      // Prisma recusa `contains` nesse tipo (erro 500). Só compara por igualdade
-      // quando a busca É um UUID; caso contrário procura só na referência.
-      const ehUuid =
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(busca);
-      where.OR = [
-        ...(ehUuid ? [{ idTransacaoPublico: busca }] : []),
+      const orBusca: Array<Record<string, unknown>> = [
         { referenciaExterna: { contains: busca, mode: 'insensitive' } },
+        // endToEnd e txid são VarChar — `contains` funciona direto.
+        {
+          pix: {
+            is: { identificadorFimAFim: { contains: busca, mode: 'insensitive' } },
+          },
+        },
+        { pix: { is: { txid: { contains: busca, mode: 'insensitive' } } } },
       ];
+
+      /**
+       * `id_transacao_publico` é coluna UUID: o Postgres não faz LIKE em uuid e
+       * o Prisma recusa `contains` nesse tipo. Só que a tabela mostra o id
+       * ABREVIADO (#6147dbe2), então o que o admin copia da tela é um PREFIXO —
+       * comparar por igualdade nunca acha. Resolve com cast em SQL cru.
+       *
+       * O termo é reduzido a [0-9a-f-], o que também elimina os curingas `%`/`_`
+       * do LIKE. Mínimo de 4 caracteres: com menos, o prefixo é genérico demais
+       * e a lista de ids cresceria sem necessidade (a 4 chars hex já é 1 em 65k).
+       */
+      const prefixo = busca.toLowerCase().replace(/[^0-9a-f-]/g, '');
+      if (prefixo.length >= 4) {
+        const achados = await this.prisma.$queryRaw<Array<{ id: bigint }>>`
+          SELECT id FROM transacoes
+          WHERE id_transacao_publico::text LIKE ${prefixo + '%'}
+          LIMIT 5000
+        `;
+        if (achados.length) orBusca.push({ id: { in: achados.map((r) => r.id) } });
+      }
+
+      condicoesE.push({ OR: orBusca });
     }
     const cliente = (q.cliente ?? '').trim();
     if (cliente) {
-      const donos = await this.prisma.usuario.findMany({
-        where: {
-          OR: [
-            { nomeRazaoSocial: { contains: cliente, mode: 'insensitive' } },
-            { nomeFantasia: { contains: cliente, mode: 'insensitive' } },
-            { email: { contains: cliente, mode: 'insensitive' } },
-          ],
-        },
-        select: { id: true },
+      // "Cliente" busca tanto o lojista dono da conta quanto quem aparece na
+      // própria operação — pagador do PIX (cash-in) ou beneficiário do saque
+      // (cash-out) — porque é isso que a coluna "Cliente"/"Beneficiário" da
+      // tabela mostra; buscar só pelo lojista não achava quem o admin via na tela.
+      condicoesE.push({
+        OR: [
+          {
+            usuario: {
+              OR: [
+                { nomeRazaoSocial: { contains: cliente, mode: 'insensitive' } },
+                { nomeFantasia: { contains: cliente, mode: 'insensitive' } },
+                { email: { contains: cliente, mode: 'insensitive' } },
+              ],
+            },
+          },
+          {
+            pix: {
+              is: {
+                OR: [
+                  { nomePagador: { contains: cliente, mode: 'insensitive' } },
+                  { emailPagador: { contains: cliente, mode: 'insensitive' } },
+                  { nomeBeneficiario: { contains: cliente, mode: 'insensitive' } },
+                ],
+              },
+            },
+          },
+        ],
       });
-      where.usuarioId = { in: donos.map((u) => u.id) };
     }
+    if (condicoesE.length) where.AND = condicoesE;
+
     if (q.adquirente) {
       const contas = await this.prisma.contaProvedor.findMany({
         where: { provedor: { codigo: q.adquirente } },
@@ -537,6 +591,10 @@ export class AdminOpsController {
       });
       where.contaProvedorId = { in: contas.map((c) => c.id) };
     }
+    if (q.metodo === 'sim') where.retidaMetodo = true;
+    if (q.metodo === 'nao') where.retidaMetodo = false;
+    if (q.medAutomatico === 'sim') where.medAutomatico = true;
+    if (q.medAutomatico === 'nao') where.medAutomatico = false;
 
     const [total, itens] = await Promise.all([
       this.prisma.transacao.count({ where: where as never }),
@@ -548,7 +606,9 @@ export class AdminOpsController {
         include: {
           pix: true,
           itens: { orderBy: { id: 'asc' } },
-          usuario: { select: { nomeRazaoSocial: true, idPublico: true } },
+          usuario: {
+            select: { nomeRazaoSocial: true, idPublico: true, email: true },
+          },
           contaProvedor: { select: { provedor: { select: { codigo: true } } } },
         },
       }),
@@ -561,9 +621,17 @@ export class AdminOpsController {
       itens: itens.map((t) => ({
         idTransacao: t.idTransacaoPublico,
         criadoEm: t.criadoEm,
-        lojista: t.usuario.nomeRazaoSocial,
+        empresa: t.usuario.nomeRazaoSocial,
+        empresaEmail: t.usuario.email,
         cliente: t.pix?.nomePagador ?? '—',
         clienteEmail: t.pix?.emailPagador ?? null,
+        // Quando o dinheiro efetivamente caiu/saiu. Nulo enquanto a operação não
+        // liquidou — é o que separa "criada em" de "paga em" no relatório.
+        dataPagamento: t.liquidadoEm ?? t.concluidoEm ?? null,
+        // O identificador do pedido no sistema do lojista: é por ele que o
+        // suporte cruza a venda com o ERP/checkout do cliente.
+        referenciaExterna: t.referenciaExterna,
+        codigoPagamento: t.pix?.pixCopiaCola ?? null,
         // Produto real da venda; `referenciaExterna` é só o fallback das
         // cobranças criadas antes dos itens existirem (e do depósito do painel).
         produto: resumoProduto(t.itens, t.referenciaExterna),
@@ -584,8 +652,80 @@ export class AdminOpsController {
         // endToEnd é o identificador fim-a-fim do PIX, não o txid da cobrança.
         endToEnd: t.pix?.identificadorFimAFim ?? null,
         txid: t.pix?.txid ?? null,
+        retidaMetodo: t.retidaMetodo,
+        medAutomatico: t.medAutomatico,
       })),
     };
+  }
+
+  /**
+   * Reenvia o callback de uma transação de QUALQUER conta (suporte). Vai para a
+   * fila dedicada `11-webhook-reenvio` — reenvio manual não se mistura com a
+   * entrega automática.
+   */
+  @Post('relatorios/transacoes/:idTransacao/reenviar-webhook')
+  @RequerPermissao(PERMISSOES.ADMIN_FILAS_EXECUTAR)
+  async reenviarWebhookAdmin(
+    @Param('idTransacao') idTransacao: string,
+    @Req() req: { user: UsuarioAutenticado; ip?: string },
+  ) {
+    return this.reenvioWebhook.solicitar({
+      idTransacaoPublico: idTransacao,
+      atorId: BigInt(req.user.id),
+      enderecoIp: req.ip,
+    });
+  }
+
+  /**
+   * Libera venda retida pelo método: credita saldo + CONCLUIDA + callback.
+   * Exige 2FA do ator e `admin.relatorios.editar`.
+   */
+  @Post('relatorios/transacoes/:idTransacao/liberar-retencao')
+  @RequerPermissao(PERMISSOES.ADMIN_RELATORIOS_EDITAR)
+  async liberarRetencao(
+    @Param('idTransacao') idTransacao: string,
+    @Body() body: unknown,
+    @Req() req: { user: UsuarioAutenticado },
+  ) {
+    const parsed = z
+      .object({ codigoTotp: z.string().regex(/^\d{6}$/, 'Código de 6 dígitos') })
+      .safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException(parsed.error.flatten());
+    }
+
+    const ator = await this.prisma.usuario.findUniqueOrThrow({
+      where: { id: BigInt(req.user.id) },
+    });
+    if (!ator.totpHabilitado || !ator.segredoTotpCriptografado) {
+      throw new ForbiddenException(
+        'Ative a verificação em duas etapas na sua conta para liberar retenções.',
+      );
+    }
+    if (!validarTotp(ator.segredoTotpCriptografado, parsed.data.codigoTotp)) {
+      throw new ForbiddenException('Código de verificação inválido.');
+    }
+
+    const tx = await this.prisma.transacao.findFirst({
+      where: { idTransacaoPublico: idTransacao, direcao: 'ENTRADA' },
+    });
+    if (!tx) throw new BadRequestException('Transação não encontrada');
+    if (!tx.retidaMetodo) {
+      throw new BadRequestException('Esta venda não está retida pelo método');
+    }
+    if (tx.situacao !== SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO) {
+      throw new BadRequestException(
+        `Situação atual (${tx.situacao}) não permite liberação do método`,
+      );
+    }
+
+    return this.cashInCredito.creditar({
+      transacaoId: tx.id,
+      liquidadoEm: tx.liquidadoEm ?? new Date(),
+      origem: 'LIBERACAO_RETENCAO_ADMIN',
+      motivo: `Liberação manual do método por usuário ${ator.idPublico}`,
+      identificadorRastreio: `liberar-retencao:${tx.id}`,
+    });
   }
 
   /**
@@ -1110,75 +1250,9 @@ export class AdminOpsController {
     return { ok: true };
   }
 
-  /** Taxa padrão do sistema (o que o gateway cobra dos lojistas por padrão). */
-  @Get('taxa-padrao')
-  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_VER)
-  async taxaPadrao() {
-    const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
-      where: { padraoSistema: true },
-    });
-    if (!c) throw new BadRequestException('Configuração padrão do sistema não encontrada');
-    return {
-      taxaPixEntradaPercentual: c.taxaPixEntradaPercentual.toString(),
-      taxaPixEntradaFixa: c.taxaPixEntradaFixa.toString(),
-      taxaPixSaidaPercentual: c.taxaPixSaidaPercentual.toString(),
-      taxaPixSaidaFixa: c.taxaPixSaidaFixa.toString(),
-      ticketMinimoPixEntrada: c.ticketMinimoPixEntrada.toString(),
-      ticketMaximoPixEntrada: c.ticketMaximoPixEntrada.toString(),
-      diasLiberacaoSaldo: c.diasLiberacaoSaldo,
-      percentualReserva: c.percentualReserva.toString(),
-      diasRetencaoReserva: c.diasRetencaoReserva,
-    };
-  }
-
-  @Put('taxa-padrao')
-  @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_EDITAR)
-  async editarTaxaPadrao(
-    @Body() body: Record<string, number | string>,
-    @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
-  ) {
-    const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
-      where: { padraoSistema: true },
-    });
-    if (!c) throw new BadRequestException('Configuração padrão não encontrada');
-    const dec = (v: unknown, campo: string) => {
-      const n = Number(v);
-      if (!isFinite(n) || n < 0) throw new BadRequestException(`${campo} inválido`);
-      return n;
-    };
-    const int = (v: unknown, campo: string) => {
-      const n = Number(v);
-      if (!Number.isInteger(n) || n < 0) throw new BadRequestException(`${campo} inválido`);
-      return n;
-    };
-    const antes = {
-      taxaPixEntradaPercentual: c.taxaPixEntradaPercentual.toString(),
-      taxaPixEntradaFixa: c.taxaPixEntradaFixa.toString(),
-      taxaPixSaidaPercentual: c.taxaPixSaidaPercentual.toString(),
-      taxaPixSaidaFixa: c.taxaPixSaidaFixa.toString(),
-    };
-    await this.prisma.configuracaoPadraoPixUsuario.update({
-      where: { id: c.id },
-      data: {
-        taxaPixEntradaPercentual: dec(body.taxaPixEntradaPercentual, 'taxaPixEntradaPercentual'),
-        taxaPixEntradaFixa: dec(body.taxaPixEntradaFixa, 'taxaPixEntradaFixa'),
-        taxaPixSaidaPercentual: dec(body.taxaPixSaidaPercentual, 'taxaPixSaidaPercentual'),
-        taxaPixSaidaFixa: dec(body.taxaPixSaidaFixa, 'taxaPixSaidaFixa'),
-        ticketMinimoPixEntrada: dec(body.ticketMinimoPixEntrada, 'ticketMinimoPixEntrada'),
-        ticketMaximoPixEntrada: dec(body.ticketMaximoPixEntrada, 'ticketMaximoPixEntrada'),
-        diasLiberacaoSaldo: int(body.diasLiberacaoSaldo, 'diasLiberacaoSaldo'),
-        percentualReserva: dec(body.percentualReserva, 'percentualReserva'),
-        diasRetencaoReserva: int(body.diasRetencaoReserva, 'diasRetencaoReserva'),
-      },
-    });
-    await this.auditar(req, 'TAXA_PADRAO_EDITAR', 'configuracoes_padrao_pix_usuarios', c.id.toString(), antes, {
-      taxaPixEntradaPercentual: String(body.taxaPixEntradaPercentual),
-      taxaPixEntradaFixa: String(body.taxaPixEntradaFixa),
-      taxaPixSaidaPercentual: String(body.taxaPixSaidaPercentual),
-      taxaPixSaidaFixa: String(body.taxaPixSaidaFixa),
-    });
-    return { ok: true };
-  }
+  // As condições padrão de novos clientes (taxa, prazo de liberação, reserva,
+  // MED) vivem em `GET|PUT /admin/usuarios/config-padrao`: é contrato de
+  // cliente, não configuração de adquirente.
 
   /** Cadastro de nova adquirente (nasce INATIVA; conta/credenciais depois). */
   @Post('adquirentes')
@@ -1277,30 +1351,43 @@ const SITUACOES_APROVADAS: string[] = [
   SITUACAO_TRANSACAO.CONCLUIDA,
 ];
 
-/** Converte `?range=` na janela + granularidade do gráfico. */
+/**
+ * Converte `?range=` na janela + granularidade do gráfico.
+ *
+ * `desdeAnterior` é a janela imediatamente anterior, de mesma duração, usada
+ * para o comparativo ("+12% vs. período anterior") no painel do lojista.
+ */
 function resolverJanela(range?: string): {
   range: string;
   desde: Date;
+  ate: Date;
+  desdeAnterior: Date;
   porHora: boolean;
 } {
-  const agora = Date.now();
+  const agora = new Date();
   const dia = 24 * 60 * 60 * 1000;
+  const janela = (desde: Date, r: string, porHora: boolean) => ({
+    range: r,
+    desde,
+    ate: agora,
+    desdeAnterior: new Date(desde.getTime() - (agora.getTime() - desde.getTime())),
+    porHora,
+  });
+
   switch (range) {
     case '30d':
-      return { range: '30d', desde: new Date(agora - 30 * dia), porHora: false };
+      return janela(new Date(agora.getTime() - 30 * dia), '30d', false);
     case '7d':
-      return { range: '7d', desde: new Date(agora - 7 * dia), porHora: false };
-    case 'mes': {
-      const d = new Date();
-      return {
-        range: 'mes',
-        desde: new Date(d.getFullYear(), d.getMonth(), 1),
-        porHora: false,
-      };
-    }
+      return janela(new Date(agora.getTime() - 7 * dia), '7d', false);
+    case 'mes':
+      return janela(
+        new Date(agora.getFullYear(), agora.getMonth(), 1),
+        'mes',
+        false,
+      );
     default:
       // 1 dia: últimas 24h por hora.
-      return { range: '1d', desde: new Date(agora - dia), porHora: true };
+      return janela(new Date(agora.getTime() - dia), '1d', true);
   }
 }
 
@@ -1318,13 +1405,14 @@ export class PainelDashboardController {
     const usuarioId = BigInt(req.user.id);
     const usuario = await this.prisma.usuario.findUniqueOrThrow({
       where: { id: usuarioId },
-      include: { saldo: true },
+      include: { saldo: true, configuracaoPix: true },
     });
     const janela = resolverJanela(range);
 
     const saldoDisponivel = (usuario.saldo?.saldoDisponivel ?? 0).toString();
     const bloqueadoMed = (usuario.saldo?.saldoBloqueadoMed ?? 0).toString();
 
+    const cfg = usuario.configuracaoPix;
     const conta = {
       idPublico: usuario.idPublico,
       nome: usuario.nomeFantasia ?? usuario.nomeRazaoSocial,
@@ -1335,14 +1423,38 @@ export class PainelDashboardController {
             pendente: usuario.saldo.saldoPendenteLiberacao.toString(),
             reservado: usuario.saldo.saldoReservado.toString(),
             bloqueadoMed: usuario.saldo.saldoBloqueadoMed.toString(),
+            bloqueadoManual: usuario.saldo.saldoBloqueadoManual.toString(),
           }
         : null,
+      /**
+       * Regras que explicam os saldos parados: sem elas o cliente vê "A liberar"
+       * e "Reservado" sem saber por quê — e vê "Bloqueado MED" numa conta que
+       * sequer bloqueia por MED.
+       */
+      regras: {
+        diasLiberacaoSaldo: cfg?.diasLiberacaoSaldo ?? 0,
+        percentualReserva: (cfg?.percentualReserva ?? 0).toString(),
+        diasRetencaoReserva: cfg?.diasRetencaoReserva ?? 0,
+        medBloqueiaSaldo:
+          (cfg?.modoTratamentoMed ?? MODO_TRATAMENTO_MED.BLOQUEAR_SALDO) ===
+          MODO_TRATAMENTO_MED.BLOQUEAR_SALDO,
+      },
+    };
+
+    const periodo = {
+      inicio: janela.desde,
+      fim: janela.ate,
+      dias: Math.max(
+        1,
+        Math.round((janela.ate.getTime() - janela.desde.getTime()) / 86_400_000),
+      ),
     };
 
     if (!usuario.saldo) {
       return {
         conta,
         range: janela.range,
+        periodo,
         saldoDisponivel,
         volumeBruto: '0',
         qtdTransacoes: 0,
@@ -1351,6 +1463,14 @@ export class PainelDashboardController {
         conversao: 0,
         geradasQtd: 0,
         aprovadasQtd: 0,
+        anterior: {
+          gerados: '0',
+          pagos: '0',
+          geradasQtd: 0,
+          aprovadasQtd: 0,
+          ticketMedio: '0',
+          conversao: 0,
+        },
         serie: [],
         recentes: [],
       };
@@ -1362,7 +1482,21 @@ export class PainelDashboardController {
       criadoEm: { gte: janela.desde },
     };
 
-    const [geradas, aprovadas, recentes, linhas] = await Promise.all([
+    // Janela anterior de mesma duração, para o comparativo do painel.
+    const whereEntradaAnterior = {
+      usuarioId,
+      direcao: 'ENTRADA' as const,
+      criadoEm: { gte: janela.desdeAnterior, lt: janela.desde },
+    };
+
+    const [
+      geradas,
+      aprovadas,
+      recentes,
+      linhas,
+      geradasAnt,
+      aprovadasAnt,
+    ] = await Promise.all([
       this.prisma.transacao.aggregate({
         where: whereEntrada,
         _sum: { valorBruto: true },
@@ -1383,6 +1517,19 @@ export class PainelDashboardController {
         where: whereEntrada,
         select: { criadoEm: true, valorBruto: true, situacao: true },
         take: 20000,
+      }),
+      this.prisma.transacao.aggregate({
+        where: whereEntradaAnterior,
+        _sum: { valorBruto: true },
+        _count: true,
+      }),
+      this.prisma.transacao.aggregate({
+        where: {
+          ...whereEntradaAnterior,
+          situacao: { in: SITUACOES_APROVADAS as never },
+        },
+        _sum: { valorBruto: true },
+        _count: true,
       }),
     ]);
 
@@ -1414,9 +1561,17 @@ export class PainelDashboardController {
     const ticketMedio = aprovadasQtd > 0 ? aprovadasValor / aprovadasQtd : 0;
     const conversao = geradasQtd > 0 ? aprovadasQtd / geradasQtd : 0;
 
+    const geradasQtdAnt = Number(geradasAnt._count ?? 0);
+    const aprovadasQtdAnt = Number(aprovadasAnt._count ?? 0);
+    const geradasValorAnt = Number((geradasAnt._sum?.valorBruto ?? 0).toString());
+    const aprovadasValorAnt = Number(
+      (aprovadasAnt._sum?.valorBruto ?? 0).toString(),
+    );
+
     return {
       conta,
       range: janela.range,
+      periodo,
       saldoDisponivel,
       // Compatibilidade com a versão anterior do dashboard.
       volumeBruto: aprovadasValor.toFixed(2),
@@ -1430,6 +1585,17 @@ export class PainelDashboardController {
       conversao,
       geradasQtd,
       aprovadasQtd,
+      anterior: {
+        gerados: geradasValorAnt.toFixed(2),
+        pagos: aprovadasValorAnt.toFixed(2),
+        geradasQtd: geradasQtdAnt,
+        aprovadasQtd: aprovadasQtdAnt,
+        ticketMedio: (aprovadasQtdAnt > 0
+          ? aprovadasValorAnt / aprovadasQtdAnt
+          : 0
+        ).toFixed(2),
+        conversao: geradasQtdAnt > 0 ? aprovadasQtdAnt / geradasQtdAnt : 0,
+      },
       serie,
       recentes: recentes.map((t) => ({
         idTransacao: t.idTransacaoPublico,

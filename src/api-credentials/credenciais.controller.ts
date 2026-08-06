@@ -6,12 +6,18 @@ import {
   Get,
   Param,
   Post,
+  Put,
   Req,
   UseGuards,
 } from '@nestjs/common';
 import * as argon2 from 'argon2';
 import { randomBytes } from 'node:crypto';
-import { criarCredencialApiSchema, PERMISSOES, SITUACAO_USUARIO } from '../shared';
+import {
+  criarCredencialApiSchema,
+  editarCredencialApiSchema,
+  PERMISSOES,
+  SITUACAO_USUARIO,
+} from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   JwtAuthGuard,
@@ -91,6 +97,63 @@ export class CredenciaisController {
       chavePublica,
       segredo: secret,
       aviso: 'O segredo é exibido apenas uma vez',
+    };
+  }
+
+  /**
+   * Edita uma credencial já emitida: nome e allowlist de IP.
+   *
+   * A allowlist é **substituída** pela lista enviada (a tela manda o conjunto
+   * final), dentro de uma transação — remover os IPs antigos e falhar ao gravar
+   * os novos deixaria a credencial aberta para qualquer origem.
+   *
+   * Credencial revogada não é editada: liberar IP para uma chave morta só
+   * confunde quem lê a listagem depois.
+   */
+  @Put(':id')
+  @RequerPermissao(PERMISSOES.CHAVES_API_EDITAR)
+  async editar(
+    @Param('id') id: string,
+    @Req() req: { user: UsuarioAutenticado },
+    @Body() body: unknown,
+  ) {
+    const parsed = editarCredencialApiSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    const usuario = await this.contaAtiva(req.user);
+
+    const cred = await this.prisma.credencialApi.findFirst({
+      where: { id: BigInt(id), usuarioId: usuario.id },
+    });
+    if (!cred) throw new BadRequestException('Credencial não encontrada');
+    if (!cred.ativo || cred.revogadoEm) {
+      throw new BadRequestException('Credencial revogada não pode ser editada.');
+    }
+
+    const atualizada = await this.prisma.$transaction(async (tx) => {
+      await tx.ipPermitidoApi.deleteMany({ where: { credencialApiId: cred.id } });
+      if (parsed.data.ipsPermitidos.length) {
+        await tx.ipPermitidoApi.createMany({
+          data: parsed.data.ipsPermitidos.map((ip) => ({
+            credencialApiId: cred.id,
+            ipOuCidr: ip,
+          })),
+        });
+      }
+      return tx.credencialApi.update({
+        where: { id: cred.id },
+        data: { nome: parsed.data.nome },
+        include: { ipsPermitidos: true },
+      });
+    });
+
+    return {
+      id: atualizada.id.toString(),
+      nome: atualizada.nome,
+      chavePublica: atualizada.chavePublica,
+      escopos: atualizada.escopos,
+      ativo: atualizada.ativo,
+      ipsPermitidos: atualizada.ipsPermitidos.map((i) => i.ipOuCidr),
+      criadoEm: atualizada.criadoEm,
     };
   }
 

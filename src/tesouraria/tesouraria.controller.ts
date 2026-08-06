@@ -333,9 +333,10 @@ export class AdminTesourariaController {
     ]);
 
     // Devolve TODAS as situações possíveis, inclusive as zeradas — card que
-    // some quando não há registro faz a tela "piscar" entre filtros.
+    // some quando não há registro faz a tela "piscar" entre filtros. PENDENTE
+    // fica de fora: nenhum saque nasce nele (`criarSaque` grava PROCESSANDO) e
+    // a coluna não tem mais default, então seria um card eternamente zerado.
     const situacoesSaque = [
-      SITUACAO_TRANSACAO.PENDENTE,
       SITUACAO_TRANSACAO.PROCESSANDO,
       SITUACAO_TRANSACAO.CONCLUIDA,
       SITUACAO_TRANSACAO.FALHA,

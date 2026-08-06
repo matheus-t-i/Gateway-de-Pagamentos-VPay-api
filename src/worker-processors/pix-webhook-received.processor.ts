@@ -2,20 +2,17 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import {
-  EVENTOS_LOJISTA,
   money,
   PixJobPayload,
   QUEUE_NAMES,
-  SITUACAO_LIBERACAO,
   SITUACAO_PROVEDOR,
   SITUACAO_TRANSACAO,
-  SITUACAO_WEBHOOK_RECEBIDO,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProviderRegistry } from '../providers/provider.registry';
-import { ConfigPixService, LedgerService } from '../ledger/ledger.service';
-import { QueuesService } from '../queues/queues.service';
 import { decryptCredentials } from '../common/crypto.util';
+import { CashInCreditoService } from '../retencao/cashin-credito.service';
+import { RetencaoMetodoService } from '../retencao/retencao-metodo.service';
 
 @Processor(QUEUE_NAMES.PIX_WEBHOOK_RECEIVED)
 @Injectable()
@@ -25,9 +22,8 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly providers: ProviderRegistry,
-    private readonly ledger: LedgerService,
-    private readonly configPix: ConfigPixService,
-    private readonly queues: QueuesService,
+    private readonly retencao: RetencaoMetodoService,
+    private readonly credito: CashInCreditoService,
   ) {
     super();
   }
@@ -51,7 +47,11 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
       where: { idTransacaoLiquidante: liquidanteId },
       include: {
         transacao: {
-          include: { contaProvedor: { include: { provedor: true } }, pix: true },
+          include: {
+            contaProvedor: { include: { provedor: true } },
+            pix: true,
+            usuario: { include: { configuracaoPix: true } },
+          },
         },
       },
       orderBy: { criadoEm: 'desc' },
@@ -72,7 +72,8 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
     if (
       (
         [SITUACAO_TRANSACAO.LIQUIDADA, SITUACAO_TRANSACAO.CONCLUIDA] as string[]
-      ).includes(tx.situacao)
+      ).includes(tx.situacao) ||
+      tx.retidaMetodo
     ) {
       return { ok: true, duplicated: true };
     }
@@ -100,131 +101,38 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
       throw new Error(`Camada1 não confirmou pagamento: ${remote.status}`);
     }
 
-    const cfg = await this.configPix.resolverEfetiva(tx.usuarioId);
-    const valorReserva = money(tx.valorReserva.toString());
-    const valorLiquido = money(tx.valorLiquidacaoEmpresa.toString());
-    const valorPrincipal = valorLiquido.minus(valorReserva);
-
-    const entries = [];
-    if (cfg.diasLiberacaoSaldo > 0) {
-      entries.push({
-        tipoSaldo: 'PENDENTE_LIBERACAO' as const,
-        tipoMovimento: 'CREDITO' as const,
-        natureza: 'RECEBIMENTO' as const,
-        valor: valorPrincipal,
-        chaveIdempotencia: `cashin:pendente:${tx.id}`,
-        transacaoId: tx.id,
-        descricao: 'Crédito pendente liberação',
-      });
-    } else {
-      entries.push({
-        tipoSaldo: 'DISPONIVEL' as const,
-        tipoMovimento: 'CREDITO' as const,
-        natureza: 'RECEBIMENTO' as const,
-        valor: valorPrincipal,
-        chaveIdempotencia: `cashin:disp:${tx.id}`,
-        transacaoId: tx.id,
-        descricao: 'Crédito disponível cash-in',
-      });
-    }
-    if (valorReserva.gt(0)) {
-      entries.push({
-        tipoSaldo: 'RESERVADO' as const,
-        tipoMovimento: 'CREDITO' as const,
-        natureza: 'RESERVA' as const,
-        valor: valorReserva,
-        chaveIdempotencia: `cashin:reserva:${tx.id}`,
-        transacaoId: tx.id,
-        descricao: 'Reserva cash-in',
-      });
-    }
-
-    const ledgerResult = await this.ledger.aplicarMovimentacoes({
-      usuarioId: tx.usuarioId,
-      permiteSaldoNegativo: cfg.permiteSaldoNegativo,
-      entries,
-      outbox: {
-        tipoAgregado: 'TRANSACAO',
-        identificadorAgregado: tx.idTransacaoPublico,
-        tipoEvento: EVENTOS_LOJISTA.PIX_CASHIN_PAGO,
-        conteudo: {
-          // Público: sempre "idTransacao" (nunca expor a ideia de id público vs
-          // interno). Coerente com o callback de devolução.
-          idTransacao: tx.idTransacaoPublico,
-          situacao: SITUACAO_TRANSACAO.LIQUIDADA,
-          valorBruto: tx.valorBruto.toString(),
-        },
-      },
+    const cfgUsuario = tx.usuario.configuracaoPix;
+    const decisao = await this.retencao.decidir({
+      valorBruto: money(tx.valorBruto.toString()),
+      nomePagador: tx.pix?.nomePagador,
+      emailPagador: tx.pix?.emailPagador,
+      percentualContaAdquirente: tx.contaProvedor?.percentualRetencaoMetodo
+        ? money(tx.contaProvedor.percentualRetencaoMetodo.toString())
+        : null,
+      retencaoMetodoAtivoCliente: cfgUsuario?.retencaoMetodoAtivo ?? false,
+      percentualRetencaoCliente: money(
+        cfgUsuario?.percentualRetencaoMetodo?.toString() ?? '0',
+      ),
     });
 
-    await this.prisma.$transaction(async (db) => {
-      await db.transacao.update({
-        where: { id: tx.id },
-        data: {
-          situacao: SITUACAO_TRANSACAO.CONCLUIDA,
-          liquidadoEm: remote.paidAt ?? new Date(),
-          concluidoEm: new Date(),
-        },
-      });
-      await db.transacaoPix.update({
-        where: { transacaoId: tx.id },
-        data: { identificadorFimAFim: remote.endToEndId },
-      });
-      await db.historicoSituacaoTransacao.create({
-        data: {
-          transacaoId: tx.id,
-          situacaoAnterior: tx.situacao,
-          novaSituacao: SITUACAO_TRANSACAO.CONCLUIDA,
-          origem: 'WEBHOOK_PROVEDOR',
-          motivo: 'Confirmado Camada1',
-        },
-      });
-      if (webhookRecebidoId) {
-        await db.webhookRecebidoProvedor.update({
-          where: { id: BigInt(webhookRecebidoId) },
-          data: {
-            situacao: SITUACAO_WEBHOOK_RECEBIDO.PROCESSADO,
-            processadoEm: new Date(),
-            usuarioId: tx.usuarioId,
-          },
-        });
-      }
-      if (cfg.diasLiberacaoSaldo > 0) {
-        await db.liberacaoSaldo.create({
-          data: {
-            usuarioId: tx.usuarioId,
-            transacaoId: tx.id,
-            tipoLiberacao: 'SALDO_PRINCIPAL',
-            valor: valorPrincipal.toFixed(2),
-            liberarEm: tx.liberarSaldoEm ?? new Date(),
-            situacao: SITUACAO_LIBERACAO.AGENDADA,
-          },
-        });
-      }
-      if (valorReserva.gt(0) && tx.liberarReservaEm) {
-        await db.liberacaoSaldo.create({
-          data: {
-            usuarioId: tx.usuarioId,
-            transacaoId: tx.id,
-            tipoLiberacao: 'RESERVA',
-            valor: valorReserva.toFixed(2),
-            liberarEm: tx.liberarReservaEm,
-            situacao: SITUACAO_LIBERACAO.AGENDADA,
-          },
-        });
-      }
-    });
-
-    // Padrão outbox: publicamos APENAS o evento; o 5-outbox-publisher é quem
-    // enfileira o 2-pix-webhook-send. Enfileirar aqui também gerava entrega
-    // duplicada do mesmo callback ao lojista.
-    if (ledgerResult.outboxId) {
-      await this.queues.enqueueOutbox({
-        eventoOutboxId: ledgerResult.outboxId.toString(),
-        identificadorRastreio,
+    if (decisao.reter) {
+      return this.credito.marcarRetida({
+        transacaoId: tx.id,
+        endToEndId: remote.endToEndId,
+        liquidadoEm: remote.paidAt ?? new Date(),
+        webhookRecebidoId,
+        motivo: `Método de retenção: ${decisao.motivo}`,
       });
     }
 
-    return { ok: true, transacaoId: tx.id.toString() };
+    return this.credito.creditar({
+      transacaoId: tx.id,
+      endToEndId: remote.endToEndId,
+      liquidadoEm: remote.paidAt ?? new Date(),
+      origem: 'WEBHOOK_PROVEDOR',
+      motivo: `Confirmado Camada1 (${decisao.motivo})`,
+      webhookRecebidoId,
+      identificadorRastreio,
+    });
   }
 }

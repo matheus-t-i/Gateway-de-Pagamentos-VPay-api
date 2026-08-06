@@ -5,10 +5,21 @@ import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueuesService } from '../queues/queues.service';
-import { TIPOS_EMAIL } from '../shared';
+import { TAMANHO_MAXIMO_SENHA, TIPOS_EMAIL, violacoesSenha } from '../shared';
 import { Throttle } from '../common/ip-throttle.guard';
 
 const esqueciSchema = z.object({ email: z.string().email() });
+const trocaObrigatoriaSchema = z
+  .object({
+    email: z.string().email(),
+    senhaAtual: z.string().min(1, 'Informe a senha provisória.'),
+    novaSenha: z.string().max(TAMANHO_MAXIMO_SENHA),
+    confirmacaoNovaSenha: z.string(),
+  })
+  .refine((d) => d.novaSenha === d.confirmacaoNovaSenha, {
+    path: ['confirmacaoNovaSenha'],
+    message: 'As senhas informadas precisam ser iguais',
+  });
 const redefinirSchema = z.object({
   token: z.string().min(20),
   novaSenha: z.string().min(8).max(128),
@@ -112,6 +123,7 @@ export class SenhaController {
         where: { id: registro.usuarioId },
         data: {
           senhaHash,
+          senhaAlteradaEm: new Date(),
           forcarTrocaSenha: false,
           // Redefinir a senha destrava a conta bloqueada por tentativas.
           contaBloqueada: false,
@@ -141,5 +153,77 @@ export class SenhaController {
     });
 
     return { ok: true, mensagem: 'Senha alterada. Já pode acessar sua conta.' };
+  }
+
+  /**
+   * Troca obrigatória: conta com `forcarTrocaSenha` (senha redefinida pelo
+   * administrador) não recebe token no login, então a troca não pode depender
+   * de JWT. Mesmo padrão do onboarding — reverifica e-mail + senha a cada
+   * request, sem sessão.
+   */
+  @Throttle({ limit: 10, windowSec: 60 })
+  @Post('trocar-obrigatoria')
+  async trocarObrigatoria(@Body() body: unknown, @Req() req: { ip?: string }) {
+    const parsed = trocaObrigatoriaSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    const { email, senhaAtual, novaSenha } = parsed.data;
+
+    const usuario = await this.prisma.usuario.findUnique({ where: { email } });
+    // Mensagem única para credencial errada e conta inexistente: resposta
+    // diferente entregaria quais e-mails existem.
+    const credencialInvalida = new BadRequestException('Credenciais inválidas.');
+    if (!usuario) throw credencialInvalida;
+    if (!(await argon2.verify(usuario.senhaHash, senhaAtual))) {
+      await this.prisma.auditoriaAcesso.create({
+        data: {
+          usuarioId: usuario.id,
+          emailInformado: email,
+          enderecoIp: req.ip,
+          sucesso: false,
+          motivo: 'TROCA_OBRIGATORIA_SENHA_INVALIDA',
+        },
+      });
+      throw credencialInvalida;
+    }
+    if (!usuario.forcarTrocaSenha) {
+      throw new BadRequestException(
+        'Esta conta não tem troca de senha pendente. Faça login normalmente.',
+      );
+    }
+
+    const violacoes = violacoesSenha(novaSenha);
+    if (violacoes.length) throw new BadRequestException(violacoes.join(' · '));
+    if (await argon2.verify(usuario.senhaHash, novaSenha)) {
+      throw new BadRequestException(
+        'A nova senha precisa ser diferente da senha provisória.',
+      );
+    }
+
+    await this.prisma.usuario.update({
+      where: { id: usuario.id },
+      data: {
+        senhaHash: await argon2.hash(novaSenha),
+        senhaAlteradaEm: new Date(),
+        forcarTrocaSenha: false,
+      },
+    });
+
+    await this.prisma.auditoriaAcesso.create({
+      data: {
+        usuarioId: usuario.id,
+        emailInformado: email,
+        enderecoIp: req.ip,
+        sucesso: true,
+        motivo: 'TROCA_OBRIGATORIA_CONCLUIDA',
+      },
+    });
+
+    await this.queues.enqueueEmail({
+      tipo: TIPOS_EMAIL.SENHA_ALTERADA,
+      para: usuario.email,
+      nome: usuario.nomeRazaoSocial,
+    });
+
+    return { ok: true, mensagem: 'Senha alterada. Faça login com a nova senha.' };
   }
 }

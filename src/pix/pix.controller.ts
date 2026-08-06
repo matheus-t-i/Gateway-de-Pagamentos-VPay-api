@@ -5,6 +5,7 @@ import {
   Get,
   Param,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -22,6 +23,7 @@ import {
 } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReenvioWebhookService } from '../queues/reenvio-webhook.service';
 import {
   criarCobrancaPixSchema,
   criarSaquePixSchema,
@@ -149,6 +151,7 @@ export class PixPainelController {
   constructor(
     private readonly pix: PixService,
     private readonly prisma: PrismaService,
+    private readonly reenvioWebhook: ReenvioWebhookService,
   ) {}
 
   /** A conta é sempre a do JWT — não existe conta de terceiro no painel do cliente. */
@@ -163,10 +166,32 @@ export class PixPainelController {
     return usuario;
   }
 
+  /**
+   * Uma página do extrato. Paginação e filtros SERVER-SIDE (`direcao`,
+   * `situacao`, período, busca) — o painel tem uma tela por sentido:
+   * Transações (ENTRADA) e Transferências (SAIDA).
+   */
   @Get()
   @RequerPermissao(PERMISSOES.TRANSACOES_VER)
-  async listar(@Req() req: { user: UsuarioAutenticado }) {
-    return this.pix.listar(BigInt(req.user.id));
+  async listar(
+    @Req() req: { user: UsuarioAutenticado },
+    @Query() q: Record<string, string>,
+  ) {
+    return this.pix.listar(BigInt(req.user.id), q);
+  }
+
+  /**
+   * Contagem e totais do MESMO filtro da listagem. Rota separada porque é a
+   * consulta cara (varre o conjunto filtrado inteiro): assim o painel a refaz
+   * só quando o filtro muda, e paginar continua custando uma página.
+   */
+  @Get('resumo')
+  @RequerPermissao(PERMISSOES.TRANSACOES_VER)
+  async resumo(
+    @Req() req: { user: UsuarioAutenticado },
+    @Query() q: Record<string, string>,
+  ) {
+    return this.pix.resumo(BigInt(req.user.id), q);
   }
 
   /**
@@ -233,6 +258,16 @@ export class PixPainelController {
           'Aguarde a aprovação do administrador.',
       );
     }
+    // A liquidante exige nome + documento do dono da chave. `nomeTitular` e
+    // `documentoTitular` são opcionais no cadastro, então uma chave antiga
+    // aprovada sem esses dados chegaria na adquirente incompleta — e só
+    // quebraria lá, com o saldo do lojista já debitado.
+    if (!chave.nomeTitular || !chave.documentoTitular) {
+      throw new BadRequestException(
+        'A chave PIX está sem titular/documento cadastrados. Peça ao ' +
+          'administrador para completar o cadastro da chave antes do saque.',
+      );
+    }
 
     const { idInterno, ...resposta } = await this.pix.criarSaque({
       usuarioId: usuario.id,
@@ -241,12 +276,31 @@ export class PixPainelController {
         chavePix: chave.chave,
         tipoChavePix: chave.tipoChave,
         referenciaExterna: parsed.data.referenciaExterna,
-        nomeBeneficiario: chave.nomeTitular ?? undefined,
-        documentoBeneficiario: chave.documentoTitular ?? undefined,
+        nomeBeneficiario: chave.nomeTitular,
+        documentoBeneficiario: chave.documentoTitular,
       },
     });
     void idInterno;
     return resposta;
+  }
+
+  /**
+   * Reenvia o callback desta transação para os webhooks da própria conta.
+   * Restrito ao dono (quem tem escopo global usa a tela de admin) — sem isso,
+   * um cliente dispararia callback de transação alheia só chutando o id.
+   */
+  @Post(':idPublico/reenviar-webhook')
+  @RequerPermissao(PERMISSOES.TRANSACOES_EXECUTAR)
+  async reenviarWebhook(
+    @Param('idPublico') idPublico: string,
+    @Req() req: { user: UsuarioAutenticado; ip?: string },
+  ) {
+    return this.reenvioWebhook.solicitar({
+      idTransacaoPublico: idPublico,
+      usuarioIdRestricao: BigInt(req.user.id),
+      atorId: BigInt(req.user.id),
+      enderecoIp: req.ip,
+    });
   }
 
   @Get(':idPublico')

@@ -2,53 +2,37 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import {
+  EVENTOS_INTEGRACAO,
+  EVENTOS_LOJISTA,
+  EventoIntegracao,
   LiberacaoSaldoJobPayload,
   OutboxPublishJobPayload,
   PixJobPayload,
   QUEUE_NAMES,
-  SITUACAO_ENTREGA_WEBHOOK,
   SITUACAO_LIBERACAO,
   SITUACAO_PROVEDOR,
   SITUACAO_TRANSACAO,
+  WebhookReenvioJobPayload,
   money,
 } from '../shared';
+import { IntegracoesService } from '../integracoes/integracoes.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
+import { BloqueiosSaldoService } from '../ledger/bloqueios-saldo.service';
 import { QueuesService } from '../queues/queues.service';
 import { ProviderRegistry } from '../providers/provider.registry';
-import { decryptCredentials, decryptText } from '../common/crypto.util';
-
-/** Um lugar para onde este evento deve ser entregue. */
-type Destino = {
-  url: string;
-  configuracaoWebhookId: bigint | null;
-  nomeHeaderAutenticacao: string | null;
-  segredo: string | null;
-  origem: 'PAINEL' | 'OPERACAO';
-};
-
-/**
- * Normaliza a URL só para COMPARAR destinos. Sem isto,
- * `https://site.com/hook` e `https://site.com/hook/` seriam tratadas como
- * endereços diferentes e o lojista receberia o callback duas vezes.
- * A URL original é preservada para o envio.
- */
-function chaveUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    const caminho = u.pathname.replace(/\/+$/, '');
-    return `${u.protocol}//${u.host.toLowerCase()}${caminho}${u.search}`;
-  } catch {
-    return url.trim().replace(/\/+$/, '');
-  }
-}
+import { decryptCredentials } from '../common/crypto.util';
+import { EntregaWebhookService } from './entrega-webhook.service';
 
 @Processor(QUEUE_NAMES.PIX_WEBHOOK_SEND)
 @Injectable()
 export class PixWebhookSendProcessor extends WorkerHost {
   private readonly logger = new Logger(PixWebhookSendProcessor.name);
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly entregas: EntregaWebhookService,
+  ) {
     super();
   }
 
@@ -61,15 +45,6 @@ export class PixWebhookSendProcessor extends WorkerHost {
       conteudo?: unknown;
     };
     this.logger.log(`entregando webhook lojista evento=${payload.tipoEvento}`);
-
-    // Corpo público enviado ao lojista: nunca vazar ids internos (usuarioId,
-    // eventoOutboxId). A transação é referenciada apenas como idTransacao.
-    const corpoEnvio = JSON.stringify({
-      tipoEvento: payload.tipoEvento,
-      idTransacao: payload.idPublico,
-      dados: payload.conteudo ?? null,
-      ocorridoEm: new Date().toISOString(),
-    });
 
     const usuarioId = BigInt(payload.usuarioId);
 
@@ -90,152 +65,59 @@ export class PixWebhookSendProcessor extends WorkerHost {
     }
     if (!eventoOutboxId) return { ok: true, entregas: 0, motivo: 'sem evento outbox' };
 
-    const destinos = await this.resolverDestinos(
+    const { entregas } = await this.entregas.entregarTodos({
       usuarioId,
-      payload.idPublico,
-      payload.tipoEvento,
+      eventoOutboxId,
+      idTransacaoPublico: payload.idPublico,
+      tipoEvento: payload.tipoEvento,
+    });
+
+    return { ok: true, entregas };
+  }
+}
+
+/**
+ * Reenvio MANUAL do callback (botão do painel/admin), em fila própria para não
+ * concorrer com a entrega automática nem distorcer o backlog dela.
+ *
+ * Não recria evento nem toca no claim do outbox: o evento já existe e foi
+ * publicado — o que se repete aqui é só a ENTREGA HTTP, registrada em
+ * `entregas_webhook` como mais uma tentativa. Assim o lojista pode receber de
+ * novo sem que nada seja creditado/movimentado outra vez.
+ */
+@Processor(QUEUE_NAMES.WEBHOOK_REENVIO)
+@Injectable()
+export class WebhookReenvioProcessor extends WorkerHost {
+  private readonly logger = new Logger(WebhookReenvioProcessor.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly entregas: EntregaWebhookService,
+  ) {
+    super();
+  }
+
+  async process(job: Job<WebhookReenvioJobPayload>) {
+    const { eventoOutboxId, idTransacaoPublico, solicitadoPorUsuarioId } = job.data;
+    this.logger.log(
+      `reenvio manual de callback tx=${idTransacaoPublico} ` +
+        `evento=${eventoOutboxId} por=${solicitadoPorUsuarioId ?? '—'}`,
     );
 
-    // Uma falha não pode impedir os outros destinos de receberem: entrega todos
-    // e só então propaga o erro para o BullMQ retentar.
-    let primeiroErro: unknown = null;
-    for (const destino of destinos) {
-      try {
-        await this.entregar(destino, eventoOutboxId, usuarioId, corpoEnvio);
-      } catch (e) {
-        primeiroErro ??= e;
-      }
-    }
-    if (primeiroErro) throw primeiroErro;
+    const evento = await this.prisma.eventoOutbox.findUnique({
+      where: { id: BigInt(eventoOutboxId) },
+    });
+    if (!evento) return { ok: false, motivo: 'evento outbox inexistente' };
+    if (!evento.usuarioId) return { ok: false, motivo: 'evento sem usuário' };
 
-    return { ok: true, entregas: destinos.length };
-  }
-
-  /**
-   * Destinos deste evento: os webhooks do painel que assinam o tipo, mais o
-   * `urlCallback` informado na criação da operação.
-   *
-   * URLs repetidas entram uma vez só — o cadastro do painel tem prioridade
-   * porque é ele que carrega o header de autenticação.
-   */
-  private async resolverDestinos(
-    usuarioId: bigint,
-    idTransacaoPublico: string,
-    tipoEvento: string,
-  ): Promise<Destino[]> {
-    const configs = await this.prisma.configuracaoWebhookUsuario.findMany({
-      where: { usuarioId, ativo: true },
-      orderBy: { id: 'asc' },
+    const { entregas } = await this.entregas.entregarTodos({
+      usuarioId: evento.usuarioId,
+      eventoOutboxId: evento.id,
+      idTransacaoPublico: evento.identificadorAgregado,
+      tipoEvento: evento.tipoEvento,
     });
 
-    const destinos: Destino[] = [];
-    const vistos = new Set<string>();
-
-    for (const cfg of configs) {
-      const tipos = (cfg.tiposEvento as string[]) ?? [];
-      if (tipos.length > 0 && !tipos.includes(tipoEvento)) continue;
-      const chave = chaveUrl(cfg.urlDestino);
-      if (vistos.has(chave)) continue;
-      vistos.add(chave);
-      destinos.push({
-        url: cfg.urlDestino,
-        configuracaoWebhookId: cfg.id,
-        nomeHeaderAutenticacao: cfg.nomeHeaderAutenticacao,
-        segredo: this.segredoDe(cfg.segredoCriptografado),
-        origem: 'PAINEL',
-      });
-    }
-
-    const tx = await this.prisma.transacao.findFirst({
-      where: { idTransacaoPublico, usuarioId },
-      select: { urlCallback: true },
-    });
-    if (tx?.urlCallback && !vistos.has(chaveUrl(tx.urlCallback))) {
-      // SEM header de autenticação: a credencial pertence ao webhook cadastrado
-      // no painel e não vaza para uma URL passada solta na criação do PIX —
-      // senão qualquer chamada da API levaria o segredo para onde quisesse.
-      destinos.push({
-        url: tx.urlCallback,
-        configuracaoWebhookId: null,
-        nomeHeaderAutenticacao: null,
-        segredo: null,
-        origem: 'OPERACAO',
-      });
-    }
-
-    return destinos;
-  }
-
-  private segredoDe(criptografado: string | null): string | null {
-    if (!criptografado) return null;
-    try {
-      return decryptText(criptografado);
-    } catch {
-      // Chave de criptografia trocada: melhor entregar sem o header do que
-      // deixar o lojista sem callback nenhum.
-      this.logger.warn('não foi possível decifrar o segredo do webhook');
-      return null;
-    }
-  }
-
-  private async entregar(
-    destino: Destino,
-    eventoOutboxId: bigint,
-    usuarioId: bigint,
-    corpoEnvio: string,
-  ) {
-    const tentativa =
-      (await this.prisma.entregaWebhook.count({
-        where: { eventoOutboxId, configuracaoWebhookId: destino.configuracaoWebhookId },
-      })) + 1;
-
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (destino.nomeHeaderAutenticacao && destino.segredo) {
-      headers[destino.nomeHeaderAutenticacao] = destino.segredo;
-    }
-
-    const started = Date.now();
-    try {
-      const res = await fetch(destino.url, {
-        method: 'POST',
-        headers,
-        body: corpoEnvio,
-      });
-      const corpo = (await res.text()).slice(0, 2000);
-      await this.prisma.entregaWebhook.create({
-        data: {
-          eventoOutboxId,
-          configuracaoWebhookId: destino.configuracaoWebhookId,
-          urlDestino: destino.url,
-          usuarioId,
-          numeroTentativa: tentativa,
-          situacao: res.ok
-            ? SITUACAO_ENTREGA_WEBHOOK.SUCESSO
-            : SITUACAO_ENTREGA_WEBHOOK.FALHA,
-          statusHttp: res.status,
-          corpoResposta: corpo,
-          latenciaMs: Date.now() - started,
-          enviadoEm: new Date(),
-        },
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch (e) {
-      const erro = e instanceof Error ? e.message : String(e);
-      await this.prisma.entregaWebhook.create({
-        data: {
-          eventoOutboxId,
-          configuracaoWebhookId: destino.configuracaoWebhookId,
-          urlDestino: destino.url,
-          usuarioId,
-          numeroTentativa: tentativa,
-          situacao: SITUACAO_ENTREGA_WEBHOOK.FALHA,
-          mensagemErro: erro,
-          latenciaMs: Date.now() - started,
-          enviadoEm: new Date(),
-        },
-      });
-      throw e;
-    }
+    return { ok: true, entregas };
   }
 }
 
@@ -244,9 +126,19 @@ export class PixWebhookSendProcessor extends WorkerHost {
 export class OutboxPublisherProcessor extends WorkerHost {
   private readonly logger = new Logger(OutboxPublisherProcessor.name);
 
+  /**
+   * Evento do outbox → evento das integrações. Só o que interessa a app de
+   * rastreio de venda; o resto passa direto.
+   */
+  private static readonly EVENTO_INTEGRACAO: Record<string, EventoIntegracao> = {
+    [EVENTOS_LOJISTA.PIX_CASHIN_PAGO]: EVENTOS_INTEGRACAO.PEDIDO_PAGO,
+    [EVENTOS_LOJISTA.PIX_DEVOLUCAO_CONCLUIDA]: EVENTOS_INTEGRACAO.PEDIDO_DEVOLVIDO,
+  };
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly queues: QueuesService,
+    private readonly integracoes: IntegracoesService,
   ) {
     super();
   }
@@ -298,9 +190,43 @@ export class OutboxPublisherProcessor extends WorkerHost {
             ultimoErroPublicacao: e instanceof Error ? e.message : String(e),
           },
         });
+        // Sem callback publicado, não há o que contar aos apps ainda.
+        continue;
       }
+
+      /**
+       * Mesmo fan-out, segundo destino: os apps que o lojista conectou.
+       *
+       * Depois do enfileiramento do callback e FORA do try acima de propósito —
+       * devolver o claim por causa de uma integração faria o lojista receber o
+       * callback duas vezes. O envio ao app tem dedupe próprio
+       * (`envios_integracao`) e reenvio pela tela.
+       */
+      await this.notificarIntegracoes(ev);
     }
     return { published: pending.length };
+  }
+
+  private async notificarIntegracoes(ev: {
+    tipoEvento: string;
+    identificadorAgregado: string;
+    usuarioId: bigint | null;
+  }) {
+    const evento = OutboxPublisherProcessor.EVENTO_INTEGRACAO[ev.tipoEvento];
+    if (!evento || !ev.usuarioId) return;
+
+    // O outbox guarda o id PÚBLICO da transação; o resto do fluxo trabalha com
+    // o id interno. Filtrar também por usuário mantém a mesma regra do callback.
+    const tx = await this.prisma.transacao.findFirst({
+      where: {
+        idTransacaoPublico: ev.identificadorAgregado,
+        usuarioId: ev.usuarioId,
+      },
+      select: { id: true },
+    });
+    if (!tx) return;
+
+    await this.integracoes.notificarSemFalhar(tx.id, evento);
   }
 }
 
@@ -312,25 +238,75 @@ export class LiberacaoSaldoProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
+    private readonly bloqueios: BloqueiosSaldoService,
   ) {
     super();
   }
 
+  /**
+   * Teto de retentativas de uma liberação. Chegou aqui, o problema não é
+   * transitório e precisa de gente olhando (a linha fica em FALHA e aparece no
+   * alerta de `/admin/carteiras`).
+   */
+  private static readonly MAXIMO_TENTATIVAS = 8;
+  /** Espaçamento entre retentativas da MESMA liberação. */
+  private static readonly ESPERA_RETENTATIVA_MS = 10 * 60 * 1000;
+
   async process(_job: Job<LiberacaoSaldoJobPayload>) {
+    const agora = new Date();
+    const desde = new Date(
+      agora.getTime() - LiberacaoSaldoProcessor.ESPERA_RETENTATIVA_MS,
+    );
+    /**
+     * Além das AGENDADA vencidas, este passe recolhe o que ficou para trás:
+     *
+     * - `FALHA`: erro transitório (banco fora, deadlock, conta que estava
+     *   negativa). Era TERMINAL — nada no sistema reprocessava, então uma falha
+     *   de um minuto congelava o dinheiro do lojista em `PENDENTE_LIBERACAO`
+     *   para sempre, e só um UPDATE no banco destravava.
+     * - `PROCESSANDO`: o worker morreu entre marcar e mover o saldo.
+     *
+     * Reprocessar é seguro porque as duas entries têm chave de idempotência
+     * fixa (`lib:deb:<id>` / `lib:cred:<id>`): a segunda passada encontra as
+     * movimentações já criadas e não credita de novo.
+     */
     const due = await this.prisma.liberacaoSaldo.findMany({
-      where: { situacao: SITUACAO_LIBERACAO.AGENDADA, liberarEm: { lte: new Date() } },
+      where: {
+        liberarEm: { lte: agora },
+        OR: [
+          { situacao: SITUACAO_LIBERACAO.AGENDADA },
+          {
+            situacao: {
+              in: [SITUACAO_LIBERACAO.FALHA, SITUACAO_LIBERACAO.PROCESSANDO],
+            },
+            quantidadeTentativas: { lt: LiberacaoSaldoProcessor.MAXIMO_TENTATIVAS },
+            atualizadoEm: { lte: desde },
+          },
+        ],
+      },
+      orderBy: { liberarEm: 'asc' },
       take: 50,
     });
-    this.logger.log(`liberacoes vencidas: ${due.length}`);
+    const retentativas = due.filter(
+      (l) => l.situacao !== SITUACAO_LIBERACAO.AGENDADA,
+    ).length;
+    this.logger.log(
+      `liberacoes vencidas: ${due.length} (retentativas: ${retentativas})`,
+    );
 
     for (const lib of due) {
-      await this.prisma.liberacaoSaldo.update({
-        where: { id: lib.id },
+      // Claim atômico (mesmo padrão do outbox): dois ticks sobrepostos não
+      // duplicam dinheiro (as chaves de idempotência barram), mas queimariam o
+      // teto de tentativas em dobro e um passe reprocessaria o que o outro já
+      // está mexendo.
+      const claim = await this.prisma.liberacaoSaldo.updateMany({
+        where: { id: lib.id, situacao: lib.situacao },
         data: {
           situacao: SITUACAO_LIBERACAO.PROCESSANDO,
           quantidadeTentativas: { increment: 1 },
         },
       });
+      if (claim.count !== 1) continue;
       try {
         const from =
           lib.tipoLiberacao === 'RESERVA' ? 'RESERVADO' : 'PENDENTE_LIBERACAO';
@@ -365,7 +341,11 @@ export class LiberacaoSaldoProcessor extends WorkerHost {
             movimentacaoLiberacaoId: result.movimentacoes[1]?.id,
           },
         });
+        // Bloqueio administrativo ativo captura o que acabou de virar disponível.
+        await this.bloqueios.capturarSemFalhar(lib.usuarioId, `lib:${lib.id}`);
       } catch (e) {
+        const tentativas = lib.quantidadeTentativas + 1;
+        const esgotou = tentativas >= LiberacaoSaldoProcessor.MAXIMO_TENTATIVAS;
         await this.prisma.liberacaoSaldo.update({
           where: { id: lib.id },
           data: {
@@ -373,6 +353,13 @@ export class LiberacaoSaldoProcessor extends WorkerHost {
             ultimoErro: e instanceof Error ? e.message : String(e),
           },
         });
+        // Esgotar o teto é dinheiro do lojista parado sem ninguém saber: sobe
+        // como erro no log e a linha entra no alerta de liberações travadas.
+        const msg = `liberacao ${lib.id} (usuario ${lib.usuarioId}) falhou na tentativa ${tentativas}: ${
+          e instanceof Error ? e.message : String(e)
+        }`;
+        if (esgotou) this.logger.error(`${msg} — TETO DE TENTATIVAS ATINGIDO`);
+        else this.logger.warn(msg);
       }
     }
     return { processed: due.length };

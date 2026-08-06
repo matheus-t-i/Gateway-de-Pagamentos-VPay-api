@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ApiCredentialsModule } from '../api-credentials/api-credentials.module';
 import { AuthModule } from '../auth/auth.module';
 import { ContingenciaModule } from '../contingencia/contingencia.module';
+import { IntegracoesModule } from '../integracoes/integracoes.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { ProvidersModule } from '../providers/providers.module';
 import { PixApiController, PixPainelController } from './pix.controller';
@@ -16,6 +17,7 @@ import { PixService } from './pix.service';
     AuthModule,
     ApiCredentialsModule,
     ContingenciaModule,
+    IntegracoesModule,
     LedgerModule,
     ProvidersModule,
   ],

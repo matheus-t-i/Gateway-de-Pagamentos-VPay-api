@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { TEMAS } from './enums';
-import { documentoValidoPara, isCpf, normalizarDocumento } from './documento';
+import { appIntegracao, EVENTOS_INTEGRACAO, TIPO_INTEGRACAO } from './integracoes';
+import { normalizarIpOuCidr } from './rede';
+import {
+  documentoValidoPara,
+  isCnpj,
+  isCpf,
+  normalizarDocumento,
+} from './documento';
 
 export const loginSchema = z.object({
   email: z.string().email(),
@@ -121,6 +128,15 @@ export const decidirChavePixSchema = z.object({
   motivo: z.string().max(500).optional(),
 });
 
+/**
+ * Revogação de chave já APROVADA. A justificativa é OBRIGATÓRIA e mínima de 5
+ * caracteres: o dono do negócio precisa entender depois por que o acesso foi
+ * cortado sem ter de perguntar ao analista que cortou.
+ */
+export const revogarChavePixSchema = z.object({
+  motivo: z.string().trim().min(5).max(500),
+});
+
 /** Saque pelo PAINEL: escolhe uma chave já cadastrada e aprovada. */
 export const saquePainelSchema = z.object({
   valor: z.string().regex(/^\d+(\.\d{1,2})?$/),
@@ -162,6 +178,28 @@ export const itemCobrancaSchema = z.object({
   tangivel: z.boolean(),
 });
 
+/**
+ * Parâmetros de campanha do checkout do lojista. Todos opcionais: quem não faz
+ * tráfego pago simplesmente não manda o bloco.
+ *
+ * Nomes LITERAIS (`utm_source`, `src`, `sck`) em vez de traduzidos: é o que o
+ * lojista já tem em mãos, vindo da URL do anúncio e do pixel. Um `origem`/
+ * `campanha` obrigaria todo integrador a manter um de-para só para falar com a
+ * gente — e é assim que os apps de rastreio (Utmify e afins) esperam receber.
+ *
+ * `.max(255)` porque `utm_content` de campanha grande estoura fácil e o app de
+ * destino trunca ou recusa — melhor recusar aqui, com mensagem.
+ */
+export const rastreioSchema = z.object({
+  utm_source: z.string().max(255).optional(),
+  utm_campaign: z.string().max(255).optional(),
+  utm_medium: z.string().max(255).optional(),
+  utm_content: z.string().max(255).optional(),
+  utm_term: z.string().max(255).optional(),
+  src: z.string().max(255).optional(),
+  sck: z.string().max(255).optional(),
+});
+
 export const pagadorCobrancaSchema = z.object({
   nome: z.string().max(255).optional(),
   documento: z.string().max(20).optional(),
@@ -187,6 +225,12 @@ export const criarCobrancaPixSchema = z
      */
     urlCallback: z.string().url().max(500).optional(),
     pagador: pagadorCobrancaSchema.optional(),
+    /**
+     * Origem da venda (utm_*). Não muda nada no PIX: é repassado aos apps que o
+     * lojista conectou em `/desenvolvedores/integracoes` para que a venda seja
+     * atribuída à campanha que a gerou. Sem isto, a venda chega no app sem origem.
+     */
+    rastreio: rastreioSchema.optional(),
     itens: z
       .array(itemCobrancaSchema)
       .min(1, 'Informe ao menos um item na cobrança.')
@@ -216,16 +260,73 @@ export const depositoPainelSchema = z.object({
   expiracaoSegundos: z.number().int().positive().max(86400).optional(),
 });
 
-export const criarSaquePixSchema = z.object({
-  valor: z.string().regex(/^\d+(\.\d{1,2})?$/),
-  chavePix: z.string().min(1).max(255),
-  tipoChavePix: z.enum(['CPF', 'CNPJ', 'EMAIL', 'TELEFONE', 'ALEATORIA']),
-  referenciaExterna: z.string().max(255).optional(),
-  /** Mesma regra do cash-in: callback específico desta operação. */
-  urlCallback: z.string().url().max(500).optional(),
-  nomeBeneficiario: z.string().max(255).optional(),
-  documentoBeneficiario: z.string().max(20).optional(),
-});
+export const criarSaquePixSchema = z
+  .object({
+    valor: z.string().regex(/^\d+(\.\d{1,2})?$/),
+    chavePix: z.string().min(1).max(255),
+    tipoChavePix: z.enum(['CPF', 'CNPJ', 'EMAIL', 'TELEFONE', 'ALEATORIA']),
+    referenciaExterna: z.string().max(255).optional(),
+    /** Mesma regra do cash-in: callback específico desta operação. */
+    urlCallback: z.string().url().max(500).optional(),
+    /**
+     * Beneficiário OBRIGATÓRIO: as liquidantes exigem nome e documento do dono
+     * da chave para liquidar o PIX out. Enquanto eram opcionais, o saque sem
+     * eles saía daqui com string vazia e só quebrava lá na adquirente, depois
+     * de já ter debitado o saldo do lojista.
+     */
+    nomeBeneficiario: z.string().min(2).max(255),
+    documentoBeneficiario: z.string().min(11).max(20),
+  })
+  .superRefine((v, ctx) => {
+    const doc = normalizarDocumento(v.documentoBeneficiario);
+    if (!isCpf(doc) && !isCnpj(doc)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['documentoBeneficiario'],
+        message: 'documentoBeneficiario deve ser um CPF (11) ou CNPJ (14) válido',
+      });
+      return;
+    }
+    // O documento tem que ser o DONO da chave. Quando a chave é o próprio
+    // documento (CPF/CNPJ), dá para conferir aqui — divergência é erro de
+    // integração e viraria PIX para a pessoa errada.
+    if (v.tipoChavePix === 'CPF' || v.tipoChavePix === 'CNPJ') {
+      if (normalizarDocumento(v.chavePix) !== doc) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['documentoBeneficiario'],
+          message:
+            'documentoBeneficiario precisa ser o mesmo documento da chavePix ' +
+            `quando tipoChavePix é ${v.tipoChavePix}`,
+        });
+      }
+    }
+  });
+
+/**
+ * Allowlist de IP da credencial. Cada entrada é normalizada e recusada se não
+ * for IP/CIDR válido — entrada inválida nunca casa com IP nenhum e derrubaria a
+ * credencial sem explicar o motivo. Duplicatas somem na normalização.
+ */
+const ipsPermitidosSchema = z
+  .array(z.string())
+  .default([])
+  .transform((lista, ctx) => {
+    const normalizados: string[] = [];
+    for (const bruto of lista) {
+      if (!bruto.trim()) continue;
+      const ip = normalizarIpOuCidr(bruto);
+      if (!ip) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `IP ou faixa inválida: "${bruto.trim()}" (ex.: 203.0.113.10, 198.51.100.0/24, 2804:14c::/64).`,
+        });
+        continue;
+      }
+      if (!normalizados.includes(ip)) normalizados.push(ip);
+    }
+    return normalizados;
+  });
 
 export const criarCredencialApiSchema = z.object({
   nome: z.string().min(1).max(100),
@@ -237,7 +338,19 @@ export const criarCredencialApiSchema = z.object({
   escopos: z
     .array(z.enum(Object.values(ESCOPOS_API) as [string, ...string[]]))
     .default([]),
-  ipsPermitidos: z.array(z.string()).default([]),
+  ipsPermitidos: ipsPermitidosSchema,
+});
+
+/**
+ * Edição de credencial já emitida: nome e allowlist de IP.
+ *
+ * O par chave/segredo NÃO é editável — trocar segredo é emitir outra chave.
+ * `escopos` também fica de fora: ampliar poder de uma credencial que já está
+ * circulando é criação de acesso, não ajuste de cadastro.
+ */
+export const editarCredencialApiSchema = z.object({
+  nome: z.string().min(1).max(100),
+  ipsPermitidos: ipsPermitidosSchema,
 });
 
 export const configuracaoWebhookSchema = z
@@ -278,6 +391,63 @@ export const configuracaoWebhookSchema = z
       });
     }
   });
+
+/**
+ * App conectado pelo lojista (`/desenvolvedores/integracoes`).
+ *
+ * `credencial` é o token do app (Utmify: `x-api-token`). Quem decide se ela é
+ * obrigatória é o CATÁLOGO, não o schema: a Xtracky não tem credencial nenhuma,
+ * e um `min(8)` fixo obrigaria o lojista a inventar lixo para conseguir salvar.
+ * Na edição é sempre opcional — omitir mantém a guardada, que nunca volta pela
+ * API e não teria como ser redigitada só para trocar o nome da integração.
+ */
+const baseIntegracaoSchema = z.object({
+  nome: z.string().min(1).max(100),
+  eventos: z
+    .array(z.enum(Object.values(EVENTOS_INTEGRACAO) as [string, ...string[]]))
+    .default([]),
+  modoTeste: z.boolean().default(false),
+  ativo: z.boolean().default(true),
+  credencial: z.string().min(8).max(500).optional(),
+});
+
+export const criarIntegracaoSchema = baseIntegracaoSchema
+  .extend({
+    tipo: z.enum(Object.values(TIPO_INTEGRACAO) as [string, ...string[]]),
+  })
+  .superRefine((data, ctx) => {
+    const app = appIntegracao(data.tipo);
+    if (app?.credencial && !data.credencial?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['credencial'],
+        message: `Informe a ${app.credencial.rotulo} — ${app.nome} exige credencial.`,
+      });
+    }
+    // App sem credencial não guarda segredo: aceitar um aqui criaria a ilusão
+    // de que ele é usado em alguma chamada.
+    if (app && !app.credencial && data.credencial?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['credencial'],
+        message: `${app.nome} não usa credencial — deixe o campo em branco.`,
+      });
+    }
+    if (app && data.modoTeste && !app.suportaTeste) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['modoTeste'],
+        message: `${app.nome} não tem envio de teste: todo envio vira conversão real.`,
+      });
+    }
+  });
+
+/**
+ * `tipo` fica de fora da edição de propósito: trocar o app de uma integração
+ * manteria o histórico de envios de um app apontando para outro. Para mudar de
+ * app, cadastra-se outra integração.
+ */
+export const editarIntegracaoSchema = baseIntegracaoSchema;
 
 export type LoginInput = z.infer<typeof loginSchema>;
 export type CadastroUsuarioInput = z.infer<typeof cadastroUsuarioSchema>;

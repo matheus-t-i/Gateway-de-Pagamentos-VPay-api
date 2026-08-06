@@ -13,6 +13,20 @@ export const QUEUE_NAMES = {
   DEVOLUCAO_PIX: '9-devolucao-pix',
   /** Saque automático do saldo parado na adquirente (gatilhos de tesouraria). */
   SAQUE_AUTOMATICO: '10-saque-automatico',
+  /**
+   * Reenvio MANUAL de callback ao lojista (botão do painel/admin). Fila
+   * separada de propósito: a `2-pix-webhook-send` é o fluxo automático e não
+   * pode ter a fila poluída — nem o alerta de backlog distorcido — por
+   * reprocessamento sob demanda. Aqui também não existe claim de outbox: o
+   * evento já foi publicado, o que se repete é só a ENTREGA.
+   */
+  WEBHOOK_REENVIO: '11-webhook-reenvio',
+  /**
+   * Envio de pedido aos APPS que o lojista conectou (`/desenvolvedores/integracoes`).
+   * Fila própria porque é integração de TERCEIRO: a Utmify fora do ar não pode
+   * atrasar o callback do lojista, que é o que libera o pedido dele.
+   */
+  INTEGRACAO_ENVIO: '12-integracao-envio',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -49,6 +63,29 @@ export type DevolucaoPixJobPayload = {
 };
 
 /**
+ * Reenvio manual do callback de uma transação. `eventoOutboxId` é resolvido no
+ * endpoint (último evento da transação) para o job não depender de a transação
+ * ainda existir com o mesmo estado quando for processado.
+ */
+export type WebhookReenvioJobPayload = {
+  eventoOutboxId: string;
+  idTransacaoPublico: string;
+  /** Quem apertou o botão — vai para o log do worker. */
+  solicitadoPorUsuarioId?: string;
+  identificadorRastreio: string;
+};
+
+/**
+ * Um envio para um app conectado. O job carrega só o id da linha de
+ * `envios_integracao` — o payload é montado no worker, a partir do estado ATUAL
+ * da transação, para um reprocessamento não mandar dado velho ao app.
+ */
+export type IntegracaoEnvioJobPayload = {
+  envioId: string;
+  identificadorRastreio: string;
+};
+
+/**
  * Sem `execucaoId` o job é o tick periódico: atualiza saldos, reconcilia
  * execuções enviadas e avalia os gatilhos. Com `execucaoId` processa só aquele
  * disparo (botão "Executar agora" do admin).
@@ -71,9 +108,12 @@ export const TIPOS_EMAIL = {
   TOTP_DESABILITADO: 'TOTP_DESABILITADO',
   CHAVE_PIX_APROVADA: 'CHAVE_PIX_APROVADA',
   CHAVE_PIX_REPROVADA: 'CHAVE_PIX_REPROVADA',
+  /** Chave que estava aprovada e o admin tirou de circulação. */
+  CHAVE_PIX_REVOGADA: 'CHAVE_PIX_REVOGADA',
   MED_RECEBIDO: 'MED_RECEBIDO',
   MED_ACEITO: 'MED_ACEITO',
   MED_RECUSADO: 'MED_RECUSADO',
+  CONTA_ENCERRADA: 'CONTA_ENCERRADA',
 } as const;
 
 export type TipoEmail = (typeof TIPOS_EMAIL)[keyof typeof TIPOS_EMAIL];

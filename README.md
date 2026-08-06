@@ -164,7 +164,7 @@ Idempotência via header `Idempotency-Key` (resposta guardada por 24 h); rate li
 | Prefixo | Descrição |
 |---|---|
 | `painel/dashboard` | KPIs e gráficos da conta |
-| `painel/transacoes` | Listagem, detalhe, depósito pelo painel (`depositoPainelSchema`, sem itens — não é venda) e saque (só para chave PIX **APROVADA**) |
+| `painel/transacoes` | Extrato paginado (`direcao`/`situacao`/período/`busca` + totais das concluídas), detalhe, depósito pelo painel (`depositoPainelSchema`, sem itens — não é venda) e saque (só para chave PIX **APROVADA**) |
 | `painel/adquirentes` | Vitrine liberada + escolha da adquirente de PIX in |
 | `painel/chaves-pix` | CRUD de chaves PIX (entram `PENDENTE`; admin aprova) |
 | `painel/credenciais` | Credenciais de API (`vp_<hex>`; segredo exibido **uma única vez**) |
@@ -174,13 +174,13 @@ Idempotência via header `Idempotency-Key` (resposta guardada por 24 h); rate li
 
 | Prefixo | Descrição |
 |---|---|
-| `admin/usuarios` | Aprovação de cadastros, ficha do cliente, situação, perfis, taxas/configuração comercial |
+| `admin/usuarios` | Aprovação de cadastros, ficha do cliente, situação, perfis, taxas/configuração comercial (taxa, liberação D+, reserva, MED) e o padrão de novos clientes (`/config-padrao`) |
 | `admin/documentos` | Download stream e validação de documentos KYC |
 | `admin/chaves-pix` | Aprovação/reprovação das chaves PIX dos clientes |
 | `admin/med` | Fila MED, registro manual e decisão (aceitar/recusar) |
 | `admin/perfis` | CRUD de perfis + catálogo de permissões (`/catalogo`) |
 | `admin/carteiras` | Saldos dos lojistas (somente leitura) |
-| `admin/adquirentes` · `admin/provedores` · `admin/taxa-padrao` | Cadastro de adquirentes, vitrine, liberações por cliente, custos, alternância em massa |
+| `admin/adquirentes` · `admin/provedores` | Cadastro de adquirentes, vitrine, liberações por cliente, custos, alternância em massa |
 | `admin/contingencia` | Cadeia de contingência, resumo e falhas (com response cru da liquidante) |
 | `admin/tesouraria` | Saldos da VPay nas adquirentes, gatilhos de saque automático, execuções |
 | `admin/relatorios` · `admin/dashboard` · `admin/auditoria` | Cash-in/out, Lucro × Custo, auditoria de persistência e de acesso |
@@ -254,7 +254,7 @@ Grupos principais:
 
 ## MED (contestações)
 
-Modos por cliente (`ModoTratamentoMed`): `BLOQUEAR_SALDO` (move disponível→bloqueado só o que existe; o resto vira `valorNaoCoberto`), `DEBITAR_IMEDIATAMENTE`, `ANALISE_MANUAL` (não toca no saldo). **A decisão é que liquida o dinheiro** (`MedService.decidir`): `ACEITO` tira do bloqueado + debita o restante + cria `DevolucaoPix` (a fila 9 faz a transferência externa); `RECUSADO` devolve o bloqueado ao disponível. Caso finalizado não aceita nova decisão. Entradas: webhook mock, postback Valorion com `status=MED`, ou registro manual do admin.
+Modos por cliente (`ModoTratamentoMed`): `BLOQUEAR_SALDO` (move disponível→bloqueado só o que existe; o resto vira `valorNaoCoberto`) e `DEBITAR_IMEDIATAMENTE`. MED sempre desconta saldo. **A decisão é que liquida o dinheiro** (`MedService.decidir`): `ACEITO` tira do bloqueado + debita o restante + cria `DevolucaoPix` (a fila 9 faz a transferência externa); `RECUSADO` devolve o bloqueado ao disponível. Caso finalizado não aceita nova decisão. Entradas: webhook mock, postback Valorion com `status=MED`, ou registro manual do admin.
 
 ## Contingência de adquirentes
 

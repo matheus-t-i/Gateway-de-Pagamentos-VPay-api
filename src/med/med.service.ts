@@ -2,25 +2,34 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import Decimal from 'decimal.js';
 import {
+  EVENTOS_LOJISTA,
   money,
+  MODO_TRATAMENTO_MED,
   SITUACAO_BLOQUEIO,
   SITUACAO_CASO_MED,
   SITUACAO_DEVOLUCAO,
+  SITUACAO_TRANSACAO,
   TIPOS_EMAIL,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfigPixService, LedgerService } from '../ledger/ledger.service';
+import { BloqueiosSaldoService } from '../ledger/bloqueios-saldo.service';
 import { QueuesService } from '../queues/queues.service';
 import { getRastreio } from '../common/request-context';
 
 /** Alias local — vocabulário oficial vive em shared/situacoes.ts. */
 const SITUACAO_MED = SITUACAO_CASO_MED;
 
-/** Situações que ainda admitem decisão do analista. */
+/**
+ * Situações que ainda admitem decisão do analista.
+ *
+ * `DEBITADO` NÃO entra: quem debita é o modo `DEBITAR_IMEDIATAMENTE`, que existe
+ * justamente para a conta sem análise — o caso já nasce encerrado e o dinheiro
+ * já saiu. Deixá-lo decidível permitiria "aceitar" depois e debitar duas vezes.
+ */
 const DECIDIVEIS: string[] = [
   SITUACAO_MED.RECEBIDO,
   SITUACAO_MED.SALDO_BLOQUEADO,
-  SITUACAO_MED.DEBITADO,
   SITUACAO_MED.EM_ANALISE,
 ];
 
@@ -30,6 +39,7 @@ export class MedService {
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
     private readonly configPix: ConfigPixService,
+    private readonly bloqueios: BloqueiosSaldoService,
     private readonly queues: QueuesService,
   ) {}
 
@@ -65,7 +75,8 @@ export class MedService {
 
     const valor = money(params.valorSolicitado);
     if (valor.lte(0)) throw new BadRequestException('Valor inválido.');
-    if (valor.gt(money(tx.valorBruto.toString()))) {
+    const valorBruto = money(tx.valorBruto.toString());
+    if (valor.gt(valorBruto)) {
       throw new BadRequestException(
         'Valor do MED maior que o valor da transação.',
       );
@@ -82,6 +93,31 @@ export class MedService {
     });
     if (existente) {
       return { idPublico: existente.idPublico, situacao: existente.situacao, duplicado: true };
+    }
+
+    /**
+     * Teto ACUMULADO da venda: a soma dos MEDs vivos daquela transação não pode
+     * passar do valor vendido.
+     *
+     * A validação de valor acima olha um caso por vez — dois avisos de MED com
+     * identificadores DIFERENTES (o dedupe é por `chaveIdempotencia`) debitavam
+     * o valor cheio DUAS vezes da mesma venda. Casos `RECUSADO` não contam: ali
+     * o bloqueio foi desfeito e o dinheiro voltou ao lojista.
+     *
+     * Depois do dedupe de propósito: reentrega do MESMO aviso tem que continuar
+     * devolvendo `duplicado: true`, e não 400 por "teto estourado" — o caso já
+     * gravado entraria na própria soma.
+     */
+    const vivos = await this.prisma.casoMed.aggregate({
+      where: { transacaoId: tx.id, situacao: { not: SITUACAO_MED.RECUSADO } },
+      _sum: { valorSolicitado: true },
+    });
+    const jaContestado = money(vivos._sum.valorSolicitado?.toString() ?? '0');
+    if (jaContestado.plus(valor).gt(valorBruto)) {
+      throw new BadRequestException(
+        `MED acima do saldo contestável da venda: já existem ${jaContestado.toFixed(2)} ` +
+          `contestados de ${valorBruto.toFixed(2)}.`,
+      );
     }
 
     const cfg = await this.configPix.resolverEfetiva(tx.usuarioId);
@@ -117,7 +153,7 @@ export class MedService {
 
     let situacaoFinal: string = SITUACAO_MED.EM_ANALISE;
 
-    if (cfg.modoTratamentoMed === 'BLOQUEAR_SALDO') {
+    if (cfg.modoTratamentoMed === MODO_TRATAMENTO_MED.BLOQUEAR_SALDO) {
       // Bloqueia só o que existe de saldo. O restante vira valorNaoCoberto —
       // travar tudo geraria saldo negativo e derrubaria a operação do cliente.
       const disponivel = await this.saldoDisponivel(tx.usuarioId);
@@ -173,10 +209,18 @@ export class MedService {
         },
       });
       situacaoFinal = SITUACAO_MED.SALDO_BLOQUEADO;
-    } else if (cfg.modoTratamentoMed === 'DEBITAR_IMEDIATAMENTE') {
-      await this.ledger.aplicarMovimentacoes({
+    } else if (cfg.modoTratamentoMed === MODO_TRATAMENTO_MED.DEBITAR_IMEDIATAMENTE) {
+      // MED sem análise: o valor sai do disponível agora e o caso já nasce
+      // ENCERRADO — a conta configurada assim não tem fila em `/admin/med`, e
+      // por isso também não acumula saldo bloqueado por MED. A venda vira MED e
+      // o lojista é avisado pelo callback, igual ao MED automático.
+      const ledgerResult = await this.ledger.aplicarMovimentacoes({
         usuarioId: tx.usuarioId,
-        permiteSaldoNegativo: cfg.permiteSaldoNegativo,
+        // Sempre negativo-permitido: a adquirente já levou o dinheiro, então o
+        // débito precisa sair mesmo com a conta zerada. Recusar aqui não
+        // guardaria nada — só deixaria a perda inteira do nosso lado, com o job
+        // falhando em retry infinito.
+        permiteSaldoNegativo: true,
         entries: [
           {
             tipoSaldo: 'DISPONIVEL',
@@ -189,17 +233,72 @@ export class MedService {
             descricao: 'Débito imediato por MED',
           },
         ],
+        outbox: {
+          tipoAgregado: 'DEVOLUCAO_PIX',
+          identificadorAgregado: tx.idTransacaoPublico,
+          tipoEvento: EVENTOS_LOJISTA.PIX_DEVOLUCAO_CONCLUIDA,
+          conteudo: {
+            idTransacao: tx.idTransacaoPublico,
+            valor: valor.toFixed(2),
+            motivo: params.motivo ?? 'MED',
+          },
+        },
       });
-      await this.prisma.casoMed.update({
-        where: { id: caso.id },
-        data: { situacao: SITUACAO_MED.DEBITADO, valorDebitado: valor.toFixed(2) },
+
+      const agora = new Date();
+      await this.prisma.$transaction(async (db) => {
+        await db.casoMed.update({
+          where: { id: caso.id },
+          data: {
+            situacao: SITUACAO_MED.DEBITADO,
+            valorDebitado: valor.toFixed(2),
+            decididoEm: agora,
+            decididoPorUsuarioId: params.usuarioAtorId,
+            encerradoEm: agora,
+          },
+        });
+        await db.historicoCasoMed.create({
+          data: {
+            casoMedId: caso.id,
+            situacaoAnterior: SITUACAO_MED.RECEBIDO,
+            novaSituacao: SITUACAO_MED.DEBITADO,
+            acao: 'DEBITO_IMEDIATO',
+            origem: params.origem,
+            usuarioAtorId: params.usuarioAtorId,
+            motivo: 'Conta sem análise de MED — débito direto no saldo',
+          },
+        });
+        if (tx.situacao !== SITUACAO_TRANSACAO.MED) {
+          await db.transacao.update({
+            where: { id: tx.id },
+            data: { situacao: SITUACAO_TRANSACAO.MED },
+          });
+          await db.historicoSituacaoTransacao.create({
+            data: {
+              transacaoId: tx.id,
+              situacaoAnterior: tx.situacao,
+              novaSituacao: SITUACAO_TRANSACAO.MED,
+              origem: params.origem,
+              motivo: 'MED com débito imediato',
+            },
+          });
+        }
       });
+
+      if (ledgerResult.outboxId) {
+        await this.queues.enqueueOutbox({
+          eventoOutboxId: ledgerResult.outboxId.toString(),
+          identificadorRastreio: getRastreio(),
+        });
+      }
       situacaoFinal = SITUACAO_MED.DEBITADO;
     } else {
-      await this.prisma.casoMed.update({
-        where: { id: caso.id },
-        data: { situacao: SITUACAO_MED.EM_ANALISE },
-      });
+      // Só existem BLOQUEAR_SALDO e DEBITAR_IMEDIATAMENTE — qualquer outro valor
+      // é config corrompida (ex.: enum legado). Falha explícita em vez de criar
+      // caso "só análise" sem tocar no saldo.
+      throw new BadRequestException(
+        `modoTratamentoMed inválido: ${cfg.modoTratamentoMed}`,
+      );
     }
 
     await this.queues.enqueueEmail({
@@ -340,6 +439,8 @@ export class MedService {
           },
         ],
       });
+      // O valor voltou ao disponível: bloqueio administrativo ativo captura já.
+      await this.bloqueios.capturarSemFalhar(caso.usuarioId, `medrecusa:${caso.id}`);
     }
     // Observação: se o modo era DEBITAR_IMEDIATAMENTE e o MED é recusado, o
     // valor já saiu; o estorno é decisão comercial e fica registrado no caso.

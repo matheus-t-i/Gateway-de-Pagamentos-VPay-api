@@ -11,6 +11,7 @@ import {
   ContingenciaService,
   FalhaAdquirenteError,
 } from '../contingencia/contingencia.service';
+import { IntegracoesService } from '../integracoes/integracoes.service';
 import { ConfigPixService, LedgerService } from '../ledger/ledger.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateChargeResult } from '../providers/payment-provider.port';
@@ -20,13 +21,26 @@ import { QueuesService } from '../queues/queues.service';
 import {
   CriarCobrancaPixInput,
   CriarSaquePixInput,
+  EVENTOS_INTEGRACAO,
   ItemCobrancaInput,
   money,
+  resumoProduto,
+  SITUACAO_CHAVE_PIX,
   SITUACAO_PROVEDOR,
   SITUACAO_TENTATIVA,
   SITUACAO_TRANSACAO,
   TIPO_FALHA_ADQUIRENTE,
 } from '../shared';
+
+/** Filtros do extrato do painel — mesmos para a lista e para o resumo. */
+type FiltroExtrato = {
+  direcao?: string;
+  situacao?: string;
+  dataInicial?: string;
+  dataFinal?: string;
+  busca?: string;
+};
+type Paginacao = { page?: string; limit?: string };
 
 /** Conta de adquirente com o que a criação da cobrança precisa saber dela. */
 type ContaParaCobranca = {
@@ -51,6 +65,7 @@ export class PixService {
     private readonly queues: QueuesService,
     private readonly contingencia: ContingenciaService,
     private readonly adquirentes: AdquirentesService,
+    private readonly integracoes: IntegracoesService,
   ) {}
 
   /** Credenciais da conta; contas antigas ainda guardam JSON em claro. */
@@ -176,6 +191,10 @@ export class PixService {
         contaProvedorId: conta.id,
         referenciaExterna: params.input.referenciaExterna,
         urlCallback: params.input.urlCallback,
+        // Origem da venda (utm_*). Guardado na criação porque é o único momento
+        // em que o checkout do lojista sabe de onde veio o comprador — depois
+        // não há como recuperar. Só os apps conectados leem isto.
+        parametrosRastreio: params.input.rastreio ?? undefined,
         direcao: 'ENTRADA',
         valorBruto: valor.toFixed(2),
         tarifaPixPercentualAplicada: cfg.taxaPixEntradaPercentual.toFixed(4),
@@ -194,7 +213,12 @@ export class PixService {
         diasRetencaoReservaAplicado: cfg.diasRetencaoReserva,
         liberarSaldoEm,
         liberarReservaEm,
-        situacao: SITUACAO_TRANSACAO.PROCESSANDO,
+        // Nasce AGUARDANDO_PAGAMENTO: a criação só tem dois desfechos — sai com
+        // código PIX (segue aguardando o pagador) ou não sai de nenhuma
+        // adquirente (vira FALHA logo abaixo). Um PROCESSANDO intermediário
+        // custaria um UPDATE e um histórico a mais no caminho feliz sem contar
+        // nada a quem acompanha a cobrança.
+        situacao: SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO,
         pix: {
           create: {
             nomePagador: params.input.pagador?.nome,
@@ -303,7 +327,7 @@ export class PixService {
 
     if (!vencedora) {
       // Nem a contingência salvou: a venda foi perdida e a transação não pode
-      // ficar PROCESSANDO para sempre.
+      // ficar AGUARDANDO_PAGAMENTO sem código PIX nenhum para o pagador.
       await this.prisma.$transaction([
         this.prisma.transacao.update({
           where: { id: tx.id },
@@ -312,7 +336,7 @@ export class PixService {
         this.prisma.historicoSituacaoTransacao.create({
           data: {
             transacaoId: tx.id,
-            situacaoAnterior: SITUACAO_TRANSACAO.PROCESSANDO,
+            situacaoAnterior: SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO,
             novaSituacao: SITUACAO_TRANSACAO.FALHA,
             origem: 'API',
             motivo: `Nenhuma adquirente gerou a cobrança (${tentativas.length} tentativa(s))`,
@@ -354,6 +378,9 @@ export class PixService {
       await this.contingencia.marcarResolvidas(tx.id, vencedora.conta.id);
     }
 
+    // A situação já é AGUARDANDO_PAGAMENTO desde a criação — o que faltava era
+    // o código PIX. O histórico com `situacaoAnterior: null` registra o estado
+    // inicial e, sobretudo, QUAL adquirente atendeu.
     await this.prisma.$transaction([
       this.prisma.transacaoPix.update({
         where: { transacaoId: tx.id },
@@ -364,14 +391,10 @@ export class PixService {
           expiraEm: charge.expiraEm,
         },
       }),
-      this.prisma.transacao.update({
-        where: { id: tx.id },
-        data: { situacao: SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO },
-      }),
       this.prisma.historicoSituacaoTransacao.create({
         data: {
           transacaoId: tx.id,
-          situacaoAnterior: SITUACAO_TRANSACAO.PROCESSANDO,
+          situacaoAnterior: null,
           novaSituacao: SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO,
           origem: 'API',
           motivo:
@@ -381,6 +404,14 @@ export class PixService {
         },
       }),
     ]);
+
+    // Apps conectados pelo lojista (Utmify e afins) recebem o "PIX gerado".
+    // Fora de qualquer transação e sem poder lançar: rastreio de campanha não
+    // pode atrasar nem derrubar a entrega do código PIX ao pagador.
+    await this.integracoes.notificarSemFalhar(
+      tx.id,
+      EVENTOS_INTEGRACAO.PEDIDO_CRIADO,
+    );
 
     // `idInterno` fica só para uso do controller (idempotência) e é removido
     // antes da resposta — a API pública conhece apenas `idTransacao`.
@@ -404,9 +435,40 @@ export class PixService {
   }) {
     const valor = money(params.input.valor);
     const cfg = await this.configPix.resolverEfetiva(params.usuarioId);
-    if (!cfg.permitirPixSaidaViaApi) {
-      throw new BadRequestException('PIX saída via API desabilitado');
+
+    // Origem permitida: quem tem credencial de API veio pela API; sem ela, veio
+    // do painel. O padrão do sistema é PAINEL — API é liberação explícita.
+    const viaApi = !!params.credencialApiId;
+    const origemLiberada =
+      cfg.origemSaquePermitida === 'AMBOS' ||
+      (viaApi ? cfg.origemSaquePermitida === 'API' : cfg.origemSaquePermitida === 'PAINEL');
+    if (!origemLiberada) {
+      throw new BadRequestException(
+        viaApi
+          ? 'Saque via API não está habilitado para esta conta.'
+          : 'Saque pelo painel não está habilitado para esta conta.',
+      );
     }
+
+    // Chave de destino: quando a conta exige chave cadastrada, o saque só sai
+    // para chave APROVADA do próprio titular — é o que impede desviar dinheiro
+    // para uma chave qualquer com a credencial vazada.
+    if (cfg.exigirChavePixCadastrada) {
+      const chave = await this.prisma.chavePixUsuario.findFirst({
+        where: {
+          usuarioId: params.usuarioId,
+          chave: params.input.chavePix,
+          situacao: SITUACAO_CHAVE_PIX.APROVADA,
+        },
+      });
+      if (!chave) {
+        throw new BadRequestException(
+          'Esta conta só permite saque para chave PIX cadastrada e aprovada. ' +
+            'Cadastre a chave no painel e aguarde a aprovação.',
+        );
+      }
+    }
+
     if (valor.lt(cfg.ticketMinimoPixSaida)) {
       throw new BadRequestException('Valor abaixo do mínimo');
     }
@@ -431,16 +493,31 @@ export class PixService {
     const valorCusto = valor.mul(custoPct).div(100).plus(custoFixo).toDecimalPlaces(2);
     const totalDebito = valor.plus(valorTarifa);
 
+    /**
+     * Saque NUNCA usa saldo negativo, nem em conta que permite ficar negativa.
+     *
+     * "Conta pode ficar negativa" existe para o dinheiro que a adquirente leva
+     * de volta (MED): a dívida é consequência de algo que já aconteceu. Saque é
+     * o contrário — é a conta pedindo dinheiro que ela não tem, e quem pagaria
+     * seria a VPay, sem nenhuma garantia de reaver. Este débito é a ÚNICA trava
+     * de saldo do saque: não existe outra checagem antes daqui.
+     */
+    // As duas chaves ficam em variável porque o vínculo com a transação é feito
+    // logo abaixo, por elas — a transação ainda não existe neste ponto.
+    const referenciaDebito = params.input.referenciaExterna ?? randomUUID();
+    const chaveHold = `saque:hold:${params.usuarioId}:${referenciaDebito}`;
+    const chaveTarifa = `saque:tarifa:${params.usuarioId}:${referenciaDebito}`;
+
     await this.ledger.aplicarMovimentacoes({
       usuarioId: params.usuarioId,
-      permiteSaldoNegativo: cfg.permiteSaldoNegativo,
+      permiteSaldoNegativo: false,
       entries: [
         {
           tipoSaldo: 'DISPONIVEL',
           tipoMovimento: 'DEBITO',
           natureza: 'SAIDA',
           valor,
-          chaveIdempotencia: `saque:hold:${params.usuarioId}:${params.input.referenciaExterna ?? randomUUID()}`,
+          chaveIdempotencia: chaveHold,
           descricao: 'Reserva de valor para saque PIX',
         },
         {
@@ -448,39 +525,63 @@ export class PixService {
           tipoMovimento: 'DEBITO',
           natureza: 'TARIFA',
           valor: valorTarifa,
-          chaveIdempotencia: `saque:tarifa:${params.usuarioId}:${params.input.referenciaExterna ?? randomUUID()}`,
+          chaveIdempotencia: chaveTarifa,
           descricao: 'Tarifa saque PIX',
         },
       ],
     });
 
-    const tx = await this.prisma.transacao.create({
-      data: {
-        usuarioId: params.usuarioId,
-        credencialApiId: params.credencialApiId,
-        contaProvedorId: conta.id,
-        referenciaExterna: params.input.referenciaExterna,
-        urlCallback: params.input.urlCallback,
-        direcao: 'SAIDA',
-        valorBruto: valor.toFixed(2),
-        tarifaPixPercentualAplicada: cfg.taxaPixSaidaPercentual.toFixed(4),
-        tarifaPixFixaAplicada: cfg.taxaPixSaidaFixa.toFixed(4),
-        valorTarifaPix: valorTarifa.toFixed(2),
-        custoPixProvedorPercentualAplicado: custoPct.toFixed(4),
-        custoPixProvedorFixoAplicado: custoFixo.toFixed(4),
-        valorCustoPixProvedor: valorCusto.toFixed(2),
-        valorLiquidacaoEmpresa: totalDebito.neg().toFixed(2),
-        valorMargemBruta: valorTarifa.minus(valorCusto).toFixed(2),
-        situacao: SITUACAO_TRANSACAO.PROCESSANDO,
-        pix: {
-          create: {
-            chavePix: params.input.chavePix,
-            tipoChavePix: params.input.tipoChavePix,
-            nomeBeneficiario: params.input.nomeBeneficiario,
-            documentoBeneficiario: params.input.documentoBeneficiario,
+    /**
+     * Transação + vínculo das movimentações no MESMO commit.
+     *
+     * O `PixCashOutProcessor` revalida o débito somando
+     * `movimentacoes_saldo` POR `transacao_id` antes de mandar dinheiro para a
+     * liquidante. As movimentações nascem sem esse vínculo (o débito acontece
+     * antes da transação existir, de propósito), então sem este `updateMany` a
+     * soma dava zero e TODO saque parava na revalidação — com o saldo do
+     * lojista já debitado e a transação presa em `PROCESSANDO`.
+     *
+     * Atômico porque uma falha entre o `create` e o vínculo recriaria
+     * exatamente esse estado.
+     */
+    const tx = await this.prisma.$transaction(async (db) => {
+      const criada = await db.transacao.create({
+        data: {
+          usuarioId: params.usuarioId,
+          credencialApiId: params.credencialApiId,
+          contaProvedorId: conta.id,
+          referenciaExterna: params.input.referenciaExterna,
+          urlCallback: params.input.urlCallback,
+          direcao: 'SAIDA',
+          valorBruto: valor.toFixed(2),
+          tarifaPixPercentualAplicada: cfg.taxaPixSaidaPercentual.toFixed(4),
+          tarifaPixFixaAplicada: cfg.taxaPixSaidaFixa.toFixed(4),
+          valorTarifaPix: valorTarifa.toFixed(2),
+          custoPixProvedorPercentualAplicado: custoPct.toFixed(4),
+          custoPixProvedorFixoAplicado: custoFixo.toFixed(4),
+          valorCustoPixProvedor: valorCusto.toFixed(2),
+          valorLiquidacaoEmpresa: totalDebito.neg().toFixed(2),
+          valorMargemBruta: valorTarifa.minus(valorCusto).toFixed(2),
+          situacao: SITUACAO_TRANSACAO.PROCESSANDO,
+          pix: {
+            create: {
+              chavePix: params.input.chavePix,
+              tipoChavePix: params.input.tipoChavePix,
+              nomeBeneficiario: params.input.nomeBeneficiario,
+              documentoBeneficiario: params.input.documentoBeneficiario,
+            },
           },
         },
-      },
+      });
+      await db.movimentacaoSaldo.updateMany({
+        where: {
+          chaveIdempotencia: { in: [chaveHold, chaveTarifa] },
+          usuarioId: params.usuarioId,
+          transacaoId: null,
+        },
+        data: { transacaoId: criada.id },
+      });
+      return criada;
     });
 
     await this.queues.enqueuePixCashOut({
@@ -501,22 +602,183 @@ export class PixService {
     };
   }
 
-  async listar(usuarioId: bigint) {
+  /**
+   * Filtro do extrato, compartilhado pela LISTA e pelo RESUMO — os dois têm de
+   * enxergar exatamente o mesmo conjunto, senão o total do topo não bate com a
+   * tabela.
+   */
+  private async filtroExtrato(usuarioId: bigint, q: FiltroExtrato) {
+    const direcao =
+      q.direcao === 'ENTRADA' || q.direcao === 'SAIDA' ? q.direcao : undefined;
+
+    const where: Record<string, unknown> = { usuarioId };
+    if (direcao) where.direcao = direcao;
+    // Situação só entra se for do vocabulário oficial — valor inventado na query
+    // string devolveria lista vazia sem explicação.
+    if (q.situacao && q.situacao in SITUACAO_TRANSACAO) where.situacao = q.situacao;
+    if (q.dataInicial || q.dataFinal) {
+      const gte = q.dataInicial ? new Date(q.dataInicial + 'T00:00:00') : undefined;
+      const lte = q.dataFinal ? new Date(q.dataFinal + 'T23:59:59.999') : undefined;
+      where.criadoEm = { ...(gte ? { gte } : {}), ...(lte ? { lte } : {}) };
+    }
+
+    const busca = (q.busca ?? '').trim();
+    if (busca) {
+      const orBusca: Array<Record<string, unknown>> = [
+        { referenciaExterna: { contains: busca, mode: 'insensitive' } },
+        {
+          pix: {
+            is: { identificadorFimAFim: { contains: busca, mode: 'insensitive' } },
+          },
+        },
+        { pix: { is: { txid: { contains: busca, mode: 'insensitive' } } } },
+      ];
+
+      /**
+       * A tabela mostra o id ABREVIADO (#6147dbe2), então o que o lojista copia
+       * da tela é um PREFIXO — e `id_transacao_publico` é UUID, tipo em que o
+       * Postgres não faz LIKE. Resolve com cast em SQL cru, sempre preso ao
+       * `usuario_id` do JWT para não virar sonda de transação alheia.
+       */
+      const prefixo = busca.toLowerCase().replace(/[^0-9a-f-]/g, '');
+      if (prefixo.length >= 4) {
+        const achados = await this.prisma.$queryRaw<Array<{ id: bigint }>>`
+          SELECT id FROM transacoes
+          WHERE usuario_id = ${usuarioId}
+            AND id_transacao_publico::text LIKE ${prefixo + '%'}
+          LIMIT 5000
+        `;
+        if (achados.length) orBusca.push({ id: { in: achados.map((r) => r.id) } });
+      }
+
+      where.OR = orBusca;
+    }
+
+    return { where, direcao };
+  }
+
+  /**
+   * Uma PÁGINA do extrato. Custo constante: índice + `LIMIT` — trocar de página
+   * não conta nem soma nada, esse trabalho é do `resumo`, que só refaz quando o
+   * FILTRO muda.
+   *
+   * `direcao` é o que separa as duas telas do painel: Transações (ENTRADA) e
+   * Transferências (SAIDA). Cada lado tem colunas próprias, então o cliente
+   * nunca vê a mistura.
+   */
+  async listar(usuarioId: bigint, q: FiltroExtrato & Paginacao = {}) {
+    const pagina = Math.max(1, Number(q.page) || 1);
+    const limite = Math.min(100, Math.max(5, Number(q.limit) || 10));
+    const { where } = await this.filtroExtrato(usuarioId, q);
+
     const rows = await this.prisma.transacao.findMany({
-      where: { usuarioId },
+      where: where as never,
       orderBy: { criadoEm: 'desc' },
-      take: 100,
-      include: { pix: true },
+      skip: (pagina - 1) * limite,
+      take: limite,
+      include: { pix: true, itens: { orderBy: { id: 'asc' } } },
     });
-    return rows.map((t) => ({
-      idTransacao: t.idTransacaoPublico,
-      direcao: t.direcao,
-      situacao: t.situacao,
-      valorBruto: t.valorBruto.toString(),
-      valorLiquidacao: t.valorLiquidacaoEmpresa.toString(),
-      criadoEm: t.criadoEm,
-      pixCopiaCola: t.pix?.pixCopiaCola,
-    }));
+
+    return {
+      pagina,
+      limite,
+      itens: rows.map((t) => ({
+        idTransacao: t.idTransacaoPublico,
+        direcao: t.direcao,
+        situacao: t.situacao,
+        valorBruto: t.valorBruto.toString(),
+        valorTarifa: t.valorTarifaPix.toString(),
+        /**
+         * Sempre POSITIVO e com significado próprio de cada sentido: na entrada
+         * é o que sobra para o lojista (bruto − taxa); na saída é o que sai da
+         * carteira (bruto + taxa). O sinal fica com o rótulo da tela, não com o
+         * número — `valorLiquidacaoEmpresa` guarda a saída negativa.
+         */
+        valorLiquido: this.liquidoDaDirecao(
+          t.direcao,
+          money(t.valorBruto.toString()),
+          money(t.valorTarifaPix.toString()),
+        ),
+        criadoEm: t.criadoEm,
+        liquidadoEm: t.liquidadoEm,
+        referenciaExterna: t.referenciaExterna,
+        produto: resumoProduto(t.itens, t.referenciaExterna),
+        itens: t.itens.map((i) => ({
+          titulo: i.titulo,
+          quantidade: i.quantidade,
+          valorUnitario: i.valorUnitario.toString(),
+          valorTotal: i.valorTotal.toString(),
+          tangivel: i.tangivel,
+        })),
+        pagador: t.pix?.nomePagador ?? null,
+        beneficiario: t.pix?.nomeBeneficiario ?? null,
+        chavePix: t.pix?.chavePix ?? null,
+        pixCopiaCola: t.pix?.pixCopiaCola ?? null,
+        // endToEnd é o identificador que o lojista usa no suporte/conciliação.
+        endToEnd: t.pix?.identificadorFimAFim ?? null,
+      })),
+    };
+  }
+
+  /**
+   * Cabeçalho do extrato: quantas operações o filtro tem e quanto de fato
+   * entrou/saiu. Consulta SEPARADA da lista de propósito — é a parte cara
+   * (percorre todo o conjunto filtrado, não só a página), e assim só roda
+   * quando o lojista muda o filtro, não a cada "Próxima".
+   *
+   * Soma só as CONCLUÍDAS: cobrança pendente não é dinheiro na conta.
+   */
+  async resumo(usuarioId: bigint, q: FiltroExtrato = {}) {
+    const { where, direcao } = await this.filtroExtrato(usuarioId, q);
+
+    const [quantidade, concluidas] = await Promise.all([
+      this.prisma.transacao.count({ where: where as never }),
+      // Agrupado por direção para o líquido sair da MESMA conta da linha
+      // (bruto ∓ tarifa) — nunca de `valorLiquidacaoEmpresa`, que é o efeito no
+      // ledger e tem sinal próprio.
+      this.prisma.transacao.groupBy({
+        by: ['direcao'],
+        where: { ...where, situacao: SITUACAO_TRANSACAO.CONCLUIDA } as never,
+        _count: { _all: true },
+        _sum: { valorBruto: true, valorTarifaPix: true },
+      }),
+    ]);
+
+    let quantidadeConcluidas = 0;
+    let brutoTotal = money(0);
+    let tarifaTotal = money(0);
+    let liquidoTotal = money(0);
+    for (const g of concluidas) {
+      const bruto = money(g._sum.valorBruto?.toString() ?? '0');
+      const tarifa = money(g._sum.valorTarifaPix?.toString() ?? '0');
+      const liquido = money(this.liquidoDaDirecao(g.direcao, bruto, tarifa));
+      quantidadeConcluidas += g._count._all;
+      brutoTotal = brutoTotal.plus(bruto);
+      tarifaTotal = tarifaTotal.plus(tarifa);
+      // Numa tela de um sentido só, o líquido é o valor daquele sentido (sempre
+      // positivo). Sem filtro de direção vira efeito no saldo: saída subtrai.
+      liquidoTotal =
+        !direcao && g.direcao === 'SAIDA'
+          ? liquidoTotal.minus(liquido)
+          : liquidoTotal.plus(liquido);
+    }
+
+    return {
+      quantidade,
+      quantidadeConcluidas,
+      bruto: brutoTotal.toFixed(2),
+      tarifa: tarifaTotal.toFixed(2),
+      liquido: liquidoTotal.toFixed(2),
+    };
+  }
+
+  /** Entrada: o que o lojista recebe. Saída: o que sai da carteira dele. */
+  private liquidoDaDirecao(
+    direcao: string,
+    bruto: ReturnType<typeof money>,
+    tarifa: ReturnType<typeof money>,
+  ) {
+    return (direcao === 'SAIDA' ? bruto.plus(tarifa) : bruto.minus(tarifa)).toFixed(2);
   }
 
   async detalhe(idTransacao: string, usuarioId: bigint) {

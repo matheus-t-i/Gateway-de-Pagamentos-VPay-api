@@ -3,7 +3,9 @@ import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthController } from './auth.controller';
 import { JwtAuthGuard } from './jwt-auth.guard';
+import { AdminPendenciasController } from './admin-pendencias.controller';
 import { AdminUsuariosController } from './admin-usuarios.controller';
+import { ContaController } from './conta.controller';
 import { SenhaController } from './senha.controller';
 import { TotpController } from './totp.controller';
 
@@ -23,7 +25,9 @@ import { TotpController } from './totp.controller';
   ],
   controllers: [
     AuthController,
+    AdminPendenciasController,
     AdminUsuariosController,
+    ContaController,
     SenhaController,
     TotpController,
   ],

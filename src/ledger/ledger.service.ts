@@ -1,6 +1,12 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { Decimal, calcReserva, calcTarifa, money } from '../shared';
+import {
+  Decimal,
+  calcReserva,
+  calcTarifa,
+  MODO_TRATAMENTO_MED,
+  money,
+} from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type ConfigPixEfetiva = {
@@ -15,16 +21,25 @@ export type ConfigPixEfetiva = {
   ticketMinimoPixSaida: Decimal;
   ticketMaximoPixSaida: Decimal | null;
   permitirPixSaidaViaApi: boolean;
+  /** Por onde o saque pode ser pedido (painel, API ou os dois). */
+  origemSaquePermitida: 'PAINEL' | 'API' | 'AMBOS';
+  /** true = a chave de destino precisa estar cadastrada e APROVADA na conta. */
+  exigirChavePixCadastrada: boolean;
   diasLiberacaoSaldo: number;
   percentualReserva: Decimal;
   baseCalculoReserva: 'VALOR_BRUTO' | 'VALOR_LIQUIDO_EMPRESA';
   diasRetencaoReserva: number;
-  modoTratamentoMed: 'BLOQUEAR_SALDO' | 'DEBITAR_IMEDIATAMENTE' | 'ANALISE_MANUAL';
+  modoTratamentoMed: 'BLOQUEAR_SALDO' | 'DEBITAR_IMEDIATAMENTE';
   permiteSaldoNegativo: boolean;
 };
 
 type LedgerEntry = {
-  tipoSaldo: 'DISPONIVEL' | 'PENDENTE_LIBERACAO' | 'RESERVADO' | 'BLOQUEADO_MED';
+  tipoSaldo:
+    | 'DISPONIVEL'
+    | 'PENDENTE_LIBERACAO'
+    | 'RESERVADO'
+    | 'BLOQUEADO_MED'
+    | 'BLOQUEADO_MANUAL';
   tipoMovimento: 'CREDITO' | 'DEBITO';
   natureza:
     | 'RECEBIMENTO'
@@ -36,6 +51,9 @@ type LedgerEntry = {
     | 'BLOQUEIO_MED'
     | 'DESBLOQUEIO_MED'
     | 'DEBITO_MED'
+    | 'BLOQUEIO_MANUAL'
+    | 'DESBLOQUEIO_MANUAL'
+    | 'DEBITO_MANUAL'
     | 'AJUSTE';
   valor: Decimal;
   chaveIdempotencia: string;
@@ -75,12 +93,25 @@ export class ConfigPixService {
         ? money(cfg.ticketMaximoPixSaida.toString())
         : null,
       permitirPixSaidaViaApi: cfg.permitirPixSaidaViaApi,
+      origemSaquePermitida: cfg.origemSaquePermitida,
+      exigirChavePixCadastrada: cfg.exigirChavePixCadastrada,
       diasLiberacaoSaldo: cfg.diasLiberacaoSaldo,
       percentualReserva: money(cfg.percentualReserva.toString()),
       baseCalculoReserva: cfg.baseCalculoReserva,
       diasRetencaoReserva: cfg.diasRetencaoReserva,
       modoTratamentoMed: cfg.modoTratamentoMed,
-      permiteSaldoNegativo: cfg.permiteSaldoNegativo,
+      /**
+       * Débito direto de MED implica conta podendo ficar negativa: a adquirente
+       * já levou o dinheiro, então o débito precisa sair mesmo sem saldo. A
+       * coerção fica aqui — e não só na gravação — para valer também em linha
+       * antiga, gravada antes da regra existir.
+       *
+       * Isto NÃO libera saque a descoberto: `criarSaque` debita com
+       * `permiteSaldoNegativo: false` fixo, de propósito.
+       */
+      permiteSaldoNegativo:
+        cfg.permiteSaldoNegativo ||
+        cfg.modoTratamentoMed === MODO_TRATAMENTO_MED.DEBITAR_IMEDIATAMENTE,
     };
   }
 
@@ -130,10 +161,11 @@ export class LedgerService {
           saldo_pendente_liberacao: Prisma.Decimal;
           saldo_reservado: Prisma.Decimal;
           saldo_bloqueado_med: Prisma.Decimal;
+          saldo_bloqueado_manual: Prisma.Decimal;
         }>
       >`
         SELECT usuario_id, saldo_disponivel, saldo_pendente_liberacao,
-               saldo_reservado, saldo_bloqueado_med
+               saldo_reservado, saldo_bloqueado_med, saldo_bloqueado_manual
         FROM saldos_usuarios
         WHERE usuario_id = ${params.usuarioId}
         FOR UPDATE
@@ -146,6 +178,7 @@ export class LedgerService {
       let pendente = money(saldos[0].saldo_pendente_liberacao.toString());
       let reservado = money(saldos[0].saldo_reservado.toString());
       let bloqueado = money(saldos[0].saldo_bloqueado_med.toString());
+      let bloqueadoManual = money(saldos[0].saldo_bloqueado_manual.toString());
 
       const created = [];
 
@@ -179,12 +212,40 @@ export class LedgerService {
             bloqueado = bloqueado.plus(delta);
             saldoApos = bloqueado;
             break;
+          case 'BLOQUEADO_MANUAL':
+            bloqueadoManual = bloqueadoManual.plus(delta);
+            saldoApos = bloqueadoManual;
+            break;
         }
 
-        if (!params.permiteSaldoNegativo && disponivel.isNegative()) {
+        /**
+         * A trava é sobre ESTA movimentação, não sobre o estado da conta: só
+         * recusa DÉBITO do DISPONIVEL que deixe o saldo negativo.
+         *
+         * Antes ela olhava só `disponivel.isNegative()` depois de cada entry,
+         * sem ver o que a entry fez — então, numa conta já negativa (o que
+         * acontece sempre que um MED é debitado direto), QUALQUER movimentação
+         * seguinte quebrava: a liberação D+/reserva (fila 6) morria em FALHA
+         * terminal com o dinheiro preso em PENDENTE_LIBERACAO, o MED recusado
+         * não devolvia o bloqueado e o bloqueio administrativo não liberava —
+         * inclusive o crédito que quitaria a dívida, que é o único jeito de a
+         * conta voltar ao positivo sozinha.
+         */
+        const debitaDisponivel =
+          entry.tipoSaldo === 'DISPONIVEL' && entry.tipoMovimento === 'DEBITO';
+        if (
+          debitaDisponivel &&
+          !params.permiteSaldoNegativo &&
+          disponivel.isNegative()
+        ) {
           throw new BadRequestException('Saldo disponível insuficiente');
         }
-        if (pendente.isNegative() || reservado.isNegative() || bloqueado.isNegative()) {
+        if (
+          pendente.isNegative() ||
+          reservado.isNegative() ||
+          bloqueado.isNegative() ||
+          bloqueadoManual.isNegative()
+        ) {
           throw new BadRequestException('Saldo interno inconsistente');
         }
 
@@ -213,6 +274,7 @@ export class LedgerService {
           saldoPendenteLiberacao: pendente.toFixed(2),
           saldoReservado: reservado.toFixed(2),
           saldoBloqueadoMed: bloqueado.toFixed(2),
+          saldoBloqueadoManual: bloqueadoManual.toFixed(2),
         },
       });
 

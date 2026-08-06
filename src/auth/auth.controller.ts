@@ -237,6 +237,32 @@ export class AuthController {
       }
     }
 
+    /**
+     * Senha provisória (reset feito pelo administrador): senha correta NÃO
+     * emite token. Sem esta trava a provisória — que passou pelas mãos do
+     * admin e provavelmente por um canal de mensagem — viraria a senha
+     * definitiva da conta.
+     */
+    if (usuario.forcarTrocaSenha && usuario.situacao === SITUACAO_USUARIO.ATIVO) {
+      await this.prisma.auditoriaAcesso.create({
+        data: {
+          usuarioId: usuario.id,
+          emailInformado: email,
+          enderecoIp: ip,
+          agenteUsuario: ua,
+          sucesso: true,
+          motivo: 'LOGIN_BLOQUEADO_TROCA_SENHA_OBRIGATORIA',
+        },
+      });
+      return {
+        situacao: usuario.situacao,
+        requerTrocaSenha: true,
+        proximoPasso: 'TROCAR_SENHA',
+        mensagem:
+          'Sua senha foi redefinida pelo administrador. Crie uma nova senha para continuar.',
+      };
+    }
+
     // Único estado que emite JWT: conta APROVADA (ATIVO).
     if (usuario.situacao === SITUACAO_USUARIO.ATIVO) {
       await this.prisma.auditoriaAcesso.create({
@@ -352,6 +378,9 @@ export class AuthController {
       situacao: usuario.situacao,
       tipoPessoa: usuario.tipoPessoa,
       totpHabilitado: usuario.totpHabilitado,
+      // Contas criadas antes do campo existir caem no `criadoEm`: a senha do
+      // cadastro É a senha em uso, então essa é a última alteração de fato.
+      senhaAlteradaEm: usuario.senhaAlteradaEm ?? usuario.criadoEm,
       papeis: usuario.papeis.filter((p) => p.papel.ativo).map((p) => p.papel.nome),
       // Resolvidas pelo guard a cada request: refletem alteração de perfil na
       // hora, sem precisar reemitir o token.
@@ -362,6 +391,7 @@ export class AuthController {
             pendenteLiberacao: usuario.saldo.saldoPendenteLiberacao.toString(),
             reservado: usuario.saldo.saldoReservado.toString(),
             bloqueadoMed: usuario.saldo.saldoBloqueadoMed.toString(),
+            bloqueadoManual: usuario.saldo.saldoBloqueadoManual.toString(),
           }
         : null,
     };

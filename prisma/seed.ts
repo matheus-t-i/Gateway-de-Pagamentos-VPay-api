@@ -342,6 +342,18 @@ async function main() {
     skipDuplicates: true,
   });
 
+  await prisma.parametroRetencaoMetodo.upsert({
+    where: { id: 1 },
+    create: { id: 1 },
+    update: {},
+  });
+
+  await prisma.parametroMedAutomatico.upsert({
+    where: { id: 1 },
+    create: { id: 1 },
+    update: {},
+  });
+
   console.log('Seed OK — admin:', adminEmail);
 
   /**
