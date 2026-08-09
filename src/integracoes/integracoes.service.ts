@@ -58,6 +58,100 @@ export class IntegracoesService {
     }
   }
 
+  /**
+   * Reenfileira envios que ficaram RESERVADOS mas nunca saíram.
+   *
+   * Uma linha PENDENTE velha significa que o job se perdeu entre a reserva e a
+   * fila — worker morto no meio, Redis fora do ar no `enqueue` (que engole erro
+   * de propósito, para não derrubar o caminho do dinheiro). Sem esta varredura
+   * a venda simplesmente nunca chega ao app, sem erro em lugar nenhum: o pior
+   * tipo de falha, a silenciosa.
+   *
+   * `idadeMinimaMs` evita corrida com o job que acabou de ser enfileirado e
+   * ainda não começou.
+   */
+  async reenfileirarPendentes(idadeMinimaMs = 60_000, limite = 100) {
+    const corte = new Date(Date.now() - idadeMinimaMs);
+    const presos = await this.prisma.envioIntegracao.findMany({
+      where: {
+        situacao: SITUACAO_ENVIO_INTEGRACAO.PENDENTE,
+        criadoEm: { lte: corte },
+      },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: limite,
+    });
+    if (!presos.length) return { reenfileirados: 0 };
+
+    this.logger.warn(
+      `${presos.length} envio(s) de integração presos em PENDENTE — reenfileirando`,
+    );
+    for (const envio of presos) {
+      await this.queues.enqueueIntegracaoEnvio({
+        envioId: envio.id.toString(),
+        identificadorRastreio: getRastreio(),
+      });
+    }
+    return { reenfileirados: presos.length };
+  }
+
+  /**
+   * Reserva os envios deste evento DENTRO da transação recebida — usado pelo
+   * `5-outbox-publisher`, que precisa que a reserva e o claim do outbox sejam
+   * atômicos.
+   *
+   * Sem isso existe uma janela real de perda: o claim é irreversível, então um
+   * worker que morra depois de reivindicar o evento e antes de reservar o envio
+   * faz a venda nunca chegar ao app — e o evento nunca mais é reprocessado.
+   * Confirmado em teste: venda paga, outbox publicado, zero envios.
+   *
+   * Devolve os ids reservados para o chamador enfileirar DEPOIS do commit
+   * (enfileirar dentro da transação correria o risco de o worker pegar o job
+   * antes de a linha existir).
+   */
+  async reservarEnviosDoEvento(
+    tx: Prisma.TransactionClient,
+    params: { transacaoId: bigint; usuarioId: bigint; evento: EventoIntegracao },
+  ): Promise<bigint[]> {
+    const venda = await tx.transacao.findUnique({
+      where: { id: params.transacaoId },
+      select: { id: true, direcao: true, _count: { select: { itens: true } } },
+    });
+    if (!venda || venda.direcao !== 'ENTRADA' || venda._count.itens === 0) return [];
+
+    const integracoes = await tx.integracaoUsuario.findMany({
+      where: { usuarioId: params.usuarioId, ativo: true },
+      orderBy: { id: 'asc' },
+    });
+    if (!integracoes.length) return [];
+
+    const statusRemoto = STATUS_REMOTO_POR_EVENTO[params.evento];
+    const ids: bigint[] = [];
+
+    for (const integracao of integracoes) {
+      const assinados = (integracao.eventos as string[]) ?? [];
+      if (assinados.length && !assinados.includes(params.evento)) continue;
+      const id = await this.reservarEnvio(
+        integracao.id,
+        venda.id,
+        statusRemoto,
+        tx,
+      );
+      if (id) ids.push(id);
+    }
+    return ids;
+  }
+
+  /** Enfileira envios já reservados. Nunca lança. */
+  async enfileirarEnvios(ids: bigint[]) {
+    for (const id of ids) {
+      await this.queues.enqueueIntegracaoEnvio({
+        envioId: id.toString(),
+        identificadorRastreio: getRastreio(),
+      });
+    }
+  }
+
   private async notificar(transacaoId: bigint, evento: EventoIntegracao) {
     const tx = await this.prisma.transacao.findUnique({
       where: { id: transacaoId },
@@ -111,8 +205,10 @@ export class IntegracoesService {
     integracaoId: bigint,
     transacaoId: bigint,
     statusRemoto: StatusRemotoPedido,
+    /** Client da transação em curso, quando a reserva precisa ser atômica. */
+    cliente: Prisma.TransactionClient | PrismaService = this.prisma,
   ): Promise<bigint | null> {
-    const existente = await this.prisma.envioIntegracao.findUnique({
+    const existente = await cliente.envioIntegracao.findUnique({
       where: {
         integracaoId_transacaoId_statusRemoto: {
           integracaoId,
@@ -129,7 +225,7 @@ export class IntegracoesService {
     }
 
     try {
-      const criado = await this.prisma.envioIntegracao.create({
+      const criado = await cliente.envioIntegracao.create({
         data: {
           integracaoId,
           transacaoId,

@@ -22,7 +22,15 @@ const trocaObrigatoriaSchema = z
   });
 const redefinirSchema = z.object({
   token: z.string().min(20),
-  novaSenha: z.string().min(8).max(128),
+  novaSenha: z
+    .string()
+    .min(8)
+    .max(TAMANHO_MAXIMO_SENHA)
+    .superRefine((senha, ctx) => {
+      for (const msg of violacoesSenha(senha)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: msg });
+      }
+    }),
 });
 
 /** Validade do link de redefinição. */
@@ -100,6 +108,7 @@ export class SenhaController {
     };
   }
 
+  @Throttle({ limit: 10, windowSec: 60 })
   @Post('redefinir')
   async redefinir(@Body() body: unknown, @Req() req: { ip?: string }) {
     const parsed = redefinirSchema.safeParse(body);
@@ -116,6 +125,9 @@ export class SenhaController {
     if (!registro || registro.usadoEm || registro.expiraEm < new Date()) {
       throw new BadRequestException('Link inválido ou expirado. Solicite outro.');
     }
+
+    const violacoes = violacoesSenha(parsed.data.novaSenha);
+    if (violacoes.length) throw new BadRequestException(violacoes.join(' · '));
 
     const senhaHash = await argon2.hash(parsed.data.novaSenha);
     await this.prisma.$transaction(async (tx) => {

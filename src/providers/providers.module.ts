@@ -11,6 +11,7 @@ import {
   AdminAdquirentesVitrineController,
   PainelAdquirentesController,
 } from './adquirentes.controller';
+import { ProvidersProdGuard } from './providers-prod.guard';
 
 @Module({
   // forwardRef: MedModule usa LedgerModule, que também é usado por quem importa
@@ -27,6 +28,7 @@ import {
     ValorionPaymentProvider,
     ProviderRegistry,
     AdquirentesService,
+    ProvidersProdGuard,
   ],
   exports: [MockPaymentProvider, ProviderRegistry, AdquirentesService],
 })

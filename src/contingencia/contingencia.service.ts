@@ -85,31 +85,35 @@ export class ContingenciaService {
   }
 
   /**
-   * Corre a chamada contra o relógio. O timer é sempre limpo: sem isso, uma
-   * adquirente rápida deixaria o processo com um `setTimeout` pendurado por
-   * requisição.
+   * Corre a chamada contra o relógio e ABORTA o fetch em voo.
+   *
+   * `Promise.race` sozinho deixava o HTTP da adquirente A completar depois do
+   * timeout — cobrança criada sem id local, enquanto a cadeia gerava QR em B.
+   * Com AbortSignal o pedido é cancelado; TIMEOUT ainda NÃO segue a cadeia
+   * (ver `PixService`), porque a liquidante pode ter aceitado antes do abort.
    */
-  async executarComTimeout<T>(fn: () => Promise<T>): Promise<T> {
+  async executarComTimeout<T>(
+    fn: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
     const ms = this.timeoutMs();
-    let timer: NodeJS.Timeout | undefined;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
     try {
-      return await Promise.race([
-        fn(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () =>
-              reject(
-                new FalhaAdquirenteError(
-                  TIPO_FALHA_ADQUIRENTE.TIMEOUT,
-                  `Adquirente não respondeu em ${ms / 1000}s`,
-                ),
-              ),
-            ms,
-          );
-        }),
-      ]);
+      return await fn(controller.signal);
+    } catch (erro) {
+      if (
+        controller.signal.aborted ||
+        (erro instanceof Error &&
+          (erro.name === 'AbortError' || /aborted|abort/i.test(erro.message)))
+      ) {
+        throw new FalhaAdquirenteError(
+          TIPO_FALHA_ADQUIRENTE.TIMEOUT,
+          `Adquirente não respondeu em ${ms / 1000}s (pedido abortado)`,
+        );
+      }
+      throw erro;
     } finally {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
     }
   }
 

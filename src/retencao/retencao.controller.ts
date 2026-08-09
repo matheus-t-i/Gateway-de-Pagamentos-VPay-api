@@ -12,6 +12,7 @@ import { money, PERMISSOES } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard, type UsuarioAutenticado } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
+import { assertStepUpTotp } from '../common/step-up-totp';
 import { diaCivilSaoPaulo } from './retencao-metodo.service';
 
 const putSchema = z.object({
@@ -30,6 +31,7 @@ const putSchema = z.object({
       }),
     )
     .default([]),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 @Controller('admin/retencao')
@@ -88,12 +90,13 @@ export class AdminRetencaoController {
   @RequerPermissao(PERMISSOES.ADMIN_RETENCAO_EDITAR)
   async salvar(
     @Body() body: unknown,
-    @Req() _req: { user: UsuarioAutenticado },
+    @Req() req: { user: UsuarioAutenticado },
   ) {
     const parsed = putSchema.safeParse(body);
     if (!parsed.success) {
       throw new BadRequestException(parsed.error.flatten());
     }
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const d = parsed.data;
     if (d.offsetMin > d.offsetMax) {
       throw new BadRequestException('offsetMin não pode ser maior que offsetMax');

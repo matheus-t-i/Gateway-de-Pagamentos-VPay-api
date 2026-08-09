@@ -32,6 +32,10 @@ import { decryptText, encryptText } from '../common/crypto.util';
 import { QueuesService } from '../queues/queues.service';
 import { getRastreio } from '../common/request-context';
 import { UtmifyClient } from './utmify/utmify.client';
+import {
+  assertStepUpFromBody,
+  assertStepUpTotp,
+} from '../common/step-up-totp';
 import { ErroEnvioIntegracao, PedidoVenda } from './tipos';
 
 type LinhaIntegracao = {
@@ -129,6 +133,7 @@ export class IntegracoesController {
   async criar(@Req() req: { user: UsuarioAutenticado }, @Body() body: unknown) {
     const parsed = criarIntegracaoSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
 
     const criado = await this.prisma.integracaoUsuario.create({
       data: {
@@ -162,6 +167,7 @@ export class IntegracoesController {
   ) {
     const parsed = editarIntegracaoSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const atual = await this.acharDoTitular(id, BigInt(req.user.id));
 
     // As mesmas regras da criação, agora com o app vindo da linha (a edição não
@@ -198,7 +204,12 @@ export class IntegracoesController {
 
   @Delete(':id')
   @RequerPermissao(PERMISSOES.INTEGRACOES_EXCLUIR)
-  async remover(@Param('id') id: string, @Req() req: { user: UsuarioAutenticado }) {
+  async remover(
+    @Param('id') id: string,
+    @Req() req: { user: UsuarioAutenticado },
+    @Body() body: unknown,
+  ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const atual = await this.acharDoTitular(id, BigInt(req.user.id));
     // Soft delete: `envios_integracao` referencia esta linha e é o histórico de
     // o que já foi para o app. Apagar violaria a FK e sumiria com o rastro.
@@ -220,7 +231,12 @@ export class IntegracoesController {
    */
   @Post(':id/testar')
   @RequerPermissao(PERMISSOES.INTEGRACOES_EDITAR)
-  async testar(@Param('id') id: string, @Req() req: { user: UsuarioAutenticado }) {
+  async testar(
+    @Param('id') id: string,
+    @Req() req: { user: UsuarioAutenticado },
+    @Body() body: unknown,
+  ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const integracao = await this.acharDoTitular(id, BigInt(req.user.id));
     const app = appIntegracao(integracao.tipo);
     if (!app?.suportaTeste) {
@@ -346,7 +362,9 @@ export class IntegracoesController {
     @Param('id') id: string,
     @Param('envioId') envioId: string,
     @Req() req: { user: UsuarioAutenticado },
+    @Body() body: unknown,
   ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const integracao = await this.acharDoTitular(id, BigInt(req.user.id));
     const envio = await this.prisma.envioIntegracao.findFirst({
       where: { id: BigInt(envioId), integracaoId: integracao.id },

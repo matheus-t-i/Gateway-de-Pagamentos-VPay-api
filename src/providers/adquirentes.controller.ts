@@ -19,6 +19,10 @@ import {
   escolherAdquirentePixEntradaSchema,
   PERMISSOES,
 } from '../shared';
+import {
+  assertStepUpFromBody,
+  assertStepUpTotp,
+} from '../common/step-up-totp';
 import { AdquirentesService } from './adquirentes.service';
 
 /**
@@ -48,6 +52,7 @@ export class PainelAdquirentesController {
   ) {
     const parsed = escolherAdquirentePixEntradaSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const usuarioId = BigInt(req.user.id);
 
     const conta = await this.adquirentes.resolverContaPixEntrada(
@@ -181,9 +186,10 @@ export class AdminAdquirentesVitrineController {
   @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_EDITAR)
   async liberar(
     @Param('codigo') codigo: string,
-    @Body() body: { usuarioIdPublico?: string },
+    @Body() body: { usuarioIdPublico?: string; codigoTotp?: string },
     @Req() req: { user: { id: string } },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const provedor = await this.prisma.provedorPagamento.findUnique({
       where: { codigo },
     });
@@ -222,7 +228,9 @@ export class AdminAdquirentesVitrineController {
     @Param('usuarioIdPublico') usuarioIdPublico: string,
     @Query('adquirenteSubstituta') substituta: string | undefined,
     @Req() req: { user: { id: string } },
+    @Body() body: unknown,
   ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const provedor = await this.prisma.provedorPagamento.findUnique({
       where: { codigo },
     });
@@ -283,9 +291,11 @@ export class AdminAdquirentesVitrineController {
       observacaoCliente?: string;
       disponibilidadePixEntrada?: string;
       substituicoes?: Array<{ usuarioIdPublico: string; adquirenteCodigo: string }>;
+      codigoTotp?: string;
     },
     @Req() req: { user: { id: string }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const antes = await this.prisma.provedorPagamento.findUnique({ where: { codigo } });
     if (!antes) throw new BadRequestException('Adquirente não encontrada');
 

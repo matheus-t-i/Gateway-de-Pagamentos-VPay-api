@@ -8,6 +8,7 @@ import {
   isCpf,
   normalizarDocumento,
 } from './documento';
+import { violacoesSenha } from './senha';
 
 export const loginSchema = z.object({
   email: z.string().email(),
@@ -35,7 +36,15 @@ export const cadastroUsuarioSchema = z
     nomeFantasia: z.string().max(255).optional(),
     email: z.string().email(),
     telefone: z.string().max(20).optional(),
-    senha: z.string().min(8).max(128),
+    senha: z
+      .string()
+      .min(8)
+      .max(128)
+      .superRefine((senha, ctx) => {
+        for (const msg of violacoesSenha(senha)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: msg });
+        }
+      }),
     // Obrigatórios do cadastro (PF e PJ): endereço completo + média de faturamento.
     endereco: enderecoSchema,
     faturamentoMensalMedio: z
@@ -106,10 +115,12 @@ export const onboardingCredenciaisSchema = z.object({
 export const validarDocumentoSchema = z.object({
   situacao: z.enum(['VALIDO', 'INVALIDO']),
   motivo: z.string().max(500).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 export const reprovarCadastroSchema = z.object({
   motivo: z.string().min(3).max(500),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 export const TIPOS_CHAVE_PIX = ['CPF', 'CNPJ', 'EMAIL', 'TELEFONE', 'ALEATORIA'] as const;
@@ -121,11 +132,13 @@ export const criarChavePixSchema = z.object({
   tipoChave: z.enum(TIPOS_CHAVE_PIX),
   nomeTitular: z.string().max(255).optional(),
   documentoTitular: z.string().max(20).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 export const decidirChavePixSchema = z.object({
   situacao: z.enum(['APROVADA', 'REPROVADA']),
   motivo: z.string().max(500).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 /**
@@ -135,6 +148,7 @@ export const decidirChavePixSchema = z.object({
  */
 export const revogarChavePixSchema = z.object({
   motivo: z.string().trim().min(5).max(500),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 /** Saque pelo PAINEL: escolhe uma chave já cadastrada e aprovada. */
@@ -142,6 +156,7 @@ export const saquePainelSchema = z.object({
   valor: z.string().regex(/^\d+(\.\d{1,2})?$/),
   chavePixIdPublico: z.string().uuid(),
   referenciaExterna: z.string().max(255).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 /** Escopos de credencial de API (verificados no guard). */
@@ -155,11 +170,13 @@ export const atualizarPerfilSchema = z.object({
   telefone: z.string().max(20).optional(),
   nomeFantasia: z.string().max(255).optional(),
   temaPreferido: z.enum([TEMAS.PADRAO, TEMAS.CLARO, TEMAS.ESCURO]).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 /** Escolha da adquirente de PIX in pelo próprio lojista, no painel. */
 export const escolherAdquirentePixEntradaSchema = z.object({
   adquirenteCodigo: z.string().min(2).max(50),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 /** Endereço de entrega do pagador. Mesmo formato do endereço do cadastro. */
@@ -200,10 +217,40 @@ export const rastreioSchema = z.object({
   sck: z.string().max(255).optional(),
 });
 
+/**
+ * Documento do pagador: CPF **ou** CNPJ, decidido pelo TAMANHO depois de
+ * normalizar — 11 dígitos é CPF, 14 posições é CNPJ. O lojista não escolhe o
+ * tipo, e não existe campo separado para isso.
+ *
+ * Aceita máscara na entrada (`123.456.789-00`) e o **CNPJ alfanumérico** da
+ * Receita (12 posições `0-9A-Z` + 2 dígitos verificadores numéricos), porque
+ * `normalizarDocumento` só remove o que não é `[0-9A-Z]` e sobe para maiúsculo.
+ * Guardamos sempre normalizado.
+ */
+const documentoPagadorSchema = z
+  .string()
+  .min(11)
+  .max(20)
+  .transform(normalizarDocumento)
+  .refine((v) => isCpf(v) || isCnpj(v), {
+    message:
+      'documento do pagador deve ser um CPF (11 dígitos) ou um CNPJ (14 posições, ' +
+      'incluindo o formato alfanumérico). Máscara é aceita.',
+  });
+
+/**
+ * Pagador da cobrança — OBRIGATÓRIO, e com nome, documento e e-mail exigidos.
+ *
+ * Não é preciosismo nosso: as liquidantes recusam a cobrança sem esses três
+ * (ver `ValorionPaymentProvider.createCharge`). Enquanto eram opcionais aqui, a
+ * cobrança era ACEITA com 201 e só quebrava lá dentro — o lojista recebia 503
+ * genérico, sem saber qual campo faltava, e a venda ia para FALHA sem código
+ * PIX. É o mesmo erro que o cash-out já tinha cometido com `nomeBeneficiario`.
+ */
 export const pagadorCobrancaSchema = z.object({
-  nome: z.string().max(255).optional(),
-  documento: z.string().max(20).optional(),
-  email: z.string().email().optional(),
+  nome: z.string().min(2).max(255),
+  documento: documentoPagadorSchema,
+  email: z.string().email().max(255),
   telefone: z.string().max(20).optional(),
   endereco: enderecoPagadorSchema.optional(),
 });
@@ -224,7 +271,8 @@ export const criarCobrancaPixSchema = z
      * Se for igual à URL de um webhook cadastrado, a entrega sai uma vez só.
      */
     urlCallback: z.string().url().max(500).optional(),
-    pagador: pagadorCobrancaSchema.optional(),
+    /** Obrigatório: a liquidante recusa a cobrança sem nome, documento e e-mail. */
+    pagador: pagadorCobrancaSchema,
     /**
      * Origem da venda (utm_*). Não muda nada no PIX: é repassado aos apps que o
      * lojista conectou em `/desenvolvedores/integracoes` para que a venda seja
@@ -258,6 +306,7 @@ export const depositoPainelSchema = z.object({
   referenciaExterna: z.string().max(255).optional(),
   urlCallback: z.string().url().max(500).optional(),
   expiracaoSegundos: z.number().int().positive().max(86400).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 export const criarSaquePixSchema = z
@@ -339,6 +388,7 @@ export const criarCredencialApiSchema = z.object({
     .array(z.enum(Object.values(ESCOPOS_API) as [string, ...string[]]))
     .default([]),
   ipsPermitidos: ipsPermitidosSchema,
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 /**
@@ -351,6 +401,21 @@ export const criarCredencialApiSchema = z.object({
 export const editarCredencialApiSchema = z.object({
   nome: z.string().min(1).max(100),
   ipsPermitidos: ipsPermitidosSchema,
+  codigoTotp: z.string().regex(/^\d{6}$/),
+});
+
+/**
+ * Rotação do segredo. `diasJanela` é por quanto tempo o segredo ANTIGO
+ * continua aceito em paralelo — o suficiente para o lojista atualizar a frota
+ * sem parar de vender.
+ *
+ * Teto de 30 dias: janela longa demais anula o motivo de rotacionar, que é
+ * justamente encurtar a vida de um segredo possivelmente vazado. `0` encerra o
+ * antigo na hora, para quando a rotação é resposta a incidente.
+ */
+export const rotacionarCredencialApiSchema = z.object({
+  diasJanela: z.number().int().min(0).max(30).default(7),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 export const configuracaoWebhookSchema = z
@@ -372,6 +437,7 @@ export const configuracaoWebhookSchema = z
       )
       .optional(),
     segredoAutenticacao: z.string().min(8).max(255).optional(),
+    codigoTotp: z.string().regex(/^\d{6}$/),
   })
   .superRefine((data, ctx) => {
     // Um sem o outro não autentica nada: header sem valor não vai no request e
@@ -409,6 +475,7 @@ const baseIntegracaoSchema = z.object({
   modoTeste: z.boolean().default(false),
   ativo: z.boolean().default(true),
   credencial: z.string().min(8).max(500).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 export const criarIntegracaoSchema = baseIntegracaoSchema

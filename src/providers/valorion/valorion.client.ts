@@ -12,11 +12,14 @@ import {
   CreateRefundResult,
   GetBalanceResult,
   GetStatusResult,
+  ErroAntesDoEnvioError,
   PaymentProviderPort,
   ProviderStatus,
+  RecusaAdquirenteError,
   VerifyTransportInput,
 } from '../payment-provider.port';
-import { money } from '../../shared';
+import { money, normalizarDocumento } from '../../shared';
+import { extrairValorDePayload } from '../valor-remoto.util';
 
 /**
  * Valorion — liquidante real de PIX (https://app.valorion.com.br/documentacao/).
@@ -107,6 +110,7 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
     headers: Record<string, string>;
     body?: unknown;
     timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<Record<string, unknown>> {
     const res = await fetch(params.url, {
       method: params.method,
@@ -116,7 +120,7 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         ...params.headers,
       },
       body: params.body === undefined ? undefined : JSON.stringify(params.body),
-      signal: AbortSignal.timeout(params.timeoutMs ?? 20000),
+      signal: params.signal ?? AbortSignal.timeout(params.timeoutMs ?? 20000),
     });
     const text = await res.text();
     let json: Record<string, unknown>;
@@ -126,9 +130,23 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
       json = { raw: text };
     }
     if (!res.ok) {
-      throw new Error(
-        `Valorion HTTP ${res.status} em ${params.url.split('?')[0]}: ${text.slice(0, 500)}`,
-      );
+      const mensagem = `Valorion HTTP ${res.status} em ${params.url.split('?')[0]}: ${text.slice(0, 500)}`;
+      /**
+       * 4xx é recusa EXPLÍCITA: a Valorion recebeu, entendeu e disse não —
+       * então a ordem não foi executada e repetir dá o mesmo erro. Quem chama
+       * pode encerrar a operação com segurança.
+       *
+       * 429/408 ficam de fora: são "tente de novo mais tarde", não recusa.
+       * 5xx e timeout também não entram aqui — nesses casos não se sabe o que
+       * aconteceu do outro lado, e num saque essa dúvida CONGELA o fluxo.
+       */
+      if (res.status >= 400 && res.status < 500 && ![408, 429].includes(res.status)) {
+        throw new RecusaAdquirenteError(mensagem, {
+          statusHttp: res.status,
+          dadosResposta: json,
+        });
+      }
+      throw new Error(mensagem);
     }
     return json;
   }
@@ -166,16 +184,27 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
   async createCharge(input: CreateChargeInput): Promise<CreateChargeResult> {
     const c = input.credenciais;
 
-    // A Valorion exige nome/e-mail/CPF válidos do pagador. Venda pela API
-    // pública traz o pagador; depósito de painel envia o titular; o fallback
-    // do .env cobre teste manual sem pagador informado.
+    // A Valorion exige nome/e-mail/documento do pagador. Venda pela API pública
+    // e depósito de painel sempre trazem os três (o schema agora obriga); o
+    // fallback do .env cobre chamada interna/teste manual.
     const nome =
       input.pagador?.nome ?? this.env('VALORION_PAGADOR_PADRAO_NOME');
     const email =
       input.pagador?.email ?? this.env('VALORION_PAGADOR_PADRAO_EMAIL');
-    const cpf = (
-      input.pagador?.documento ?? this.env('VALORION_PAGADOR_PADRAO_CPF') ?? ''
-    ).replace(/\D/g, '');
+    /**
+     * `normalizarDocumento` e NÃO `replace(/\D/g, '')`: o segundo apaga letras,
+     * e o CNPJ alfanumérico da Receita tem letras nas 12 primeiras posições —
+     * o documento chegaria mutilado na liquidante, sem erro nenhum do nosso
+     * lado.
+     *
+     * ⚠️ O campo da Valorion se chama `cpf` e não há equivalente para CNPJ.
+     * Nosso contrato aceita os dois (o pagador pode ser PJ), mas o
+     * comportamento dela com 14 posições não está confirmado — é o que
+     * investigar antes de prometer PIX com pagador PJ nesta adquirente.
+     */
+    const cpf = normalizarDocumento(
+      input.pagador?.documento ?? this.env('VALORION_PAGADOR_PADRAO_CPF') ?? '',
+    );
     if (!nome || !email || !cpf) {
       throw new Error(
         'Valorion exige nome, e-mail e CPF do pagador — informe `pagador` na cobrança ' +
@@ -244,6 +273,7 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         'X-Pix-Key': this.pixKey(c),
       },
       body,
+      signal: input.signal,
     });
 
     const idTransacaoLiquidante = String(resp.idTransaction ?? '');
@@ -271,15 +301,33 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
       'X-Pix-Key': this.pixKey(c),
     };
 
-    // Etapa 1 — token Bearer (expira em 180s, pedido a cada saque).
-    const auth = await this.request({
-      method: 'POST',
-      url: `${this.filaUrl()}/v2/pix/transaction/auth`,
-      headers: authHeaders,
-    });
+    /**
+     * Etapa 1 — token Bearer (expira em 180s, pedido a cada saque).
+     *
+     * Tudo aqui é ANTES do envio da ordem: um 401/403 significa que a NOSSA
+     * credencial está errada, não que a liquidante recusou o saque. Sem esta
+     * conversão, o 4xx do auth viraria `RecusaAdquirenteError` e encerraria
+     * como FALHA definitiva TODOS os saques da fila — com o saldo debitado e o
+     * lojista recebendo "recusado" por um problema de configuração nosso.
+     */
+    let auth: Record<string, unknown>;
+    try {
+      auth = await this.request({
+        method: 'POST',
+        url: `${this.filaUrl()}/v2/pix/transaction/auth`,
+        headers: authHeaders,
+      });
+    } catch (e) {
+      throw new ErroAntesDoEnvioError(
+        `Valorion cash-out: falha ao autenticar — ${e instanceof Error ? e.message : String(e)}`,
+        e,
+      );
+    }
     const token = String(auth.access_token ?? '');
     if (!token) {
-      throw new Error(`Valorion cash-out auth sem access_token: ${JSON.stringify(auth).slice(0, 300)}`);
+      throw new ErroAntesDoEnvioError(
+        `Valorion cash-out auth sem access_token: ${JSON.stringify(auth).slice(0, 300)}`,
+      );
     }
 
     const tipoMap: Record<string, string> = {
@@ -291,6 +339,8 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
     };
 
     // Etapa 2 — criação do saque.
+    // `externaRef` = id nosso: se o worker morrer entre o aceite e gravar
+    // `idTransacaoLiquidante`, o postback ainda pode correlacionar pela ref.
     const resp = await this.request({
       method: 'POST',
       url: `${this.filaUrl()}/v2/pix/transaction/create`,
@@ -300,7 +350,10 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         pixKey: input.chavePix,
         pixType: tipoMap[input.tipoChavePix.toUpperCase()] ?? 'RANDOM',
         beneficiaryName: input.nomeBeneficiario ?? '',
-        beneficiaryDocument: (input.documentoBeneficiario ?? '').replace(/\D/g, ''),
+        // `normalizarDocumento` pelo mesmo motivo do cash-in: `replace(/\D/g,'')`
+        // apagaria as letras de um CNPJ alfanumérico e o DICT nunca casaria.
+        beneficiaryDocument: normalizarDocumento(input.documentoBeneficiario ?? ''),
+        externaRef: input.idTransacaoPrivado,
         postbackUrl: this.postbackUrl('pix-out'),
       },
     });
@@ -351,8 +404,11 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
       if (conteudo?.endToEnd) endToEndId = String(conteudo.endToEnd);
     }
 
+    const valor = extrairValorDePayload(resp) ?? undefined;
+
     return {
       status,
+      valor,
       endToEndId,
       paidAt:
         status === 'PAID' || status === 'COMPLETED'

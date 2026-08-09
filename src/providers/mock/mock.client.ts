@@ -68,6 +68,7 @@ export class MockPaymentProvider implements PaymentProviderPort {
     if (entry?.paid) {
       return {
         status: entry.status,
+        valor: money(entry.valor),
         endToEndId: `E2E${id}`,
         paidAt: new Date(),
         raw: entry,
@@ -87,16 +88,18 @@ export class MockPaymentProvider implements PaymentProviderPort {
     });
     const conteudo = webhookPago?.conteudo as Record<string, unknown> | undefined;
     if (conteudo && String(conteudo.status ?? '').toUpperCase() === 'PAID') {
+      const valorWh = conteudo.amount ?? conteudo.valor;
       return {
         status: 'PAID',
+        valor: valorWh !== undefined ? money(String(valorWh)) : entry ? money(entry.valor) : undefined,
         endToEndId: `E2E${id}`,
         paidAt: webhookPago?.recebidoEm ?? new Date(),
-        raw: { fonte: 'webhook_persistido', id },
+        raw: { fonte: 'webhook_persistido', id, ...conteudo },
       };
     }
 
     if (entry) {
-      return { status: entry.status, raw: entry };
+      return { status: entry.status, valor: money(entry.valor), raw: entry };
     }
     return { status: 'PENDING', raw: { found: false } };
   }

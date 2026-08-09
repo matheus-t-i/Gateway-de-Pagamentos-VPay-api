@@ -11,6 +11,7 @@ import {
   QUEUE_NAMES,
   SITUACAO_LIBERACAO,
   SITUACAO_PROVEDOR,
+  SITUACAO_TENTATIVA,
   SITUACAO_TRANSACAO,
   WebhookReenvioJobPayload,
   money,
@@ -23,6 +24,11 @@ import { QueuesService } from '../queues/queues.service';
 import { ProviderRegistry } from '../providers/provider.registry';
 import { decryptCredentials } from '../common/crypto.util';
 import { EntregaWebhookService } from './entrega-webhook.service';
+import { CashInCreditoService } from '../retencao/cashin-credito.service';
+import {
+  assertValorCamada1Compativel,
+  extrairValorDePayload,
+} from '../providers/valor-remoto.util';
 
 @Processor(QUEUE_NAMES.PIX_WEBHOOK_SEND)
 @Injectable()
@@ -154,19 +160,50 @@ export class OutboxPublisherProcessor extends WorkerHost {
           orderBy: { id: 'asc' },
         });
 
-    // Claim atômico: só publica quem conseguiu marcar publicadoRedisEm (0 -> 1).
-    // Sem isto, o job periódico e o enfileiramento direto processam o mesmo
-    // evento em paralelo e o lojista recebe o callback várias vezes.
-    const pending = [];
+    /**
+     * Claim atômico: só publica quem conseguiu marcar publicadoRedisEm (0 -> 1).
+     * Sem isto, o job periódico e o enfileiramento direto processam o mesmo
+     * evento em paralelo e o lojista recebe o callback várias vezes.
+     *
+     * A reserva dos envios aos apps conectados entra na MESMA transação. O
+     * claim é irreversível: um worker que morra entre reivindicar o evento e
+     * reservar o envio faria a venda nunca chegar ao app, e o evento nunca mais
+     * seria reprocessado — perda silenciosa, confirmada em teste. Com os dois no
+     * mesmo commit, ou nada aconteceu (e o próximo tick refaz), ou a linha
+     * PENDENTE existe e a varredura de presos garante a entrega.
+     */
+    const pending: Array<{ ev: (typeof candidatos)[number]; enviosApps: bigint[] }> = [];
     for (const ev of candidatos) {
-      const claim = await this.prisma.eventoOutbox.updateMany({
-        where: { id: ev.id, publicadoRedisEm: null },
-        data: { publicadoRedisEm: new Date() },
+      const reservados = await this.prisma.$transaction(async (tx) => {
+        const claim = await tx.eventoOutbox.updateMany({
+          where: { id: ev.id, publicadoRedisEm: null },
+          data: { publicadoRedisEm: new Date() },
+        });
+        if (claim.count !== 1) return null;
+
+        const evento = OutboxPublisherProcessor.EVENTO_INTEGRACAO[ev.tipoEvento];
+        if (!evento || !ev.usuarioId) return [];
+
+        const venda = await tx.transacao.findFirst({
+          where: {
+            idTransacaoPublico: ev.identificadorAgregado,
+            usuarioId: ev.usuarioId,
+          },
+          select: { id: true },
+        });
+        if (!venda) return [];
+
+        return this.integracoes.reservarEnviosDoEvento(tx, {
+          transacaoId: venda.id,
+          usuarioId: ev.usuarioId,
+          evento,
+        });
       });
-      if (claim.count === 1) pending.push(ev);
+
+      if (reservados !== null) pending.push({ ev, enviosApps: reservados });
     }
 
-    for (const ev of pending) {
+    for (const { ev, enviosApps } of pending) {
       try {
         await this.queues.enqueuePixWebhookSend({
           provider: 'system',
@@ -181,7 +218,9 @@ export class OutboxPublisherProcessor extends WorkerHost {
         });
       } catch (e) {
         this.logger.error(e);
-        // Falhou ao enfileirar: devolve o claim para nova tentativa.
+        // Falhou ao enfileirar: devolve o claim para nova tentativa. Os envios
+        // já reservados NÃO são desfeitos — a unique os torna idempotentes, e a
+        // varredura de presos entrega o que ficar para trás.
         await this.prisma.eventoOutbox.update({
           where: { id: ev.id },
           data: {
@@ -190,43 +229,30 @@ export class OutboxPublisherProcessor extends WorkerHost {
             ultimoErroPublicacao: e instanceof Error ? e.message : String(e),
           },
         });
-        // Sem callback publicado, não há o que contar aos apps ainda.
         continue;
       }
 
       /**
        * Mesmo fan-out, segundo destino: os apps que o lojista conectou.
        *
-       * Depois do enfileiramento do callback e FORA do try acima de propósito —
-       * devolver o claim por causa de uma integração faria o lojista receber o
-       * callback duas vezes. O envio ao app tem dedupe próprio
-       * (`envios_integracao`) e reenvio pela tela.
+       * FORA do try acima de propósito — devolver o claim por causa de uma
+       * integração faria o lojista receber o callback duas vezes. Aqui só resta
+       * enfileirar: a linha de envio já foi criada junto com o claim, então
+       * mesmo que este processo morra agora, nada se perde.
        */
-      await this.notificarIntegracoes(ev);
+      await this.integracoes.enfileirarEnvios(enviosApps);
     }
+
+    /**
+     * Rede de segurança: envios que nunca chegaram à fila (worker morto, Redis
+     * fora do ar no `enqueue`). Só no tick periódico — no job de um evento
+     * específico varrer a tabela inteira seria trabalho fora de escopo.
+     */
+    if (!job.data.eventoOutboxId) {
+      await this.integracoes.reenfileirarPendentes();
+    }
+
     return { published: pending.length };
-  }
-
-  private async notificarIntegracoes(ev: {
-    tipoEvento: string;
-    identificadorAgregado: string;
-    usuarioId: bigint | null;
-  }) {
-    const evento = OutboxPublisherProcessor.EVENTO_INTEGRACAO[ev.tipoEvento];
-    if (!evento || !ev.usuarioId) return;
-
-    // O outbox guarda o id PÚBLICO da transação; o resto do fluxo trabalha com
-    // o id interno. Filtrar também por usuário mantém a mesma regra do callback.
-    const tx = await this.prisma.transacao.findFirst({
-      where: {
-        idTransacaoPublico: ev.identificadorAgregado,
-        usuarioId: ev.usuarioId,
-      },
-      select: { id: true },
-    });
-    if (!tx) return;
-
-    await this.integracoes.notificarSemFalhar(tx.id, evento);
   }
 }
 
@@ -374,6 +400,9 @@ export class ConciliacaoProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly providers: ProviderRegistry,
+    private readonly credito: CashInCreditoService,
+    private readonly ledger: LedgerService,
+    private readonly queues: QueuesService,
   ) {
     super();
   }
@@ -385,45 +414,295 @@ export class ConciliacaoProcessor extends WorkerHost {
           in: [
             SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO,
             SITUACAO_TRANSACAO.PROCESSANDO,
+            // Cash-in fantasma pós-TIMEOUT: venda foi a FALHA local mas a
+            // cobrança pode ter sido aceita/paga na liquidante.
+            SITUACAO_TRANSACAO.FALHA,
           ],
         },
         criadoEm: { lte: new Date(Date.now() - 5 * 60 * 1000) },
       },
-      take: 30,
+      take: 40,
       include: {
         contaProvedor: { include: { provedor: true } },
-        tentativas: { orderBy: { numeroTentativa: 'desc' }, take: 1 },
+        tentativas: { orderBy: { numeroTentativa: 'desc' }, take: 3 },
       },
     });
     this.logger.log(`conciliação pendentes=${pendentes.length}`);
 
+    let liquidados = 0;
     for (const tx of pendentes) {
+      // FALHA só interessa no cash-in (fantasma); cash-out FALHA já encerrou.
+      if (
+        tx.situacao === SITUACAO_TRANSACAO.FALHA &&
+        tx.direcao !== 'ENTRADA'
+      ) {
+        continue;
+      }
+
       if (
         !tx.contaProvedor ||
         tx.contaProvedor.provedor.situacao !== SITUACAO_PROVEDOR.ATIVO
       )
         continue;
-      const liquidanteId = tx.tentativas[0]?.idTransacaoLiquidante;
-      if (!liquidanteId) continue;
+
+      const tentativaComId = tx.tentativas.find((t) => t.idTransacaoLiquidante);
+      const tentativa = tentativaComId ?? tx.tentativas[0];
+      const liquidanteId = tentativaComId?.idTransacaoLiquidante;
+      if (!liquidanteId) {
+        // Saque ENVIANDO sem id = crash pós-aceite sem eco de ref ainda.
+        if (
+          tx.direcao === 'SAIDA' &&
+          tentativa?.situacao === SITUACAO_TENTATIVA.ENVIANDO
+        ) {
+          this.logger.error(
+            `OPS conciliação: saque tx=${tx.idTransacaoPublico} ENVIANDO sem ` +
+              'idTransacaoLiquidante — conferir na liquidante manualmente',
+          );
+        }
+        // Cash-in FALHA/TIMEOUT sem id: cobrança fantasma possível — só OPS
+        // (sem id não há getStatus; recovery vem pelo webhook + externaRef).
+        if (
+          tx.direcao === 'ENTRADA' &&
+          tx.situacao === SITUACAO_TRANSACAO.FALHA &&
+          (tentativa?.mensagemErro ?? '').toUpperCase().includes('TIMEOUT')
+        ) {
+          this.logger.error(
+            `OPS conciliação: cash-in fantasma suspeito tx=${tx.idTransacaoPublico} ` +
+              `privado=${tx.idTransacaoPrivado} — conferir na liquidante por externaRef`,
+          );
+        }
+        continue;
+      }
+
       let credenciais: Record<string, unknown>;
       try {
         credenciais = decryptCredentials(tx.contaProvedor.credenciaisCriptografadas);
       } catch {
         credenciais = JSON.parse(tx.contaProvedor.credenciaisCriptografadas);
       }
+
       try {
-        const status = await this.providers.get(tx.contaProvedor.provedor.codigo).getStatus({
-          idTransacaoLiquidante: liquidanteId,
-          idTransacaoPrivado: tx.idTransacaoPrivado,
-          credenciais,
-        });
-        this.logger.debug(
-          `tx ${tx.idTransacaoPublico} remote=${status.status}`,
-        );
+        const status = await this.providers
+          .get(tx.contaProvedor.provedor.codigo)
+          .getStatus({
+            idTransacaoLiquidante: liquidanteId,
+            idTransacaoPrivado: tx.idTransacaoPrivado,
+            credenciais,
+          });
+
+        if (tx.direcao === 'ENTRADA') {
+          const creditavel =
+            (
+              [
+                SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO,
+                SITUACAO_TRANSACAO.FALHA,
+              ] as string[]
+            ).includes(tx.situacao) &&
+            ['PAID', 'COMPLETED'].includes(status.status) &&
+            !tx.retidaMetodo;
+          if (creditavel) {
+            const valorRemoto =
+              status.valor ?? extrairValorDePayload(status.raw);
+            assertValorCamada1Compativel(
+              money(tx.valorBruto.toString()),
+              valorRemoto,
+            );
+            await this.credito.creditar({
+              transacaoId: tx.id,
+              endToEndId: status.endToEndId,
+              liquidadoEm: status.paidAt ?? new Date(),
+              origem: 'CONCILIACAO',
+              motivo: `Conciliação: liquidante confirmou ${status.status}`,
+              identificadorRastreio: `conciliacao:${tx.id}`,
+            });
+            liquidados += 1;
+            this.logger.log(
+              `conciliação creditou cash-in tx=${tx.idTransacaoPublico}` +
+                (tx.situacao === SITUACAO_TRANSACAO.FALHA
+                  ? ' (recuperação pós-FALHA/fantasma)'
+                  : ''),
+            );
+          }
+          continue;
+        }
+
+        // Cash-out
+        if (tx.situacao !== SITUACAO_TRANSACAO.PROCESSANDO) continue;
+
+        if (['PAID', 'COMPLETED'].includes(status.status)) {
+          const n = await this.prisma.transacao.updateMany({
+            where: {
+              id: tx.id,
+              situacao: SITUACAO_TRANSACAO.PROCESSANDO,
+            },
+            data: {
+              situacao: SITUACAO_TRANSACAO.CONCLUIDA,
+              liquidadoEm: status.paidAt ?? new Date(),
+              concluidoEm: new Date(),
+            },
+          });
+          if (n.count === 0) continue;
+          await this.prisma.$transaction([
+            // A resposta do banco que DECIDIU o desfecho fica salva na tentativa
+            // — sem isto, um saque resolvido pela conciliação (webhook perdido)
+            // ficaria CONCLUIDA/FALHA sem nenhum registro do que a liquidante
+            // devolveu, e o admin não teria o que repassar ao cliente.
+            this.prisma.tentativaTransacao.update({
+              where: { id: tentativa.id },
+              data: { dadosResposta: (status.raw ?? undefined) as object },
+            }),
+            this.prisma.historicoSituacaoTransacao.create({
+              data: {
+                transacaoId: tx.id,
+                situacaoAnterior: SITUACAO_TRANSACAO.PROCESSANDO,
+                novaSituacao: SITUACAO_TRANSACAO.CONCLUIDA,
+                origem: 'CONCILIACAO',
+                motivo: `Conciliação: liquidante confirmou ${status.status}`,
+              },
+            }),
+            this.prisma.eventoOutbox.create({
+              data: {
+                usuarioId: tx.usuarioId,
+                tipoAgregado: 'TRANSACAO',
+                identificadorAgregado: tx.idTransacaoPublico,
+                tipoEvento: EVENTOS_LOJISTA.PIX_CASHOUT_CONCLUIDO,
+                conteudo: {
+                  idTransacao: tx.idTransacaoPublico,
+                  situacao: SITUACAO_TRANSACAO.CONCLUIDA,
+                  valorBruto: tx.valorBruto.toString(),
+                },
+              },
+            }),
+          ]);
+          liquidados += 1;
+          this.logger.log(
+            `conciliação fechou cash-out CONCLUIDA tx=${tx.idTransacaoPublico}`,
+          );
+        } else if (['FAILED', 'CANCELLED', 'REFUNDED'].includes(status.status)) {
+          /**
+           * Estorno + FALHA + histórico + outbox no MESMO commit — ver a
+           * mesma correção em `encerrarComoFalha` do webhook de cash-out.
+           * Se o estorno falhar (deadlock/blip), tudo reverte, a tx segue
+           * PROCESSANDO e o próximo tick da conciliação refaz. Antes, o FALHA
+           * commitava sozinho e um erro no estorno deixava dinheiro preso — e
+           * a conciliação só revisita PROCESSANDO, então nunca mais voltava.
+           */
+          const valor = money(tx.valorBruto.toString());
+          const tarifa = money(tx.valorTarifaPix.toString());
+          const entries = [
+            {
+              tipoSaldo: 'DISPONIVEL' as const,
+              tipoMovimento: 'CREDITO' as const,
+              natureza: 'ESTORNO_SAQUE' as const,
+              valor,
+              chaveIdempotencia: `saque:estorno:${tx.id}`,
+              transacaoId: tx.id,
+              descricao: `Estorno conciliação — ${status.status}`.slice(0, 500),
+            },
+          ];
+          if (tarifa.gt(0)) {
+            entries.push({
+              tipoSaldo: 'DISPONIVEL' as const,
+              tipoMovimento: 'CREDITO' as const,
+              natureza: 'ESTORNO_SAQUE' as const,
+              valor: tarifa,
+              chaveIdempotencia: `saque:estorno-tarifa:${tx.id}`,
+              transacaoId: tx.id,
+              descricao: 'Estorno da tarifa de saque (conciliação)',
+            });
+          }
+
+          const estornado = await this.prisma.$transaction(async (db) => {
+            const n = await db.transacao.updateMany({
+              where: { id: tx.id, situacao: SITUACAO_TRANSACAO.PROCESSANDO },
+              data: { situacao: SITUACAO_TRANSACAO.FALHA, falhouEm: new Date() },
+            });
+            if (n.count === 0) return false;
+
+            // Resposta do banco que decidiu a FALHA — salva no mesmo commit.
+            await db.tentativaTransacao.update({
+              where: { id: tentativa.id },
+              data: { dadosResposta: (status.raw ?? undefined) as object },
+            });
+
+            await this.ledger.aplicarMovimentacoes(
+              { usuarioId: tx.usuarioId, entries },
+              db,
+            );
+
+            await db.historicoSituacaoTransacao.create({
+              data: {
+                transacaoId: tx.id,
+                situacaoAnterior: SITUACAO_TRANSACAO.PROCESSANDO,
+                novaSituacao: SITUACAO_TRANSACAO.FALHA,
+                origem: 'CONCILIACAO',
+                motivo: `Conciliação: liquidante confirmou ${status.status}`,
+                metadados: { saldoDevolvido: true, estorno: 'automatico' },
+              },
+            });
+            await db.eventoOutbox.create({
+              data: {
+                usuarioId: tx.usuarioId,
+                tipoAgregado: 'TRANSACAO',
+                identificadorAgregado: tx.idTransacaoPublico,
+                tipoEvento: EVENTOS_LOJISTA.PIX_CASHOUT_FALHOU,
+                conteudo: {
+                  idTransacao: tx.idTransacaoPublico,
+                  situacao: SITUACAO_TRANSACAO.FALHA,
+                  motivo: `Conciliação: ${status.status}`,
+                },
+              },
+            });
+            return true;
+          });
+          if (!estornado) continue;
+          liquidados += 1;
+          this.logger.log(
+            `conciliação fechou cash-out FALHA+estorno tx=${tx.idTransacaoPublico}`,
+          );
+        } else {
+          this.logger.debug(
+            `tx ${tx.idTransacaoPublico} remote=${status.status}`,
+          );
+        }
       } catch (e) {
         this.logger.warn(`falha conciliação ${tx.id}: ${e}`);
       }
     }
-    return { checked: pendentes.length };
+
+    // Recovery: saques PROCESSANDO sem tentativa ativa e sem job na fila.
+    const orfaos = await this.prisma.transacao.findMany({
+      where: {
+        direcao: 'SAIDA',
+        situacao: SITUACAO_TRANSACAO.PROCESSANDO,
+        criadoEm: { lte: new Date(Date.now() - 2 * 60 * 1000) },
+        tentativas: {
+          none: { situacao: { not: SITUACAO_TENTATIVA.FALHA } },
+        },
+      },
+      take: 20,
+      include: { contaProvedor: { include: { provedor: true } } },
+    });
+    for (const tx of orfaos) {
+      if (!tx.contaProvedor) continue;
+      try {
+        await this.queues.enqueuePixCashOut({
+          provider: tx.contaProvedor.provedor.codigo,
+          contaProvedorId: tx.contaProvedorId?.toString(),
+          payload: {
+            transacaoId: tx.id.toString(),
+            idTransacaoPrivado: tx.idTransacaoPrivado,
+          },
+          identificadorRastreio: `conciliacao-reenfileira:${tx.id}`,
+        });
+        this.logger.warn(
+          `conciliação reenfileirou saque órfão tx=${tx.idTransacaoPublico}`,
+        );
+      } catch (e) {
+        this.logger.warn(`falha ao reenfileirar saque ${tx.id}: ${e}`);
+      }
+    }
+
+    return { checked: pendentes.length, liquidados, orfaosReenfileirados: orfaos.length };
   }
 }

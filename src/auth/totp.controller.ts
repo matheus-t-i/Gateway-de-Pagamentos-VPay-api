@@ -35,6 +35,11 @@ export function validarTotp(segredoCriptografado: string, codigo: string): boole
   }
 }
 
+/**
+ * Setup/desligamento do próprio TOTP.
+ * Sem `@RequerPermissao` (conta própria) e sem `assertStepUpTotp` — exigir
+ * step-up aqui seria chicken-and-egg para quem ainda está ativando o 2FA.
+ */
 @Controller('auth/totp')
 @UseGuards(JwtAuthGuard)
 export class TotpController {

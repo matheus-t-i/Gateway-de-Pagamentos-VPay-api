@@ -36,12 +36,16 @@ export const STATUS_CASH_IN = [
 /**
  * Situações que o CASH-OUT realmente assume. `PROCESSANDO` é o estado em que o
  * saldo JÁ está debitado e o saque está com a liquidante.
+ *
+ * `CANCELADA` saiu da lista: nenhum ponto do código cancela um saque, e um
+ * status que o lojista nunca recebe é pior que ausência de status — ele escreve
+ * um `if` que nunca executa e acredita estar coberto. Se um dia existir
+ * cancelamento, o valor volta para cá junto com quem o emite.
  */
 export const STATUS_CASH_OUT = [
   SITUACAO_TRANSACAO.PROCESSANDO,
   SITUACAO_TRANSACAO.CONCLUIDA,
   SITUACAO_TRANSACAO.FALHA,
-  SITUACAO_TRANSACAO.CANCELADA,
 ] as const;
 
 export type StatusCallback =
@@ -76,7 +80,9 @@ const MAPA_CASH_OUT: Record<string, StatusCallback> = {
   [SITUACAO_TRANSACAO.LIQUIDADA]: SITUACAO_TRANSACAO.CONCLUIDA,
   [SITUACAO_TRANSACAO.CONCLUIDA]: SITUACAO_TRANSACAO.CONCLUIDA,
   [SITUACAO_TRANSACAO.FALHA]: SITUACAO_TRANSACAO.FALHA,
-  [SITUACAO_TRANSACAO.CANCELADA]: SITUACAO_TRANSACAO.CANCELADA,
+  // Saque não é cancelado por nenhum fluxo hoje; se a situação aparecer no
+  // banco, o lojista precisa entender como "não vai adiante".
+  [SITUACAO_TRANSACAO.CANCELADA]: SITUACAO_TRANSACAO.FALHA,
   // Devolução é conceito de MED (cash-in); num saque, tratar como falha.
   [SITUACAO_TRANSACAO.MED]: SITUACAO_TRANSACAO.FALHA,
 };
@@ -133,13 +139,7 @@ export const STATUS_CALLBACK_DOC: Array<{
     status: SITUACAO_TRANSACAO.FALHA,
     operacoes: [OPERACAO_CALLBACK.CASH_IN, OPERACAO_CALLBACK.CASH_OUT],
     descricao:
-      'A operação não vai adiante. No cash-in, nenhuma liquidante conseguiu gerar a cobrança nem pela contingência.',
-    terminal: true,
-  },
-  {
-    status: SITUACAO_TRANSACAO.CANCELADA,
-    operacoes: [OPERACAO_CALLBACK.CASH_OUT],
-    descricao: 'Saque cancelado antes de liquidar.',
+      'A operação não vai adiante. No cash-in, nenhuma liquidante conseguiu gerar a cobrança nem pela contingência. No cash-out, a liquidante recusou a ordem — o valor já debitado NÃO volta sozinho: fale com o suporte para o estorno.',
     terminal: true,
   },
   {

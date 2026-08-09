@@ -30,7 +30,23 @@ export class BullBoardAuthMiddleware implements NestMiddleware {
       const token = header?.startsWith('Bearer ') ? header.slice(7) : cookie;
       if (!token) throw new UnauthorizedException();
 
-      const payload = await this.jwt.verifyAsync<{ sub: string; papeis?: string[] }>(token);
+      const payload = await this.jwt.verifyAsync<{
+        sub: string;
+        papeis?: string[];
+        tipo?: string;
+      }>(token);
+      /**
+       * Só JWT de SESSÃO do painel abre as filas. O token da API pública é
+       * assinado com o MESMO `JWT_SECRET` (não há audience/issuer separando os
+       * dois), mas seu `sub` é id de CREDENCIAL, não de usuário. Sem esta
+       * recusa, um lojista trocaria a chave por um token cujo `sub` colide com
+       * o id de um ADMINISTRADOR (as sequências de usuário e credencial são
+       * independentes e ambas começam em 1) e abriria o Bull Board como admin.
+       * É a MESMA confusão de tipo que o `JwtAuthGuard` barra pelo claim
+       * `tipo`; este middleware é um terceiro verificador do mesmo segredo e
+       * precisa replicar a checagem.
+       */
+      if (payload.tipo) throw new UnauthorizedException();
       const usuario = await this.prisma.usuario.findUnique({
         where: { id: BigInt(payload.sub) },
         include: { papeis: { include: { papel: true } } },

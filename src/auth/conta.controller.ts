@@ -20,13 +20,14 @@ import {
 } from '../shared';
 import { Throttle } from '../common/ip-throttle.guard';
 import { JwtAuthGuard } from './jwt-auth.guard';
-import { validarTotp } from './totp.controller';
+import { assertStepUpTotp } from '../common/step-up-totp';
 
 const alterarSenhaSchema = z
   .object({
     senhaAtual: z.string().min(1, 'Informe a senha atual.'),
     novaSenha: z.string().max(TAMANHO_MAXIMO_SENHA),
     confirmacaoNovaSenha: z.string(),
+    codigoTotp: z.string().regex(/^\d{6}$/),
   })
   .refine((d) => d.novaSenha === d.confirmacaoNovaSenha, {
     path: ['confirmacaoNovaSenha'],
@@ -35,8 +36,7 @@ const alterarSenhaSchema = z
 
 const encerrarSchema = z.object({
   senha: z.string().min(1, 'Confirme sua senha para encerrar a conta.'),
-  /** Exigido quando a conta tem 2FA ativo. */
-  codigoTotp: z.string().regex(/^\d{6}$/).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
   motivo: z.string().max(500).optional(),
 });
 
@@ -90,6 +90,7 @@ export class ContaController {
   ) {
     const parsed = alterarSenhaSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const { senhaAtual, novaSenha } = parsed.data;
 
     const usuario = await this.prisma.usuario.findUniqueOrThrow({
@@ -255,7 +256,7 @@ export class ContaController {
    * Encerra a conta a pedido do titular.
    *
    * **Não apaga nada.** A conta vai para `ENCERRADO`: o `JwtAuthGuard` e o
-   * `ApiKeyGuard` já recusam quem não está `ATIVO`, então painel e API param na
+   * `ApiTokenGuard` já recusam quem não está `ATIVO`, então painel e API param na
    * hora; as credenciais são revogadas e os webhooks desativados para o
    * desligamento ficar explícito no banco (e visível se a conta for reaberta).
    * O histórico financeiro continua inteiro — é obrigação fiscal e é o que
@@ -279,20 +280,7 @@ export class ContaController {
       throw new BadRequestException('Senha incorreta.');
     }
 
-    // Com 2FA ativo, senha sozinha não encerra conta — mesmo critério do login.
-    if (usuario.totpHabilitado) {
-      if (!parsed.data.codigoTotp) {
-        throw new BadRequestException(
-          'Informe o código da verificação em duas etapas para encerrar a conta.',
-        );
-      }
-      if (
-        !usuario.segredoTotpCriptografado ||
-        !validarTotp(usuario.segredoTotpCriptografado, parsed.data.codigoTotp)
-      ) {
-        throw new BadRequestException('Código de verificação inválido.');
-      }
-    }
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
 
     // Reconferido aqui dentro: entre abrir a tela e confirmar pode ter entrado
     // uma cobrança nova ou um MED.

@@ -1,4 +1,10 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
@@ -63,6 +69,24 @@ export class RateLimitService implements OnModuleDestroy {
   }
 
   /**
+   * Teto de TENTATIVAS de autenticação por chave pública, cobrado ANTES de
+   * verificar o segredo.
+   *
+   * A chave pública não é secreta: viaja em todo request e é exibida no painel.
+   * Sem este freio, quem tivesse uma podia forçar a verificação criptográfica
+   * indefinidamente — o limite normal (60/min) só roda depois, dentro do
+   * handler, e requisição inválida nunca chega lá.
+   *
+   * Conta acerto e erro juntos, e o teto é bem acima do limite operacional
+   * (60/min) para nunca atrapalhar quem está integrando de verdade. Vale também
+   * para chave inexistente, senão a própria ausência de bloqueio viraria
+   * oráculo de existência.
+   */
+  async checkTentativaAuth(chavePublica: string): Promise<boolean> {
+    return this.check(`rl:auth:${chavePublica.slice(0, 64)}`, 120, 60);
+  }
+
+  /**
    * A política vive no banco mas muda uma vez por ano — buscá-la a cada
    * requisição colocava um SELECT extra no caminho crítico de TODA chamada da
    * API pública. Cache curto: mudança no painel entra em no máximo 60s.
@@ -113,8 +137,16 @@ export class RateLimitService implements OnModuleDestroy {
       this.log.error(`Falha ao registrar evento de rate limit: ${(e as Error).message}`);
     }
 
-    const err = new Error('Rate limit excedido');
-    (err as Error & { status: number }).status = 429;
-    throw err;
+    /**
+     * `HttpException` e não `Error` com `.status`: o Nest identifica erro HTTP
+     * pela propriedade `statusCode` (via `HttpException`). Um `Error` cru com
+     * `status = 429` não é reconhecido, cai no handler genérico e o lojista
+     * recebe **500** — justamente quando a orientação correta seria "reduza o
+     * ritmo e repita".
+     */
+    throw new HttpException(
+      'Limite de requisições excedido — reduza o ritmo e repita.',
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
   }
 }

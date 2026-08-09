@@ -54,6 +54,8 @@ type LedgerEntry = {
     | 'BLOQUEIO_MANUAL'
     | 'DESBLOQUEIO_MANUAL'
     | 'DEBITO_MANUAL'
+    /** Devolução de saque que a liquidante recusou — nunca em desfecho ambíguo. */
+    | 'ESTORNO_SAQUE'
     | 'AJUSTE';
   valor: Decimal;
   chaveIdempotencia: string;
@@ -141,19 +143,26 @@ export class LedgerService {
   /**
    * Único ponto de escrita de saldo.
    * SELECT FOR UPDATE em saldos_usuarios + movimentações + outbox no mesmo commit.
+   *
+   * `db` permite rodar DENTRO de uma transação de quem chama, em vez de abrir a
+   * própria. É o que deixa o saque criar a transação e debitar no MESMO commit:
+   * ou nascem as duas coisas, ou nenhuma — sem janela de movimentação órfã.
    */
-  async aplicarMovimentacoes(params: {
-    usuarioId: bigint;
-    entries: LedgerEntry[];
-    outbox?: {
-      tipoAgregado: string;
-      identificadorAgregado: string;
-      tipoEvento: string;
-      conteudo: Prisma.InputJsonValue;
-    };
-    permiteSaldoNegativo?: boolean;
-  }) {
-    return this.prisma.$transaction(async (tx) => {
+  async aplicarMovimentacoes(
+    params: {
+      usuarioId: bigint;
+      entries: LedgerEntry[];
+      outbox?: {
+        tipoAgregado: string;
+        identificadorAgregado: string;
+        tipoEvento: string;
+        conteudo: Prisma.InputJsonValue;
+      };
+      permiteSaldoNegativo?: boolean;
+    },
+    db?: Prisma.TransactionClient,
+  ) {
+    const executar = async (tx: Prisma.TransactionClient) => {
       const saldos = await tx.$queryRaw<
         Array<{
           usuario_id: bigint;
@@ -181,16 +190,43 @@ export class LedgerService {
       let bloqueadoManual = money(saldos[0].saldo_bloqueado_manual.toString());
 
       const created = [];
+      let novasMovimentacoes = 0;
 
       for (const entry of params.entries) {
         const existing = await tx.movimentacaoSaldo.findUnique({
           where: { chaveIdempotencia: entry.chaveIdempotencia },
         });
         if (existing) {
+          /**
+           * Dedupe idempotente EXIGE que a chave signifique a MESMA
+           * movimentação. Sem esta conferência, uma chave reaproveitada com
+           * outro valor devolveria a movimentação ANTIGA sem debitar o novo
+           * valor — o débito real ficaria descasado do que a operação acha ter
+           * debitado, e o dinheiro sumiria do lojista sem transação que o
+           * explicasse.
+           *
+           * Hoje toda chave de dinheiro deriva de id NOSSO
+           * (`saque:hold:<idTransacaoPrivado>`, `saque:estorno:<txId>`,
+           * `cashin:*:<txId>`), então divergência aqui significa bug ou
+           * corrupção — nunca fluxo normal. Falha fechada, para reconciliação
+           * humana.
+           */
+          const mesmaMovimentacao =
+            existing.tipoSaldo === entry.tipoSaldo &&
+            existing.tipoMovimento === entry.tipoMovimento &&
+            existing.natureza === entry.natureza &&
+            money(existing.valor.toString()).eq(entry.valor);
+          if (!mesmaMovimentacao) {
+            throw new BadRequestException(
+              `Chave de idempotência "${entry.chaveIdempotencia}" já usada com outro ` +
+                'valor/tipo de movimentação. Operação recusada para reconciliação manual.',
+            );
+          }
           created.push(existing);
           continue;
         }
 
+        novasMovimentacoes += 1;
         const delta =
           entry.tipoMovimento === 'CREDITO' ? entry.valor : entry.valor.neg();
 
@@ -279,7 +315,9 @@ export class LedgerService {
       });
 
       let outboxId: bigint | undefined;
-      if (params.outbox) {
+      // Outbox só quando houve crédito/débito NOVO — senão retry/concorrência
+      // com chaves já existentes duplicava o callback ao lojista.
+      if (params.outbox && novasMovimentacoes > 0) {
         const outbox = await tx.eventoOutbox.create({
           data: {
             usuarioId: params.usuarioId,
@@ -294,6 +332,7 @@ export class LedgerService {
 
       return {
         movimentacoes: created,
+        novasMovimentacoes,
         saldos: {
           disponivel: disponivel.toFixed(2),
           pendente: pendente.toFixed(2),
@@ -302,6 +341,8 @@ export class LedgerService {
         },
         outboxId,
       };
-    });
+    };
+
+    return db ? executar(db) : this.prisma.$transaction(executar);
   }
 }

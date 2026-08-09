@@ -188,4 +188,124 @@ describe('PixService.criarSaque — débito amarrado à transação', () => {
     });
     expect(depois).toBe(antes);
   });
+
+  /**
+   * A chave de idempotência do débito deriva do `idTransacaoPrivado` — id
+   * NOSSO. Antes derivava da `referenciaExterna` (id do sistema do lojista),
+   * e sem ela caía num `randomUUID()` por chamada: a integridade do ledger
+   * dependia de um dado externo e opcional.
+   */
+  it('as chaves do débito derivam do idTransacaoPrivado, não de dado do lojista', async () => {
+    const resultado = await pix.criarSaque({
+      usuarioId,
+      input: {
+        valor: '50.00',
+        chavePix: 'chave-teste@vpay.local',
+        tipoChavePix: 'EMAIL',
+        nomeBeneficiario: 'Saque Debito Test',
+        documentoBeneficiario: '11111111113',
+        referenciaExterna: `saque-chave-${sufixo}`,
+      } as never,
+    });
+
+    const tx = await prisma.transacao.findUniqueOrThrow({
+      where: { id: BigInt(resultado.idInterno) },
+    });
+    const movs = await prisma.movimentacaoSaldo.findMany({
+      where: { transacaoId: tx.id },
+      orderBy: { id: 'asc' },
+    });
+
+    expect(movs.map((m) => m.chaveIdempotencia).sort()).toEqual(
+      [
+        `saque:hold:${tx.idTransacaoPrivado}`,
+        `saque:tarifa:${tx.idTransacaoPrivado}`,
+      ].sort(),
+    );
+    // A referência do lojista não entra em chave de dinheiro.
+    expect(
+      movs.some((m) => m.chaveIdempotencia.includes(tx.referenciaExterna ?? '#')),
+    ).toBe(false);
+  });
+
+  /**
+   * Saque SEM `referenciaExterna` (ela é opcional de propósito) precisa nascer
+   * com o débito amarrado do mesmo jeito. Antes, este caminho usava
+   * `randomUUID()` como chave e o vínculo dependia de um `updateMany` posterior.
+   */
+  it('saque sem referenciaExterna nasce com o débito amarrado à transação', async () => {
+    const resultado = await pix.criarSaque({
+      usuarioId,
+      input: {
+        valor: '25.00',
+        chavePix: 'chave-teste@vpay.local',
+        tipoChavePix: 'EMAIL',
+        nomeBeneficiario: 'Saque Debito Test',
+        documentoBeneficiario: '11111111113',
+      } as never,
+    });
+
+    const tx = await prisma.transacao.findUniqueOrThrow({
+      where: { id: BigInt(resultado.idInterno) },
+    });
+    expect(tx.referenciaExterna).toBeNull();
+
+    // A MESMA conta que o PixCashOutProcessor faz antes de mandar dinheiro.
+    const debitos = await prisma.movimentacaoSaldo.aggregate({
+      where: { transacaoId: tx.id, tipoMovimento: 'DEBITO' },
+      _sum: { valor: true },
+    });
+    const debitado = money(debitos._sum.valor?.toString() ?? '0');
+    const esperado = money(tx.valorBruto.toString()).plus(
+      money(tx.valorTarifaPix.toString()),
+    );
+    expect(debitado.toFixed(2)).toBe(esperado.toFixed(2));
+    expect(debitado.lt(esperado)).toBe(false);
+  });
+
+  /**
+   * Dois saques com a MESMA referenciaExterna e MESMOS dados não podem
+   * colidir no ledger: cada transação tem o próprio `idTransacaoPrivado`,
+   * então cada uma debita a sua parte. (O pre-check de retentativa devolve o
+   * primeiro antes disso; este teste força o caminho de criação chamando com
+   * referências distintas para provar que as chaves não se cruzam.)
+   */
+  it('saques distintos nunca compartilham chave de débito', async () => {
+    const um = await pix.criarSaque({
+      usuarioId,
+      input: {
+        valor: '10.00',
+        chavePix: 'chave-teste@vpay.local',
+        tipoChavePix: 'EMAIL',
+        nomeBeneficiario: 'Saque Debito Test',
+        documentoBeneficiario: '11111111113',
+      } as never,
+    });
+    const dois = await pix.criarSaque({
+      usuarioId,
+      input: {
+        valor: '10.00',
+        chavePix: 'chave-teste@vpay.local',
+        tipoChavePix: 'EMAIL',
+        nomeBeneficiario: 'Saque Debito Test',
+        documentoBeneficiario: '11111111113',
+      } as never,
+    });
+
+    expect(um.idTransacao).not.toBe(dois.idTransacao);
+    const movsUm = await prisma.movimentacaoSaldo.findMany({
+      where: { transacaoId: BigInt(um.idInterno) },
+    });
+    const movsDois = await prisma.movimentacaoSaldo.findMany({
+      where: { transacaoId: BigInt(dois.idInterno) },
+    });
+    expect(movsUm).toHaveLength(2);
+    expect(movsDois).toHaveLength(2);
+    // Cada saque debitou o SEU valor — nenhum herdou o débito do outro.
+    // R$ 10,00 + tarifa (1% + R$ 2,00 = R$ 2,10) = R$ 12,10.
+    for (const movs of [movsUm, movsDois]) {
+      const soma = movs.reduce((acc, m) => acc.plus(money(m.valor.toString())), money('0'));
+      expect(soma.toFixed(2)).toBe('12.10');
+    }
+  });
 });

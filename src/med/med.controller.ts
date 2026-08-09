@@ -17,17 +17,20 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
 import { MedService } from './med.service';
+import { assertStepUpTotp } from '../common/step-up-totp';
 
 const receberSchema = z.object({
   idTransacaoPublico: z.string().uuid(),
   valorSolicitado: z.string().regex(/^\d+(\.\d{1,2})?$/),
   identificadorMedProvedor: z.string().max(255).optional(),
   motivo: z.string().max(500).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 const decidirSchema = z.object({
   decisao: z.enum(['ACEITO', 'RECUSADO']),
   motivo: z.string().max(500).optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 type MedReq = { user: { id: string } };
@@ -123,8 +126,10 @@ export class MedController {
   async receber(@Req() req: MedReq, @Body() body: unknown) {
     const parsed = receberSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
+    const { codigoTotp: _c, ...dados } = parsed.data;
     return this.med.receber({
-      ...parsed.data,
+      ...dados,
       origem: 'ADMINISTRADOR',
       usuarioAtorId: BigInt(req.user.id),
     });
@@ -139,6 +144,7 @@ export class MedController {
   ) {
     const parsed = decidirSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     return this.med.decidir({
       idPublico,
       decisao: parsed.data.decisao,

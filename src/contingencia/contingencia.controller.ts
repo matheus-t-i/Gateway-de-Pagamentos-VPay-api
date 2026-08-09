@@ -19,6 +19,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
+import { assertStepUpTotp } from '../common/step-up-totp';
 import { ContingenciaService } from './contingencia.service';
 
 const TIPOS = Object.values(TIPO_FALHA_ADQUIRENTE) as string[];
@@ -87,9 +88,14 @@ export class ContingenciaController {
   @Put()
   @RequerPermissao(PERMISSOES.ADMIN_CONTINGENCIA_EDITAR)
   async definirCadeia(
-    @Body() body: { contas?: Array<{ contaProvedorId?: string; ativo?: boolean; observacao?: string }> },
+    @Body()
+    body: {
+      contas?: Array<{ contaProvedorId?: string; ativo?: boolean; observacao?: string }>;
+      codigoTotp?: string;
+    },
     @Req() req: { user: { id: string }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const itens = body.contas ?? [];
     if (!Array.isArray(itens)) throw new BadRequestException('contas deve ser uma lista');
     if (itens.length > 10) {

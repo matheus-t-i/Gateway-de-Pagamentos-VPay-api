@@ -38,7 +38,10 @@ import { ReenvioWebhookService } from '../queues/reenvio-webhook.service';
 import { getRastreio } from '../common/request-context';
 import { encryptText } from '../common/crypto.util';
 import { AdquirentesService } from '../providers/adquirentes.service';
-import { validarTotp } from '../auth/totp.controller';
+import {
+  assertStepUpFromBody,
+  assertStepUpTotp,
+} from '../common/step-up-totp';
 import { CashInCreditoService } from '../retencao/cashin-credito.service';
 import { RelatorioMetodoService } from './relatorio-metodo.service';
 
@@ -68,6 +71,7 @@ export class WebhooksClienteController {
    * o webhook nunca receber nada — falha silenciosa.
    */
   @Get('eventos')
+  @RequerPermissao(PERMISSOES.WEBHOOKS_VER)
   eventos() {
     return Object.values(EVENTOS_LOJISTA);
   }
@@ -112,6 +116,7 @@ export class WebhooksClienteController {
   async criar(@Req() req: { user: UsuarioAutenticado }, @Body() body: unknown) {
     const parsed = configuracaoWebhookSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const criado = await this.prisma.configuracaoWebhookUsuario.create({
       data: {
         usuarioId: BigInt(req.user.id),
@@ -133,7 +138,9 @@ export class WebhooksClienteController {
   async remover(
     @Param('id') id: string,
     @Req() req: { user: UsuarioAutenticado },
+    @Body() body: unknown,
   ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     // Soft delete: entregas_webhook referenciam esta config (histórico de
     // auditoria). Apagar violaria a FK e destruiria o histórico de entregas.
     const r = await this.prisma.configuracaoWebhookUsuario.updateMany({
@@ -659,6 +666,88 @@ export class AdminOpsController {
   }
 
   /**
+   * Detalhe de UMA transação para o admin/suporte, com a RESPOSTA DO BANCO.
+   *
+   * É o que dá ao suporte como explicar ao cliente por que um saque falhou: a
+   * resposta bruta da liquidante fica em `tentativas_transacoes` (dadosResposta
+   * / statusHttp / mensagemErro) — gravada na criação (sucesso e recusa) e na
+   * conciliação — e o corpo dos webhooks do banco em `webhooks_recebidos_provedor`.
+   * O relatório em lista não carrega isso (seria JSON grande por linha); aqui,
+   * sob demanda, devolvemos o rastro completo. Admin vê qualquer conta (sem
+   * filtro por usuarioId) — é `ADMIN_RELATORIOS_VER`.
+   */
+  @Get('relatorios/transacoes/:idTransacao')
+  @RequerPermissao(PERMISSOES.ADMIN_RELATORIOS_VER)
+  async detalheTransacao(@Param('idTransacao') idTransacao: string) {
+    const tx = await this.prisma.transacao.findUnique({
+      where: { idTransacaoPublico: idTransacao },
+      include: {
+        pix: true,
+        usuario: { select: { nomeRazaoSocial: true, idPublico: true, email: true } },
+        contaProvedor: { select: { provedor: { select: { codigo: true } } } },
+        tentativas: { orderBy: { numeroTentativa: 'asc' } },
+      },
+    });
+    if (!tx) throw new BadRequestException('Transação não encontrada');
+
+    // Webhooks do banco casam pela id da liquidante das tentativas (não há FK
+    // direta transação→webhook: o match é sempre pelo id externo).
+    const liquidanteIds = tx.tentativas
+      .map((t) => t.idTransacaoLiquidante)
+      .filter((id): id is string => !!id);
+    const webhooks = liquidanteIds.length
+      ? await this.prisma.webhookRecebidoProvedor.findMany({
+          where: { identificadorEventoExterno: { in: liquidanteIds } },
+          orderBy: { recebidoEm: 'asc' },
+        })
+      : [];
+
+    return {
+      idTransacao: tx.idTransacaoPublico,
+      direcao: tx.direcao,
+      situacao: tx.situacao,
+      empresa: tx.usuario.nomeRazaoSocial,
+      empresaEmail: tx.usuario.email,
+      valorBruto: tx.valorBruto.toString(),
+      valorTarifa: tx.valorTarifaPix.toString(),
+      valorLiquido: tx.valorLiquidacaoEmpresa.toString(),
+      referenciaExterna: tx.referenciaExterna,
+      adquirente: tx.contaProvedor?.provedor?.codigo ?? null,
+      beneficiario: tx.pix?.nomeBeneficiario ?? null,
+      chavePix: tx.pix?.chavePix ?? null,
+      documentoBeneficiario: tx.pix?.documentoBeneficiario ?? null,
+      endToEnd: tx.pix?.identificadorFimAFim ?? null,
+      criadoEm: tx.criadoEm,
+      liquidadoEm: tx.liquidadoEm,
+      concluidoEm: tx.concluidoEm,
+      falhouEm: tx.falhouEm,
+      /**
+       * A RESPOSTA DO BANCO por tentativa — o campo que o suporte lê para
+       * repassar ao cliente o motivo real da recusa/falha.
+       */
+      tentativas: tx.tentativas.map((t) => ({
+        numero: t.numeroTentativa,
+        situacao: t.situacao,
+        statusHttp: t.statusHttp,
+        codigoErro: t.codigoErro,
+        mensagemErro: t.mensagemErro,
+        idTransacaoLiquidante: t.idTransacaoLiquidante,
+        respostaBanco: t.dadosResposta ?? null,
+        criadoEm: t.criadoEm,
+        concluidoEm: t.concluidoEm,
+      })),
+      /** Corpo cru dos webhooks que o banco enviou para esta operação. */
+      webhooksBanco: webhooks.map((w) => ({
+        tipoEvento: w.tipoEvento,
+        situacao: w.situacao,
+        conteudo: w.conteudo,
+        recebidoEm: w.recebidoEm,
+        processadoEm: w.processadoEm,
+      })),
+    };
+  }
+
+  /**
    * Reenvia o callback de uma transação de QUALQUER conta (suporte). Vai para a
    * fila dedicada `11-webhook-reenvio` — reenvio manual não se mistura com a
    * entrega automática.
@@ -668,7 +757,9 @@ export class AdminOpsController {
   async reenviarWebhookAdmin(
     @Param('idTransacao') idTransacao: string,
     @Req() req: { user: UsuarioAutenticado; ip?: string },
+    @Body() body: unknown,
   ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     return this.reenvioWebhook.solicitar({
       idTransacaoPublico: idTransacao,
       atorId: BigInt(req.user.id),
@@ -693,18 +784,12 @@ export class AdminOpsController {
     if (!parsed.success) {
       throw new BadRequestException(parsed.error.flatten());
     }
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
 
     const ator = await this.prisma.usuario.findUniqueOrThrow({
       where: { id: BigInt(req.user.id) },
+      select: { idPublico: true },
     });
-    if (!ator.totpHabilitado || !ator.segredoTotpCriptografado) {
-      throw new ForbiddenException(
-        'Ative a verificação em duas etapas na sua conta para liberar retenções.',
-      );
-    }
-    if (!validarTotp(ator.segredoTotpCriptografado, parsed.data.codigoTotp)) {
-      throw new ForbiddenException('Código de verificação inválido.');
-    }
 
     const tx = await this.prisma.transacao.findFirst({
       where: { idTransacaoPublico: idTransacao, direcao: 'ENTRADA' },
@@ -876,9 +961,11 @@ export class AdminOpsController {
     body: {
       situacao: 'ATIVO' | 'INATIVO' | 'SUSPENSO';
       substituicoes?: Array<{ usuarioIdPublico: string; adquirenteCodigo: string }>;
+      codigoTotp?: string;
     },
     @Req() req: { user: { id: string } },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const situacoesValidas: string[] = [
       SITUACAO_PROVEDOR.ATIVO,
       SITUACAO_PROVEDOR.INATIVO,
@@ -886,6 +973,15 @@ export class AdminOpsController {
     ];
     if (!situacoesValidas.includes(body?.situacao)) {
       throw new BadRequestException('situacao inválida');
+    }
+    if (
+      process.env.NODE_ENV === 'production' &&
+      codigo === 'mock' &&
+      body.situacao === SITUACAO_PROVEDOR.ATIVO
+    ) {
+      throw new BadRequestException(
+        'Não é permitido ativar a adquirente mock em produção (crédito fictício).',
+      );
     }
     const p = await this.prisma.$transaction(async (tx) => {
       // Inativar/suspender derruba o PIX in de quem estiver nela.
@@ -928,8 +1024,10 @@ export class AdminOpsController {
       origemCodigo?: string;
       cashIn?: boolean;
       cashOut?: boolean;
+      codigoTotp?: string;
     },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const codigo = (body?.adquirenteCodigo ?? '').trim();
     if (!codigo) throw new BadRequestException('Informe a adquirente destino.');
     if (!body.cashIn && !body.cashOut) {
@@ -1111,9 +1209,11 @@ export class AdminOpsController {
       permitePixSaida?: boolean;
       exigeAssinaturaWebhook?: boolean;
       substituicoes?: Array<{ usuarioIdPublico: string; adquirenteCodigo: string }>;
+      codigoTotp?: string;
     },
     @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const antes = await this.prisma.provedorPagamento.findUnique({ where: { codigo } });
     if (!antes) throw new BadRequestException('Adquirente não encontrada');
     const p = await this.prisma.$transaction(async (tx) => {
@@ -1157,9 +1257,10 @@ export class AdminOpsController {
   @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_EDITAR)
   async editarIpsWebhook(
     @Param('codigo') codigo: string,
-    @Body() body: { ips?: string[] },
+    @Body() body: { ips?: string[]; codigoTotp?: string },
     @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const provedor = await this.prisma.provedorPagamento.findUnique({
       where: { codigo },
       include: { ipsWebhook: true },
@@ -1207,9 +1308,11 @@ export class AdminOpsController {
       custoPixEntradaFixo?: number | string;
       custoPixSaidaPercentual?: number | string;
       custoPixSaidaFixo?: number | string;
+      codigoTotp?: string;
     },
     @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const id = BigInt(contaId);
     const conta = await this.prisma.contaProvedor.findUnique({ where: { id } });
     if (!conta) throw new BadRequestException('Conta não encontrada');
@@ -1266,9 +1369,11 @@ export class AdminOpsController {
       permitePixSaida?: boolean;
       /** IPs/faixas (CIDR, inclusive IPv6 /64) de onde a liquidante entrega webhook. */
       ipsWebhook?: string[];
+      codigoTotp?: string;
     },
     @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const codigo = (body.codigo ?? '').trim().toLowerCase();
     const nome = (body.nome ?? '').trim();
     if (!/^[a-z0-9_]{2,50}$/.test(codigo)) {
@@ -1325,7 +1430,12 @@ export class AdminOpsController {
 
   @Post('webhooks/:entregaId/reenviar')
   @RequerPermissao(PERMISSOES.ADMIN_FILAS_EXECUTAR)
-  async reenviar(@Param('entregaId') entregaId: string) {
+  async reenviar(
+    @Param('entregaId') entregaId: string,
+    @Req() req: { user: UsuarioAutenticado },
+    @Body() body: unknown,
+  ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const entrega = await this.prisma.entregaWebhook.findUnique({
       where: { id: BigInt(entregaId) },
       include: { eventoOutbox: true },

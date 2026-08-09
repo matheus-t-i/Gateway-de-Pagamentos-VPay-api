@@ -9,6 +9,7 @@ import { AuthModule } from '../auth/auth.module';
 import { QueuesService } from './queues.service';
 import { ReenvioWebhookService } from './reenvio-webhook.service';
 import { BullBoardAuthMiddleware } from './bull-board.middleware';
+import { FilasAlertaService } from './filas-alerta.service';
 
 const queueRegistrations = ALL_QUEUE_NAMES.map((name) =>
   BullModule.registerQueue({ name }),
@@ -65,7 +66,7 @@ export class QueuesModule {
         }),
         ...queueRegistrations,
       ],
-      providers: [QueuesService],
+      providers: [QueuesService, FilasAlertaService],
       exports: [BullModule, QueuesService],
     };
   }

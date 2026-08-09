@@ -64,10 +64,19 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('Token ausente');
     }
     const token = header.slice(7);
-    let payload: JwtPayload;
+    let payload: JwtPayload & { tipo?: string };
     try {
       payload = await this.jwt.verifyAsync(token);
     } catch {
+      throw new UnauthorizedException('Token inválido');
+    }
+    /**
+     * Token da API pública (`POST /v1/auth/token`) não abre o painel: é
+     * assinado com o MESMO segredo, mas o `sub` dele é id de CREDENCIAL — sem
+     * esta recusa, ele autenticaria como o usuário que por acaso tivesse o
+     * mesmo id numérico.
+     */
+    if (payload.tipo) {
       throw new UnauthorizedException('Token inválido');
     }
     const usuario = await this.prisma.usuario.findUnique({

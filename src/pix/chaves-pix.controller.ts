@@ -26,6 +26,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { QueuesService } from '../queues/queues.service';
 import { JwtAuthGuard, type UsuarioAutenticado } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
+import {
+  assertStepUpFromBody,
+  assertStepUpTotp,
+} from '../common/step-up-totp';
 
 type Req = { user: UsuarioAutenticado };
 
@@ -97,6 +101,7 @@ export class ChavesPixController {
   async criar(@Body() body: unknown, @Req() req: Req) {
     const parsed = criarChavePixSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const usuario = await this.conta(req.user);
     if (usuario.situacao !== SITUACAO_USUARIO.ATIVO) {
       throw new BadRequestException('Conta não está ativa.');
@@ -178,7 +183,9 @@ export class ChavesPixController {
   async remover(
     @Param('chaveIdPublico') chaveIdPublico: string,
     @Req() req: Req,
+    @Body() body: unknown,
   ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const chave = await this.prisma.chavePixUsuario.findFirst({
       where: {
         idPublico: chaveIdPublico,
@@ -318,6 +325,7 @@ export class AdminChavesPixController {
   ) {
     const parsed = decidirChavePixSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
 
     const chave = await this.prisma.chavePixUsuario.findUnique({
       where: { idPublico: chaveIdPublico },
@@ -407,9 +415,10 @@ export class AdminChavesPixController {
     const parsed = revogarChavePixSchema.safeParse(body);
     if (!parsed.success) {
       throw new BadRequestException(
-        'Informe a justificativa da revogação (mínimo 5 caracteres).',
+        'Informe a justificativa da revogação (mínimo 5 caracteres) e o codigoTotp.',
       );
     }
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
 
     const chave = await this.prisma.chavePixUsuario.findUnique({
       where: { idPublico: chaveIdPublico },

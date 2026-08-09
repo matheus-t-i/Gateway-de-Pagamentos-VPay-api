@@ -61,7 +61,9 @@ async function bootstrap() {
     origin: process.env.WEB_URL ?? 'http://localhost:3000',
     credentials: true,
   });
-  app.setGlobalPrefix('api', { exclude: ['health', 'admin/queues', 'admin/queues/(.*)'] });
+  app.setGlobalPrefix('api', {
+    exclude: ['health', 'health/(.*)', 'admin/queues', 'admin/queues/(.*)'],
+  });
 
   // SIGTERM do Render precisa fechar Prisma e Workers BullMQ; sem isto jobs em
   // voo morrem no meio a cada deploy.

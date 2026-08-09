@@ -23,6 +23,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
 import { abrirArquivo, salvarArquivo } from '../common/storage.util';
+import { assertStepUpTotp } from '../common/step-up-totp';
 import { mapDocumentoAdmin, reavaliarSituacoes } from './onboarding.util';
 
 type AdminReq = { user: { id: string } };
@@ -58,10 +59,11 @@ export class AdminDocumentosController {
   @RequerPermissao(PERMISSOES.ADMIN_APROVACOES_APROVAR)
   async subirDocUsuario(
     @Param('idPublico') idPublico: string,
-    @Body() body: { tipoDocumento?: string },
+    @Body() body: { tipoDocumento?: string; codigoTotp?: string },
     @Req() req: AdminReq,
     @UploadedFile() arquivo?: Express.Multer.File,
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     if (!arquivo) throw new BadRequestException('Arquivo ausente (campo "arquivo").');
     const tipoDocumento = body.tipoDocumento ?? TIPOS_DOCUMENTO.CONTRATO_PRESTACAO_SERVICO;
     if (!(Object.values(TIPOS_DOCUMENTO) as string[]).includes(tipoDocumento)) {
@@ -95,7 +97,7 @@ export class AdminDocumentosController {
       where: { id: BigInt(id) },
     });
     if (!doc) throw new NotFoundException('Documento não encontrado');
-    return abrirArquivo(doc.caminhoArquivo);
+    return await abrirArquivo(doc.caminhoArquivo);
   }
 
   @Post('documentos/:id/validar')
@@ -107,6 +109,7 @@ export class AdminDocumentosController {
   ) {
     const parsed = validarDocumentoSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const { situacao, motivo } = parsed.data;
 
     const data = {

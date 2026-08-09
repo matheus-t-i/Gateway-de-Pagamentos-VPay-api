@@ -89,7 +89,13 @@ export class QueuesService {
   }
 
   enqueuePixWebhookReceived(data: PixJobPayload) {
-    return this.pixWebhookReceived.add('process', data, DEFAULT_WEBHOOK_JOB_OPTIONS);
+    const webhookId = data.webhookRecebidoId;
+    return this.addComJobIdEstavel(
+      this.pixWebhookReceived,
+      'process',
+      data,
+      webhookId ? `webhook-in:${webhookId}` : undefined,
+    );
   }
 
   enqueuePixWebhookSend(data: PixJobPayload) {
@@ -97,11 +103,59 @@ export class QueuesService {
   }
 
   enqueuePixWebhookCashout(data: PixJobPayload) {
-    return this.pixWebhookCashout.add('process', data, DEFAULT_WEBHOOK_JOB_OPTIONS);
+    const webhookId = data.webhookRecebidoId;
+    return this.addComJobIdEstavel(
+      this.pixWebhookCashout,
+      'process',
+      data,
+      webhookId ? `webhook-out:${webhookId}` : undefined,
+    );
   }
 
+  /**
+   * Um job por saque. Dois enqueues da mesma `transacaoId` (replay após falha
+   * de Redis, retry do cliente) colapsam no mesmo jobId — sem fila duplicada
+   * alimentando dois workers.
+   */
   enqueuePixCashOut(data: PixJobPayload) {
-    return this.pixCashOut.add('process', data, DEFAULT_WEBHOOK_JOB_OPTIONS);
+    const payload = data.payload as { transacaoId?: string } | undefined;
+    const txId = payload?.transacaoId;
+    return this.addComJobIdEstavel(
+      this.pixCashOut,
+      'process',
+      data,
+      txId ? `saque:${txId}` : undefined,
+    );
+  }
+
+  /**
+   * Enfileira com `jobId` estável. Se o job anterior falhou ou já completou e
+   * ainda está no Redis, remove e recria — senão o dedupe do BullMQ engoliria
+   * o reenfileiramento (webhook gravado sem job, saque debitado sem fila).
+   */
+  private async addComJobIdEstavel(
+    queue: Queue,
+    name: string,
+    data: unknown,
+    jobId: string | undefined,
+  ) {
+    if (!jobId) {
+      return queue.add(name, data, DEFAULT_WEBHOOK_JOB_OPTIONS);
+    }
+    const existente = await queue.getJob(jobId);
+    if (existente) {
+      const state = await existente.getState();
+      if (state === 'completed' || state === 'failed') {
+        await existente.remove();
+      } else {
+        // waiting / active / delayed — já há quem cuide.
+        return existente;
+      }
+    }
+    return queue.add(name, data, {
+      ...DEFAULT_WEBHOOK_JOB_OPTIONS,
+      jobId,
+    });
   }
 
   enqueueOutbox(data: { eventoOutboxId: string; identificadorRastreio: string }) {

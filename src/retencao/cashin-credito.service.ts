@@ -60,7 +60,15 @@ export class CashInCreditoService {
     const valorLiquido = money(tx.valorLiquidacaoEmpresa.toString());
     const valorPrincipal = valorLiquido.minus(valorReserva);
 
-    const entries = [];
+    const entries: {
+      tipoSaldo: 'PENDENTE_LIBERACAO' | 'DISPONIVEL' | 'RESERVADO';
+      tipoMovimento: 'CREDITO';
+      natureza: 'RECEBIMENTO' | 'RESERVA';
+      valor: ReturnType<typeof money>;
+      chaveIdempotencia: string;
+      transacaoId: bigint;
+      descricao: string;
+    }[] = [];
     if (cfg.diasLiberacaoSaldo > 0) {
       entries.push({
         tipoSaldo: 'PENDENTE_LIBERACAO' as const,
@@ -94,25 +102,52 @@ export class CashInCreditoService {
       });
     }
 
-    const ledgerResult = await this.ledger.aplicarMovimentacoes({
-      usuarioId: tx.usuarioId,
-      permiteSaldoNegativo: cfg.permiteSaldoNegativo,
-      entries,
-      outbox: {
-        tipoAgregado: 'TRANSACAO',
-        identificadorAgregado: tx.idTransacaoPublico,
-        tipoEvento: EVENTOS_LOJISTA.PIX_CASHIN_PAGO,
-        conteudo: {
-          idTransacao: tx.idTransacaoPublico,
-          situacao: SITUACAO_TRANSACAO.LIQUIDADA,
-          valorBruto: tx.valorBruto.toString(),
-        },
-      },
-    });
-
     const liquidadoEm = input.liquidadoEm ?? tx.liquidadoEm ?? new Date();
+    let outboxId: bigint | undefined;
+    let duplicated = false;
 
+    /**
+     * Um único commit: FOR UPDATE na tx + ledger + CONCLUIDA + outbox.
+     * Antes o ledger commitava sozinho e a situação vinha depois — crash no
+     * meio deixava saldo creditado com painel ainda AGUARDANDO, e retry
+     * gerava segundo outbox.
+     */
     await this.prisma.$transaction(async (db) => {
+      await db.$queryRaw`
+        SELECT id FROM transacoes WHERE id = ${tx.id} FOR UPDATE
+      `;
+      const atual = await db.transacao.findUniqueOrThrow({
+        where: { id: tx.id },
+      });
+      if (
+        (
+          [SITUACAO_TRANSACAO.LIQUIDADA, SITUACAO_TRANSACAO.CONCLUIDA] as string[]
+        ).includes(atual.situacao)
+      ) {
+        duplicated = true;
+        return;
+      }
+
+      const ledgerResult = await this.ledger.aplicarMovimentacoes(
+        {
+          usuarioId: tx.usuarioId,
+          permiteSaldoNegativo: cfg.permiteSaldoNegativo,
+          entries,
+          outbox: {
+            tipoAgregado: 'TRANSACAO',
+            identificadorAgregado: tx.idTransacaoPublico,
+            tipoEvento: EVENTOS_LOJISTA.PIX_CASHIN_PAGO,
+            conteudo: {
+              idTransacao: tx.idTransacaoPublico,
+              situacao: SITUACAO_TRANSACAO.LIQUIDADA,
+              valorBruto: tx.valorBruto.toString(),
+            },
+          },
+        },
+        db,
+      );
+      outboxId = ledgerResult.outboxId;
+
       await db.transacao.update({
         where: { id: tx.id },
         data: {
@@ -130,7 +165,7 @@ export class CashInCreditoService {
       await db.historicoSituacaoTransacao.create({
         data: {
           transacaoId: tx.id,
-          situacaoAnterior: tx.situacao,
+          situacaoAnterior: atual.situacao,
           novaSituacao: SITUACAO_TRANSACAO.CONCLUIDA,
           origem: input.origem,
           motivo: input.motivo,
@@ -147,8 +182,14 @@ export class CashInCreditoService {
         });
       }
       if (cfg.diasLiberacaoSaldo > 0) {
-        await db.liberacaoSaldo.create({
-          data: {
+        await db.liberacaoSaldo.upsert({
+          where: {
+            transacaoId_tipoLiberacao: {
+              transacaoId: tx.id,
+              tipoLiberacao: 'SALDO_PRINCIPAL',
+            },
+          },
+          create: {
             usuarioId: tx.usuarioId,
             transacaoId: tx.id,
             tipoLiberacao: 'SALDO_PRINCIPAL',
@@ -156,11 +197,18 @@ export class CashInCreditoService {
             liberarEm: tx.liberarSaldoEm ?? new Date(),
             situacao: SITUACAO_LIBERACAO.AGENDADA,
           },
+          update: {},
         });
       }
       if (valorReserva.gt(0) && tx.liberarReservaEm) {
-        await db.liberacaoSaldo.create({
-          data: {
+        await db.liberacaoSaldo.upsert({
+          where: {
+            transacaoId_tipoLiberacao: {
+              transacaoId: tx.id,
+              tipoLiberacao: 'RESERVA',
+            },
+          },
+          create: {
             usuarioId: tx.usuarioId,
             transacaoId: tx.id,
             tipoLiberacao: 'RESERVA',
@@ -168,17 +216,22 @@ export class CashInCreditoService {
             liberarEm: tx.liberarReservaEm,
             situacao: SITUACAO_LIBERACAO.AGENDADA,
           },
+          update: {},
         });
       }
     });
+
+    if (duplicated) {
+      return { ok: true as const, duplicated: true as const };
+    }
 
     if (cfg.diasLiberacaoSaldo === 0) {
       await this.bloqueios.capturarSemFalhar(tx.usuarioId, `cashin:${tx.id}`);
     }
 
-    if (ledgerResult.outboxId) {
+    if (outboxId) {
       await this.queues.enqueueOutbox({
-        eventoOutboxId: ledgerResult.outboxId.toString(),
+        eventoOutboxId: outboxId.toString(),
         identificadorRastreio:
           input.identificadorRastreio ?? `cashin-credito:${tx.id}`,
       });

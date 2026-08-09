@@ -180,4 +180,79 @@ describe('LedgerService — saldo negativo', () => {
     ).rejects.toThrow('Saldo disponível insuficiente');
     expect(await saldoDisponivel()).toBe('130.00');
   });
+
+  /**
+   * Dedupe idempotente: a MESMA chave tem que significar a MESMA movimentação.
+   *
+   * Toda chave de dinheiro deriva de id NOSSO (`saque:hold:<idTransacaoPrivado>`,
+   * `saque:estorno:<txId>`, `cashin:*:<txId>`), então uma chave reaproveitada
+   * com valor diferente significa bug ou corrupção — nunca fluxo normal. Vale
+   * como invariante de defesa: recusa e deixa para reconciliação humana, em vez
+   * de devolver a movimentação antiga e deixar o débito descasado.
+   */
+  it('reusar a chave com o MESMO valor é idempotente (não debita de novo)', async () => {
+    const c = chave('idem-igual');
+    const antes = await saldoDisponivel();
+    await ledger.aplicarMovimentacoes({
+      usuarioId,
+      entries: [
+        {
+          tipoSaldo: 'DISPONIVEL',
+          tipoMovimento: 'CREDITO',
+          natureza: 'RECEBIMENTO',
+          valor: money('10.00'),
+          chaveIdempotencia: c,
+        },
+      ],
+    });
+    const depoisPrimeira = await saldoDisponivel();
+    // Segunda chamada, MESMA chave, MESMO valor: não credita de novo.
+    await ledger.aplicarMovimentacoes({
+      usuarioId,
+      entries: [
+        {
+          tipoSaldo: 'DISPONIVEL',
+          tipoMovimento: 'CREDITO',
+          natureza: 'RECEBIMENTO',
+          valor: money('10.00'),
+          chaveIdempotencia: c,
+        },
+      ],
+    });
+    expect(money(antes).plus(money('10.00')).toFixed(2)).toBe(depoisPrimeira);
+    expect(await saldoDisponivel()).toBe(depoisPrimeira);
+  });
+
+  it('reusar a chave com OUTRO valor é recusado (fecha o vazamento do saque)', async () => {
+    const c = chave('idem-divergente');
+    await ledger.aplicarMovimentacoes({
+      usuarioId,
+      entries: [
+        {
+          tipoSaldo: 'DISPONIVEL',
+          tipoMovimento: 'CREDITO',
+          natureza: 'RECEBIMENTO',
+          valor: money('10.00'),
+          chaveIdempotencia: c,
+        },
+      ],
+    });
+    const saldo = await saldoDisponivel();
+    await expect(
+      ledger.aplicarMovimentacoes({
+        usuarioId,
+        entries: [
+          {
+            tipoSaldo: 'DISPONIVEL',
+            tipoMovimento: 'CREDITO',
+            natureza: 'RECEBIMENTO',
+            valor: money('999.00'),
+            chaveIdempotencia: c,
+          },
+        ],
+      }),
+    ).rejects.toThrow('já usada com outro');
+    // Nada mudou: a divergência falha fechada.
+    expect(await saldoDisponivel()).toBe(saldo);
+  });
 });

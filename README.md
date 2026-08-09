@@ -117,7 +117,7 @@ Validadas no boot por `src/common/env.validation.ts` (fail-fast). Em produção,
 | Diretório | Papel |
 |---|---|
 | `auth/` | Login/cadastro, `JwtAuthGuard` + RBAC (`@RequerPermissao`), reset de senha, TOTP, administração de usuários |
-| `api-credentials/` | API pública: guard `x-api-key`/`x-api-secret`, escopos, allowlist de IP, idempotência, rate limit por credencial |
+| `api-credentials/` | API pública: emissão de token Bearer (`POST /v1/auth/token` com `x-api-key`/`x-api-secret`), guard Bearer com revalidação no banco, escopos, allowlist de IP, idempotência, rate limit por credencial |
 | `onboarding/` | Cadastro sem JWT (reverifica e-mail+senha via argon2 a cada request) + revisão admin de documentos |
 | `pix/` | Cobrança/saque/consulta (API pública `v1/pix` e painel) e chaves PIX |
 | `ledger/` | Ledger de saldo (`SELECT FOR UPDATE`), configuração PIX efetiva do cliente, carteiras admin |
@@ -149,12 +149,13 @@ Tudo sob o prefixo **`/api`**, exceto `GET /health` e `/admin/queues` (Bull Boar
 | `POST /auth/totp/iniciar` · `/confirmar` · `/desabilitar` | 2FA TOTP (QR Code; desabilitar exige senha) |
 | `POST /onboarding/status` · `/documentos` | Sem JWT; reautentica e-mail+senha a cada request; upload multipart até 10 MB (PDF/JPG/PNG), cota de 30 docs/conta |
 
-### API pública do lojista (`x-api-key` + `x-api-secret`)
+### API pública do lojista (token Bearer)
 
-Idempotência via header `Idempotency-Key` (resposta guardada por 24 h); rate limit por credencial; allowlist de IP quando cadastrada.
+`POST /v1/auth/token` troca `x-api-key` + `x-api-secret` por um `access_token` Bearer (TTL `API_TOKEN_TTL_SEGUNDOS`, padrão 1 h); as rotas de negócio aceitam só o Bearer e revalidam a credencial no banco a cada request (revogação imediata). Idempotência por `referenciaExterna`: repetir a mesma referência com os mesmos dados devolve a mesma transação (sem novo PIX/débito); cobrança com dados diferentes gera cobrança NOVA (nunca 409); saque com dados diferentes → 409. Rate limit por credencial; allowlist de IP quando cadastrada.
 
 | Rota | Escopo | Descrição |
 |---|---|---|
+| `POST /v1/auth/token` | — | Emite o token de acesso a partir do par de credenciais (único lugar que aceita o par) |
 | `POST /v1/pix/cobrancas` | `pix.cobranca.criar` | Cobrança PIX copia-e-cola. Exige `itens` (≥1) com `titulo`/`quantidade`/`valorUnitario`/`tangivel`; item tangível torna `pagador.endereco` obrigatório; o `valor` não precisa bater com a soma dos itens (frete/desconto ficam fora) |
 | `POST /v1/pix/saques` | `pix.saque.criar` | Saque PIX — exige o escopo **e** allowlist de IP configurada na credencial |
 | `GET /v1/pix/transacoes/:id` | `transacoes.ler` | Detalhe da transação da própria conta |

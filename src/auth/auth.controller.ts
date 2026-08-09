@@ -29,6 +29,7 @@ import { permissoesEfetivas } from './permissoes.util';
 import { validarTotp } from './totp.controller';
 import { montarStatusOnboarding } from '../onboarding/onboarding.util';
 import { Throttle } from '../common/ip-throttle.guard';
+import { assertStepUpTotp } from '../common/step-up-totp';
 
 /** Janela deslizante do lockout de login (expira sozinha). */
 const JANELA_LOCKOUT_MS = 15 * 60 * 1000;
@@ -360,6 +361,7 @@ export class AuthController {
     };
   }
 
+  /** Conta própria — sem `@RequerPermissao` de propósito. */
   @Get('me')
   @UseGuards(JwtAuthGuard)
   async me(@Req() req: { user: UsuarioAutenticado }) {
@@ -397,6 +399,10 @@ export class AuthController {
     };
   }
 
+  /**
+   * Conta própria — sem `@RequerPermissao` de propósito (igual `/auth/me` e
+   * `/auth/totp`). Step-up TOTP obrigatório para persistir alteração.
+   */
   @Patch('me')
   @UseGuards(JwtAuthGuard)
   async atualizarPerfil(@Req() req: { user: { id: string } }, @Body() body: unknown) {
@@ -404,6 +410,7 @@ export class AuthController {
     if (!parsed.success) {
       throw new BadRequestException(parsed.error.flatten());
     }
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const usuario = await this.prisma.usuario.update({
       where: { id: BigInt(req.user.id) },
       data: {

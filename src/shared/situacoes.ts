@@ -157,8 +157,17 @@ export const SITUACAO_ENVIO_INTEGRACAO = {
 export type SituacaoEnvioIntegracaoValor =
   (typeof SITUACAO_ENVIO_INTEGRACAO)[keyof typeof SITUACAO_ENVIO_INTEGRACAO];
 
-/** tentativas_transacoes.situacao — VarChar; vocabulário oficial. */
+/**
+ * tentativas_transacoes.situacao — VarChar; vocabulário oficial.
+ *
+ * `ENVIANDO` é a trava anti-pagamento-duplo do saque: a linha nasce ANTES do
+ * POST à liquidante. Se a resposta nunca chega (timeout, 5xx, worker morto), a
+ * tentativa fica nesse estado e o reprocessamento encontra "já tem ordem em
+ * voo" — sem ela, o retry mandaria um segundo PIX com a liquidante já tendo
+ * aceitado o primeiro. Só sai daqui para SUCESSO ou FALHA, com resposta na mão.
+ */
 export const SITUACAO_TENTATIVA = {
+  ENVIANDO: 'ENVIANDO',
   SUCESSO: 'SUCESSO',
   FALHA: 'FALHA',
 } as const;

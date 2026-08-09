@@ -39,7 +39,8 @@ controller/service/processor — usar `SITUACAO_TRANSACAO`, `OPERACAO_CALLBACK`,
 2. **Conjunto por direção, sem exceção:**
    - Cash-in: `AGUARDANDO_PAGAMENTO`, `CONCLUIDA`, `FALHA`, `MED`.
      Não existe `PENDENTE`, `PROCESSANDO` nem `CANCELADA` em cash-in.
-   - Cash-out: `PROCESSANDO`, `CONCLUIDA`, `FALHA`, `CANCELADA`.
+   - Cash-out: `PROCESSANDO`, `CONCLUIDA`, `FALHA`. (`CANCELADA` foi removida:
+     nenhum fluxo cancela saque, e status sem emissor faz o lojista escrever `if` morto.)
 3. **Renomear é decisão do dono do produto, nunca iniciativa da IA.** Em
    pré-produção o rename é livre desde que feito por inteiro (enum + migration +
    espelho + doc + regras) e nunca sugerido pela IA por conta própria. Depois do

@@ -13,6 +13,7 @@ const SEGREDOS_PROIBIDOS = new Set([
   '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
   'mock-webhook-x-key-dev',
   'Admin@123456',
+  'troque_por_32_bytes_hex_aleatorios',
 ]);
 
 export function validarAmbiente(env: Record<string, string | undefined>) {
@@ -30,7 +31,14 @@ export function validarAmbiente(env: Record<string, string | undefined>) {
 
   if (producao) {
     // Segredos de exemplo derrubam o boot.
-    for (const nome of ['JWT_SECRET', 'ENCRYPTION_KEY', 'MOCK_PROVIDER_WEBHOOK_KEY', 'ADMIN_PASSWORD']) {
+    for (const nome of [
+      'JWT_SECRET',
+      'ENCRYPTION_KEY',
+      'MOCK_PROVIDER_WEBHOOK_KEY',
+      'ADMIN_PASSWORD',
+      'API_SECRET_PEPPER',
+      'VALORION_WEBHOOK_TOKEN',
+    ]) {
       const valor = env[nome];
       if (valor && SEGREDOS_PROIBIDOS.has(valor)) {
         erros.push(`${nome} está com o valor de exemplo — gere um segredo próprio.`);
@@ -52,6 +60,27 @@ export function validarAmbiente(env: Record<string, string | undefined>) {
     if (!env.STORAGE_DRIVER || env.STORAGE_DRIVER === 'local') {
       erros.push(
         'STORAGE_DRIVER=local em produção: documentos de KYC seriam perdidos em disco efêmero. Configure o bucket.',
+      );
+    }
+    if (env.STORAGE_DRIVER === 's3') {
+      if (!env.S3_BUCKET) erros.push('S3_BUCKET é obrigatória com STORAGE_DRIVER=s3.');
+      if (!env.S3_REGION && !env.AWS_REGION) {
+        erros.push('S3_REGION (ou AWS_REGION) é obrigatória com STORAGE_DRIVER=s3.');
+      }
+    }
+    if (!env.API_SECRET_PEPPER || env.API_SECRET_PEPPER.trim().length < 32) {
+      erros.push(
+        'API_SECRET_PEPPER é obrigatória em produção (≥32 caracteres). Sem ela as credenciais de API não têm pepper.',
+      );
+    }
+    if (!env.VALORION_WEBHOOK_TOKEN || env.VALORION_WEBHOOK_TOKEN.trim().length < 16) {
+      erros.push(
+        'VALORION_WEBHOOK_TOKEN é obrigatória em produção (≥16 caracteres). Sem ela a Camada 2 do webhook fica desligada.',
+      );
+    }
+    if (!env.API_PUBLIC_URL) {
+      erros.push(
+        'API_PUBLIC_URL é obrigatória em produção (monta o postbackUrl enviado à liquidante).',
       );
     }
   }

@@ -112,6 +112,10 @@ enum NaturezaMovimentacao {
   BLOQUEIO_MANUAL
   DESBLOQUEIO_MANUAL
   DEBITO_MANUAL
+  /// Devolução do valor + tarifa de um saque que a liquidante RECUSOU.
+  /// Só para recusa confirmada — resposta ambígua não estorna, porque o
+  /// dinheiro pode ter saído.
+  ESTORNO_SAQUE
   AJUSTE
 }
 
@@ -473,6 +477,15 @@ model CredencialApi {
   nome               String    @db.VarChar(100)
   chavePublica       String    @unique @map("chave_publica") @db.VarChar(150)
   segredoHash        String    @map("segredo_hash") @db.VarChar(255)
+  /// Segredo ANTERIOR, aceito em paralelo durante a janela de rotação.
+  ///
+  /// É o que permite girar a chave em produção sem downtime: o lojista recebe o
+  /// novo, atualiza a frota no ritmo dele e o antigo continua valendo até
+  /// `segredoAnteriorExpiraEm`. Sem isso, "rotacionar" seria revogar e correr
+  /// para trocar antes que as vendas comecem a falhar — e é justamente por não
+  /// existir que um segredo vazado tinha vida útil infinita.
+  segredoHashAnterior      String?   @map("segredo_hash_anterior") @db.VarChar(255)
+  segredoAnteriorExpiraEm  DateTime? @map("segredo_anterior_expira_em") @db.Timestamptz
   escopos            Json      @default("[]")
   ativo              Boolean   @default(true)
   expiraEm           DateTime? @map("expira_em") @db.Timestamptz
@@ -864,7 +877,20 @@ model Transacao {
   falhasAdquirente                    FalhaAdquirente[]
   enviosIntegracao                    EnvioIntegracao[]
 
-  @@unique([usuarioId, referenciaExterna])
+  // NÃO é unique para CASH-IN: `referenciaExterna` é etiqueta do lojista. O
+  // mesmo pedido pode legitimamente gerar mais de uma cobrança (carrinho
+  // mudou, cobrança expirou, adquirentes falharam) — cobrança nunca responde
+  // 409 por causa da referência. A idempotência (mesma referência + mesmos
+  // dados devolve a mesma transação) é resolvida no PixService, pela ÚLTIMA
+  // transação da referência.
+  //
+  // ⚠️ Para SAIDA existe um índice UNIQUE PARCIAL que o Prisma não consegue
+  // declarar aqui (`transacoes_saque_referencia_key`, migration
+  // 20260808140000_saque_referencia_unica): uma referência = no máximo um
+  // saque por conta. É ele que barra a corrida de dois saques idênticos no
+  // mesmo instante — o pre-check do serviço é read-then-write e perde. NÃO
+  // remover ao rodar `prisma migrate dev`.
+  @@index([usuarioId, referenciaExterna])
   @@index([usuarioId])
   @@index([situacao])
   @@index([criadoEm])
@@ -950,6 +976,8 @@ model TentativaTransacao {
 
   @@unique([transacaoId, numeroTentativa])
   @@index([idTransacaoLiquidante])
+  // Índice parcial UNIQUE (transacao_id) WHERE situacao IN (ENVIANDO, SUCESSO):
+  // migration 20260809180000_tentativa_saque_unica_ativa — anti double-pay.
   @@map("tentativas_transacoes")
 }
 
@@ -1007,6 +1035,8 @@ model DevolucaoPix {
   casoMed                       CasoMed?  @relation(fields: [casoMedId], references: [id])
   movimentacoes                 MovimentacaoSaldo[]
 
+  // Unique parcial (caso_med_id) WHERE NOT NULL:
+  // migration 20260809200000_devolucao_med_unica — anti dupla devolução.
   @@map("devolucoes_pix")
 }
 
@@ -1316,7 +1346,7 @@ model EnvioIntegracao {
   id              BigInt    @id @default(autoincrement())
   integracaoId    BigInt    @map("integracao_id")
   transacaoId     BigInt    @map("transacao_id")
-  /// `status` enviado ao app (`STATUS_UTMIFY`): waiting_payment | paid | refunded.
+  /// `status` enviado ao app (`STATUS_REMOTO_PEDIDO`): waiting_payment | paid | refunded.
   statusRemoto    String    @map("status_remoto") @db.VarChar(30)
   situacao        String    @default("PENDENTE") @db.VarChar(20)
   numeroTentativa Int       @default(0) @map("numero_tentativa")

@@ -10,11 +10,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
-  ApiKeyGuard,
+  ApiTokenGuard,
   assertEscopo,
   assertSaqueViaApiPermitido,
-  IdempotencyInterceptor,
-} from '../api-credentials/api-key.guard';
+} from '../api-credentials/api-token.guard';
 import { RateLimitService } from '../api-credentials/rate-limit.service';
 import {
   JwtAuthGuard,
@@ -34,6 +33,10 @@ import {
   SITUACAO_CHAVE_PIX,
   SITUACAO_USUARIO,
 } from '../shared';
+import {
+  assertStepUpFromBody,
+  assertStepUpTotp,
+} from '../common/step-up-totp';
 import { PixService } from './pix.service';
 
 type ApiCredReq = {
@@ -51,49 +54,34 @@ type ApiCredReq = {
 export class PixApiController {
   constructor(
     private readonly pix: PixService,
-    private readonly idem: IdempotencyInterceptor,
     private readonly rateLimit: RateLimitService,
   ) {}
 
+  /**
+   * Idempotência é por `referenciaExterna`, DENTRO do serviço: repetir a mesma
+   * referência com os mesmos dados devolve a mesma transação. Não existe mais
+   * header `idempotency-key` — a proteção contra retentativa duplicada não
+   * pode depender de o lojista lembrar de um header opcional.
+   */
   @Post('cobrancas')
-  @UseGuards(ApiKeyGuard)
+  @UseGuards(ApiTokenGuard)
   async criarCobranca(@Req() req: ApiCredReq, @Body() body: unknown) {
     assertEscopo(req.apiCredential, ESCOPOS_API.PIX_COBRANCA_CRIAR);
     await this.rateLimit.enforceCredential(req.apiCredential.id, req.ip ?? '');
     const parsed = criarCobrancaPixSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
 
-    const usuarioId = BigInt(req.apiCredential.usuarioId);
-    const chave = req.headers['idempotency-key'] || req.headers['x-idempotency-key'];
-    if (chave) {
-      const existing = await this.idem.getExisting(usuarioId, chave);
-      if (existing?.corpoResposta) {
-        return existing.corpoResposta;
-      }
-    }
-
     const { idInterno, ...resposta } = await this.pix.criarCobranca({
-      usuarioId,
+      usuarioId: BigInt(req.apiCredential.usuarioId),
       credencialApiId: BigInt(req.apiCredential.id),
       input: parsed.data,
     });
-
-    if (chave) {
-      await this.idem.save({
-        usuarioId,
-        credencialApiId: BigInt(req.apiCredential.id),
-        chave,
-        hash: this.idem.hashBody(body),
-        transacaoId: BigInt(idInterno),
-        status: 201,
-        corpo: resposta,
-      });
-    }
+    void idInterno;
     return resposta;
   }
 
   @Post('saques')
-  @UseGuards(ApiKeyGuard)
+  @UseGuards(ApiTokenGuard)
   async criarSaque(@Req() req: ApiCredReq, @Body() body: unknown) {
     // Regra de negócio: saque via API exige escopo + IP liberado na credencial.
     assertSaqueViaApiPermitido(req.apiCredential);
@@ -101,35 +89,17 @@ export class PixApiController {
     const parsed = criarSaquePixSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
 
-    const usuarioId = BigInt(req.apiCredential.usuarioId);
-    const chave = req.headers['idempotency-key'] || req.headers['x-idempotency-key'];
-    if (chave) {
-      const existing = await this.idem.getExisting(usuarioId, chave);
-      if (existing?.corpoResposta) return existing.corpoResposta;
-    }
-
     const { idInterno, ...resposta } = await this.pix.criarSaque({
-      usuarioId,
+      usuarioId: BigInt(req.apiCredential.usuarioId),
       credencialApiId: BigInt(req.apiCredential.id),
       input: parsed.data,
     });
-
-    if (chave) {
-      await this.idem.save({
-        usuarioId,
-        credencialApiId: BigInt(req.apiCredential.id),
-        chave,
-        hash: this.idem.hashBody(body),
-        transacaoId: BigInt(idInterno),
-        status: 201,
-        corpo: resposta,
-      });
-    }
+    void idInterno;
     return resposta;
   }
 
   @Get('transacoes/:idTransacao')
-  @UseGuards(ApiKeyGuard)
+  @UseGuards(ApiTokenGuard)
   async detalheApi(
     @Param('idTransacao') idTransacao: string,
     @Req() req: ApiCredReq,
@@ -211,12 +181,14 @@ export class PixPainelController {
   ) {
     const parsed = depositoPainelSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const usuario = await this.contaAtiva(req.user);
+    const { codigoTotp: _c, ...dados } = parsed.data;
 
     const { idInterno, ...resposta } = await this.pix.criarCobranca({
       usuarioId: usuario.id,
       input: {
-        ...parsed.data,
+        ...dados,
         // Quem deposita é o próprio titular — liquidantes reais (ex.:
         // Valorion) exigem nome/e-mail/CPF do pagador; para PJ vai o CPF do
         // responsável, já que CNPJ não é aceito como documento do pagador.
@@ -244,6 +216,7 @@ export class PixPainelController {
   ) {
     const parsed = saquePainelSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const usuario = await this.contaAtiva(req.user);
 
     const chave = await this.prisma.chavePixUsuario.findUnique({
@@ -294,7 +267,9 @@ export class PixPainelController {
   async reenviarWebhook(
     @Param('idPublico') idPublico: string,
     @Req() req: { user: UsuarioAutenticado; ip?: string },
+    @Body() body: unknown,
   ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     return this.reenvioWebhook.solicitar({
       idTransacaoPublico: idPublico,
       usuarioIdRestricao: BigInt(req.user.id),

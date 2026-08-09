@@ -26,6 +26,10 @@ import {
 import { RequerPermissao } from '../auth/permissoes.decorator';
 import { QueuesService } from '../queues/queues.service';
 import { getRastreio } from '../common/request-context';
+import {
+  assertStepUpFromBody,
+  assertStepUpTotp,
+} from '../common/step-up-totp';
 import { TesourariaService } from './tesouraria.service';
 
 type UsuarioReq = { user: UsuarioAutenticado; ip?: string };
@@ -45,6 +49,7 @@ type GatilhoBody = {
   nomeTitular?: string;
   documentoTitular?: string;
   intervaloMinimoMinutos?: number | string;
+  codigoTotp?: string;
 };
 
 @Controller('admin/tesouraria')
@@ -99,7 +104,11 @@ export class AdminTesourariaController {
 
   @Post('saldos/atualizar')
   @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_EXECUTAR)
-  async atualizarSaldos() {
+  async atualizarSaldos(
+    @Req() req: UsuarioReq,
+    @Body() body: unknown,
+  ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const contas = await this.tesouraria.atualizarTodosSaldos();
     return { ok: true, contas };
   }
@@ -167,6 +176,7 @@ export class AdminTesourariaController {
   @Post('gatilhos')
   @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_EDITAR)
   async criarGatilho(@Body() body: GatilhoBody, @Req() req: UsuarioReq) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const dados = await this.validarGatilho(body, { exigirConta: true });
     const criado = await this.prisma.gatilhoSaqueAdquirente.create({
       data: {
@@ -187,6 +197,7 @@ export class AdminTesourariaController {
     @Body() body: GatilhoBody,
     @Req() req: UsuarioReq,
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const antes = await this.prisma.gatilhoSaqueAdquirente.findUnique({
       where: { idPublico: id },
     });
@@ -220,7 +231,12 @@ export class AdminTesourariaController {
    */
   @Post('gatilhos/:id/executar')
   @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_EXECUTAR)
-  async executarGatilho(@Param('id') id: string, @Req() req: UsuarioReq) {
+  async executarGatilho(
+    @Param('id') id: string,
+    @Req() req: UsuarioReq,
+    @Body() body: unknown,
+  ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const gatilho = await this.prisma.gatilhoSaqueAdquirente.findUnique({
       where: { idPublico: id },
     });

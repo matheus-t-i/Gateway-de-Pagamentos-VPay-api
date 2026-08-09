@@ -4,13 +4,15 @@ import {
   Controller,
   Get,
   Put,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { z } from 'zod';
 import { money, PERMISSOES } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { JwtAuthGuard, type UsuarioAutenticado } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
+import { assertStepUpTotp } from '../common/step-up-totp';
 
 const putSchema = z.object({
   ativo: z.boolean(),
@@ -19,6 +21,7 @@ const putSchema = z.object({
   toleranciaValor: z.number().finite().nonnegative(),
   contencaoAtiva: z.boolean(),
   percentualContencaoDia: z.number().finite().min(0).max(100),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 @Controller('admin/med-automatico')
@@ -45,11 +48,15 @@ export class AdminMedAutomaticoController {
 
   @Put()
   @RequerPermissao(PERMISSOES.ADMIN_MED_AUTOMATICO_EDITAR)
-  async salvar(@Body() body: unknown) {
+  async salvar(
+    @Body() body: unknown,
+    @Req() req: { user: UsuarioAutenticado },
+  ) {
     const parsed = putSchema.safeParse(body);
     if (!parsed.success) {
       throw new BadRequestException(parsed.error.flatten());
     }
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const d = parsed.data;
     if (d.offsetMin > d.offsetMax) {
       throw new BadRequestException('offsetMin não pode ser maior que offsetMax');

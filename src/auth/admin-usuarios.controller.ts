@@ -35,6 +35,13 @@ import { QueuesService } from '../queues/queues.service';
 import { documentosFaltantes } from '../onboarding/onboarding.util';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { RequerPermissao } from './permissoes.decorator';
+import {
+  assertStepUpFromBody,
+  assertStepUpTotp,
+  stepUpBodySchema,
+} from '../common/step-up-totp';
+
+const stepUpSchema = stepUpBodySchema;
 
 @Controller('admin/usuarios')
 @UseGuards(JwtAuthGuard)
@@ -161,6 +168,7 @@ export class AdminUsuariosController {
     @Body() body: Record<string, string>,
     @Req() req: { user: { id: string }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
       where: { padraoSistema: true },
     });
@@ -357,9 +365,10 @@ export class AdminUsuariosController {
   @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
   async mudarSituacao(
     @Param('idPublico') idPublico: string,
-    @Body() body: { situacao?: string },
+    @Body() body: { situacao?: string; codigoTotp?: string },
     @Req() req: { user: { id: string }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const permitidas: string[] = [
       SITUACAO_USUARIO.ATIVO,
       SITUACAO_USUARIO.SUSPENSO,
@@ -468,6 +477,7 @@ export class AdminUsuariosController {
     @Body() body: Record<string, string>,
     @Req() req: { user: { id: string }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const u = await this.prisma.usuario.findUnique({ where: { idPublico } });
     if (!u) throw new BadRequestException('Usuário não encontrado');
     const cfg = await this.prisma.configuracaoPixUsuario.findUnique({
@@ -602,8 +612,13 @@ export class AdminUsuariosController {
   @RequerPermissao(PERMISSOES.ADMIN_APROVACOES_APROVAR)
   async ativar(
     @Param('idPublico') idPublico: string,
+    @Body() body: unknown,
     @Req() req: { user: { id: string } },
   ) {
+    const step = stepUpSchema.safeParse(body ?? {});
+    if (!step.success) throw new BadRequestException(step.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, step.data.codigoTotp);
+
     const usuario = await this.prisma.usuario.findUnique({
       where: { idPublico },
       include: { documentos: true },
@@ -757,6 +772,7 @@ export class AdminUsuariosController {
   ) {
     const parsed = reprovarCadastroSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
 
     const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
     if (!usuario) throw new BadRequestException('Usuário não encontrado');
@@ -831,9 +847,10 @@ export class AdminUsuariosController {
   @RequerPermissao(PERMISSOES.ADMIN_PERFIS_EDITAR)
   async definirPerfis(
     @Param('idPublico') idPublico: string,
-    @Body() body: { perfis?: string[] },
+    @Body() body: { perfis?: string[]; codigoTotp?: string },
     @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const nomes = Array.from(new Set(body?.perfis ?? []));
     if (!Array.isArray(body?.perfis)) {
       throw new BadRequestException('Informe `perfis` (lista de nomes).');
@@ -927,8 +944,13 @@ export class AdminUsuariosController {
   @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
   async resetar2fa(
     @Param('idPublico') idPublico: string,
+    @Body() body: unknown,
     @Req() req: { user: { id: string }; ip?: string },
   ) {
+    const step = stepUpSchema.safeParse(body ?? {});
+    if (!step.success) throw new BadRequestException(step.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, step.data.codigoTotp);
+
     const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
     if (!usuario) throw new NotFoundException('Usuário não encontrado');
     if (!usuario.totpHabilitado) {
@@ -981,8 +1003,13 @@ export class AdminUsuariosController {
   @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
   async resetarSenha(
     @Param('idPublico') idPublico: string,
+    @Body() body: unknown,
     @Req() req: { user: { id: string }; ip?: string },
   ) {
+    const step = stepUpSchema.safeParse(body ?? {});
+    if (!step.success) throw new BadRequestException(step.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, step.data.codigoTotp);
+
     const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
     if (!usuario) throw new NotFoundException('Usuário não encontrado');
 
@@ -1066,9 +1093,10 @@ export class AdminUsuariosController {
   @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
   async adicionarIp(
     @Param('idPublico') idPublico: string,
-    @Body() body: { credencialId?: string; ip?: string },
+    @Body() body: { credencialId?: string; ip?: string; codigoTotp?: string },
     @Req() req: { user: { id: string }; ip?: string },
   ) {
+    await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const { usuario, credencial } = await this.credencialDaConta(
       idPublico,
       body.credencialId,
@@ -1097,7 +1125,9 @@ export class AdminUsuariosController {
     @Param('idPublico') idPublico: string,
     @Param('ipId') ipId: string,
     @Req() req: { user: { id: string }; ip?: string },
+    @Body() body: unknown,
   ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
     if (!usuario) throw new NotFoundException('Usuário não encontrado');
 

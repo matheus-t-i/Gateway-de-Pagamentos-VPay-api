@@ -25,6 +25,10 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
+import {
+  assertStepUpFromBody,
+  assertStepUpTotp,
+} from '../common/step-up-totp';
 
 type AdminReq = {
   user: { id: string; papeis: string[]; permissoes: string[] };
@@ -90,6 +94,7 @@ const criarPerfilSchema = z.object({
   descricao: z.string().trim().max(255).optional(),
   ativo: z.boolean().optional(),
   permissoes: permissoesSchema,
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 const editarPerfilSchema = z.object({
@@ -97,6 +102,7 @@ const editarPerfilSchema = z.object({
   descricao: z.string().trim().max(255).nullable().optional(),
   ativo: z.boolean().optional(),
   permissoes: permissoesSchema.optional(),
+  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 @Controller('admin/perfis')
@@ -184,6 +190,7 @@ export class PerfisController {
   async criar(@Body() body: unknown, @Req() req: AdminReq) {
     const parsed = criarPerfilSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const { nome, descricao, ativo, permissoes } = parsed.data;
 
     assertPodeConceder(req.user, permissoes);
@@ -228,6 +235,7 @@ export class PerfisController {
   ) {
     const parsed = editarPerfilSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const papel = await this.carregar(id);
     const sistema = PERFIS_SISTEMA.includes(papel.nome);
     const dados = parsed.data;
@@ -313,7 +321,12 @@ export class PerfisController {
 
   @Delete(':id')
   @RequerPermissao(PERMISSOES.ADMIN_PERFIS_EXCLUIR)
-  async excluir(@Param('id') id: string, @Req() req: AdminReq) {
+  async excluir(
+    @Param('id') id: string,
+    @Req() req: AdminReq,
+    @Body() body: unknown,
+  ) {
+    await assertStepUpFromBody(this.prisma, req.user.id, body);
     const papel = await this.carregar(id);
     if (PERFIS_SISTEMA.includes(papel.nome)) {
       throw new BadRequestException(

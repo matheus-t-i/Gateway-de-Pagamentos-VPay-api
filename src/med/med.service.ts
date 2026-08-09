@@ -359,94 +359,115 @@ export class MedService {
 
     let devolucaoId: bigint | undefined;
 
-    if (params.decisao === 'ACEITO') {
-      const entries = [];
-      // 1) o que estava bloqueado sai do saldo bloqueado
-      if (bloqueado.gt(0)) {
-        entries.push({
-          tipoSaldo: 'BLOQUEADO_MED' as const,
-          tipoMovimento: 'DEBITO' as const,
-          natureza: 'DEBITO_MED' as const,
-          valor: bloqueado,
-          chaveIdempotencia: `med:aceite:bloq:${caso.id}`,
-          casoMedId: caso.id,
-          transacaoId: caso.transacaoId,
-          descricao: 'MED aceito — devolução ao pagador',
-        });
-      }
-      // 2) a parte não coberta pelo bloqueio sai do disponível
-      const restante = solicitado.minus(bloqueado).minus(jaDebitado);
-      if (restante.gt(0)) {
-        entries.push({
-          tipoSaldo: 'DISPONIVEL' as const,
-          tipoMovimento: 'DEBITO' as const,
-          natureza: 'DEBITO_MED' as const,
-          valor: restante,
-          chaveIdempotencia: `med:aceite:disp:${caso.id}`,
-          casoMedId: caso.id,
-          transacaoId: caso.transacaoId,
-          descricao: 'MED aceito — parcela não bloqueada',
-        });
-      }
-      if (entries.length > 0) {
-        await this.ledger.aplicarMovimentacoes({
-          usuarioId: caso.usuarioId,
-          permiteSaldoNegativo: cfg.permiteSaldoNegativo,
-          entries,
-        });
+    /**
+     * FOR UPDATE + ledger + devolução + situação no mesmo commit.
+     * Sem o lock, dois cliques paralelos passavam o check DECIDIVEIS e
+     * criavam duas `devolucao_pix` (dois PIX de devolução na liquidante).
+     */
+    await this.prisma.$transaction(async (db) => {
+      await db.$queryRaw`
+        SELECT id FROM casos_med WHERE id = ${caso.id} FOR UPDATE
+      `;
+      const atual = await db.casoMed.findUniqueOrThrow({
+        where: { id: caso.id },
+      });
+      if (!DECIDIVEIS.includes(atual.situacao)) {
+        throw new BadRequestException(
+          `Caso já finalizado (situação: ${atual.situacao}).`,
+        );
       }
 
-      const devolucao = await this.prisma.devolucaoPix.create({
-        data: {
-          transacaoId: caso.transacaoId,
-          casoMedId: caso.id,
-          solicitadoPorUsuarioId: params.usuarioAtorId,
-          valor: solicitado.toFixed(2),
-          motivo: params.motivo ?? caso.motivo,
-          situacao: SITUACAO_DEVOLUCAO.PENDENTE,
-        },
-      });
-      devolucaoId = devolucao.id;
-      // Efetivação na liquidante roda no worker (fila 9), com retentativas.
-      await this.queues.enqueueDevolucaoPix({
-        devolucaoId: devolucao.id.toString(),
-        identificadorRastreio: getRastreio(),
-      });
-    } else if (bloqueado.gt(0)) {
-      // RECUSADO: devolve o bloqueio ao disponível.
-      await this.ledger.aplicarMovimentacoes({
-        usuarioId: caso.usuarioId,
-        entries: [
-          {
-            tipoSaldo: 'BLOQUEADO_MED',
-            tipoMovimento: 'DEBITO',
-            natureza: 'DESBLOQUEIO_MED',
-            valor: bloqueado,
-            chaveIdempotencia: `med:recusa:bloq:${caso.id}`,
-            casoMedId: caso.id,
-            transacaoId: caso.transacaoId,
-            descricao: 'MED recusado — desbloqueio',
-          },
-          {
-            tipoSaldo: 'DISPONIVEL',
-            tipoMovimento: 'CREDITO',
-            natureza: 'DESBLOQUEIO_MED',
-            valor: bloqueado,
-            chaveIdempotencia: `med:recusa:disp:${caso.id}`,
-            casoMedId: caso.id,
-            transacaoId: caso.transacaoId,
-            descricao: 'MED recusado — devolução ao disponível',
-          },
-        ],
-      });
-      // O valor voltou ao disponível: bloqueio administrativo ativo captura já.
-      await this.bloqueios.capturarSemFalhar(caso.usuarioId, `medrecusa:${caso.id}`);
-    }
-    // Observação: se o modo era DEBITAR_IMEDIATAMENTE e o MED é recusado, o
-    // valor já saiu; o estorno é decisão comercial e fica registrado no caso.
+      if (params.decisao === 'ACEITO') {
+        const jaDevolucao = await db.devolucaoPix.findFirst({
+          where: { casoMedId: caso.id },
+          select: { id: true },
+        });
+        if (jaDevolucao) {
+          throw new BadRequestException(
+            'Já existe devolução para este caso MED.',
+          );
+        }
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.casoMed.update({
+        const entries = [];
+        if (bloqueado.gt(0)) {
+          entries.push({
+            tipoSaldo: 'BLOQUEADO_MED' as const,
+            tipoMovimento: 'DEBITO' as const,
+            natureza: 'DEBITO_MED' as const,
+            valor: bloqueado,
+            chaveIdempotencia: `med:aceite:bloq:${caso.id}`,
+            casoMedId: caso.id,
+            transacaoId: caso.transacaoId,
+            descricao: 'MED aceito — devolução ao pagador',
+          });
+        }
+        const restante = solicitado.minus(bloqueado).minus(jaDebitado);
+        if (restante.gt(0)) {
+          entries.push({
+            tipoSaldo: 'DISPONIVEL' as const,
+            tipoMovimento: 'DEBITO' as const,
+            natureza: 'DEBITO_MED' as const,
+            valor: restante,
+            chaveIdempotencia: `med:aceite:disp:${caso.id}`,
+            casoMedId: caso.id,
+            transacaoId: caso.transacaoId,
+            descricao: 'MED aceito — parcela não bloqueada',
+          });
+        }
+        if (entries.length > 0) {
+          await this.ledger.aplicarMovimentacoes(
+            {
+              usuarioId: caso.usuarioId,
+              permiteSaldoNegativo: cfg.permiteSaldoNegativo,
+              entries,
+            },
+            db,
+          );
+        }
+
+        const devolucao = await db.devolucaoPix.create({
+          data: {
+            transacaoId: caso.transacaoId,
+            casoMedId: caso.id,
+            solicitadoPorUsuarioId: params.usuarioAtorId,
+            valor: solicitado.toFixed(2),
+            motivo: params.motivo ?? caso.motivo,
+            situacao: SITUACAO_DEVOLUCAO.PENDENTE,
+          },
+        });
+        devolucaoId = devolucao.id;
+      } else if (bloqueado.gt(0)) {
+        await this.ledger.aplicarMovimentacoes(
+          {
+            usuarioId: caso.usuarioId,
+            entries: [
+              {
+                tipoSaldo: 'BLOQUEADO_MED',
+                tipoMovimento: 'DEBITO',
+                natureza: 'DESBLOQUEIO_MED',
+                valor: bloqueado,
+                chaveIdempotencia: `med:recusa:bloq:${caso.id}`,
+                casoMedId: caso.id,
+                transacaoId: caso.transacaoId,
+                descricao: 'MED recusado — desbloqueio',
+              },
+              {
+                tipoSaldo: 'DISPONIVEL',
+                tipoMovimento: 'CREDITO',
+                natureza: 'DESBLOQUEIO_MED',
+                valor: bloqueado,
+                chaveIdempotencia: `med:recusa:disp:${caso.id}`,
+                casoMedId: caso.id,
+                transacaoId: caso.transacaoId,
+                descricao: 'MED recusado — devolução ao disponível',
+              },
+            ],
+          },
+          db,
+        );
+      }
+
+      await db.casoMed.update({
         where: { id: caso.id },
         data: {
           situacao: params.decisao,
@@ -459,14 +480,14 @@ export class MedService {
             : { valorBloqueado: '0' }),
         },
       });
-      await tx.bloqueioSaldo.updateMany({
+      await db.bloqueioSaldo.updateMany({
         where: { casoMedId: caso.id, situacao: SITUACAO_BLOQUEIO.ATIVO },
         data: { situacao: SITUACAO_BLOQUEIO.ENCERRADO, encerradoEm: new Date() },
       });
-      await tx.historicoCasoMed.create({
+      await db.historicoCasoMed.create({
         data: {
           casoMedId: caso.id,
-          situacaoAnterior: caso.situacao,
+          situacaoAnterior: atual.situacao,
           novaSituacao: params.decisao,
           acao: 'DECISAO_MANUAL',
           origem: 'ADMINISTRADOR',
@@ -475,6 +496,18 @@ export class MedService {
         },
       });
     });
+
+    if (params.decisao === 'ACEITO' && devolucaoId) {
+      await this.queues.enqueueDevolucaoPix({
+        devolucaoId: devolucaoId.toString(),
+        identificadorRastreio: getRastreio(),
+      });
+    } else if (params.decisao === 'RECUSADO' && bloqueado.gt(0)) {
+      await this.bloqueios.capturarSemFalhar(
+        caso.usuarioId,
+        `medrecusa:${caso.id}`,
+      );
+    }
 
     await this.queues.enqueueEmail({
       tipo:

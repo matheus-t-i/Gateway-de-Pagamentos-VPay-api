@@ -75,6 +75,11 @@ export class MockWebhookController {
     ip: string,
     kind: 'cashin' | 'cashout' | 'med',
   ) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new UnauthorizedException(
+        'Webhook mock desabilitado em produção',
+      );
+    }
     const provedor = await this.prisma.provedorPagamento.findUnique({
       where: { codigo: 'mock' },
       include: { ipsWebhook: true },
@@ -101,6 +106,27 @@ export class MockWebhookController {
       where: { chaveIdempotencia: chave },
     });
     if (existing) {
+      if (
+        existing.situacao !== SITUACAO_WEBHOOK_RECEBIDO.PROCESSADO &&
+        kind !== 'med'
+      ) {
+        const rastreio = getRastreio();
+        if (kind === 'cashin') {
+          await this.queues.enqueuePixWebhookReceived({
+            provider: 'mock',
+            payload: body,
+            webhookRecebidoId: existing.id.toString(),
+            identificadorRastreio: rastreio,
+          });
+        } else {
+          await this.queues.enqueuePixWebhookCashout({
+            provider: 'mock',
+            payload: body,
+            webhookRecebidoId: existing.id.toString(),
+            identificadorRastreio: rastreio,
+          });
+        }
+      }
       return { ok: true, duplicated: true, id: existing.id.toString() };
     }
 

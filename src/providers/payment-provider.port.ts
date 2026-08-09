@@ -1,5 +1,51 @@
 import { Decimal } from '../shared';
 
+/**
+ * A liquidante RECUSOU a ordem — resposta explícita, não dúvida.
+ *
+ * Existe para separar os dois desfechos ruins de um saque, que exigem
+ * tratamentos opostos:
+ *
+ * - **Recusa** (4xx: chave inexistente no DICT, documento que não bate, dado
+ *   inválido): a ordem NÃO foi aceita, então nada foi pago. É seguro encerrar a
+ *   transação como `FALHA` e avisar o lojista. Retentar só repete o mesmo erro.
+ * - **Ambiguidade** (timeout, 5xx, queda de rede): não sabemos se o dinheiro
+ *   saiu. Aqui o fluxo CONGELA para reconciliação manual — nunca se retenta
+ *   automaticamente, sob risco de pagar duas vezes.
+ *
+ * Só lance isto quando a liquidante disse "não" de forma inequívoca.
+ */
+export class RecusaAdquirenteError extends Error {
+  constructor(
+    message: string,
+    readonly detalhe: { statusHttp?: number; dadosResposta?: unknown } = {},
+  ) {
+    super(message);
+    this.name = 'RecusaAdquirenteError';
+  }
+}
+
+/**
+ * A ordem NÃO chegou a ser transmitida — falhou antes do POST que move dinheiro.
+ *
+ * Casos típicos: autenticação na liquidante (credencial nossa rotacionada),
+ * credencial ausente, erro montando o payload. Nada saiu, então **retentar é
+ * seguro** — e é importante que seja, porque o oposto (congelar) deixaria todos
+ * os saques presos por um problema de configuração nosso.
+ *
+ * É o contraponto do erro AMBÍGUO: se a falha aconteceu depois do POST, não se
+ * sabe se o dinheiro saiu, e aí o fluxo congela em vez de retentar.
+ */
+export class ErroAntesDoEnvioError extends Error {
+  constructor(
+    message: string,
+    readonly causa?: unknown,
+  ) {
+    super(message);
+    this.name = 'ErroAntesDoEnvioError';
+  }
+}
+
 export type CreateChargeInput = {
   valor: Decimal;
   idTransacaoPrivado: string;
@@ -22,6 +68,11 @@ export type CreateChargeInput = {
   }>;
   expiracaoSegundos?: number;
   credenciais: Record<string, unknown>;
+  /**
+   * Abort da contingência: quando o timeout estoura, o fetch em voo é
+   * cancelado para reduzir cobrança fantasma na adquirente A.
+   */
+  signal?: AbortSignal;
 };
 
 export type CreateChargeResult = {
@@ -59,6 +110,8 @@ export type ProviderStatus =
 
 export type GetStatusResult = {
   status: ProviderStatus;
+  /** Valor confirmado na liquidante (quando a API devolve). Camada 1 confere vs valorBruto. */
+  valor?: Decimal;
   endToEndId?: string;
   paidAt?: Date;
   raw: unknown;

@@ -1,10 +1,11 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { decryptCredentials } from '../common/crypto.util';
 import { getRastreio } from '../common/request-context';
 import {
@@ -21,6 +22,7 @@ import { QueuesService } from '../queues/queues.service';
 import {
   CriarCobrancaPixInput,
   CriarSaquePixInput,
+  Decimal,
   EVENTOS_INTEGRACAO,
   ItemCobrancaInput,
   money,
@@ -115,7 +117,129 @@ export class PixService {
       });
     } catch (e) {
       this.log.error(`Falha ao registrar tentativa: ${(e as Error).message}`);
+      // Sucesso na liquidante SEM linha local = webhook órfão (pago sem crédito).
+      // Fail-closed: não devolver QR sem o vínculo.
+      if (
+        p.situacao === SITUACAO_TENTATIVA.SUCESSO ||
+        p.idTransacaoLiquidante
+      ) {
+        throw e;
+      }
     }
+  }
+
+  /**
+   * Última transação da conta com esta `referenciaExterna`, no sentido pedido.
+   *
+   * A referência é ETIQUETA do lojista, não chave única: o mesmo pedido pode
+   * legitimamente gerar mais de uma cobrança (carrinho mudou, QR expirou, as
+   * adquirentes falharam na primeira). A decisão de reaproveitar ou criar é
+   * sempre contra a MAIS RECENTE. Devolve `null` sem referência ou com
+   * referência inédita — o fluxo de criação segue normal.
+   */
+  private async ultimaTransacaoDaReferencia(
+    usuarioId: bigint,
+    referenciaExterna: string | undefined,
+    direcao: 'ENTRADA' | 'SAIDA',
+  ) {
+    if (!referenciaExterna) return null;
+    return this.prisma.transacao.findFirst({
+      where: { usuarioId, referenciaExterna, direcao },
+      orderBy: { id: 'desc' },
+      include: {
+        pix: true,
+        itens: { orderBy: { id: 'asc' } },
+        contaProvedor: { include: { provedor: true } },
+      },
+    });
+  }
+
+  /**
+   * Devolve o saque já existente daquela referência (retentativa) ou 409 se os
+   * dados divergirem. Usado nos DOIS caminhos: o pre-check sequencial e a
+   * perdedora de uma corrida (P2002 da unique parcial de saque).
+   *
+   * Se o débito commitou e o enqueue falhou, o cliente retenta e acharia o
+   * saque em PROCESSANDO para sempre — reenfileira quando não há tentativa
+   * ativa (ENVIANDO/SUCESSO).
+   */
+  private async replayDoSaque(
+    existente: {
+      id: bigint;
+      idTransacaoPublico: string;
+      idTransacaoPrivado: string;
+      situacao: string;
+      valorBruto: Prisma.Decimal;
+      contaProvedorId: bigint | null;
+      contaProvedor?: {
+        id: bigint;
+        provedor: { codigo: string };
+      } | null;
+      pix: {
+        chavePix: string | null;
+        tipoChavePix: string | null;
+        nomeBeneficiario: string | null;
+        documentoBeneficiario: string | null;
+      } | null;
+    },
+    valor: Decimal,
+    input: CriarSaquePixInput,
+  ) {
+    const mesmosDados =
+      money(existente.valorBruto.toString()).eq(valor) &&
+      existente.pix?.chavePix === input.chavePix &&
+      existente.pix?.tipoChavePix === input.tipoChavePix &&
+      existente.pix?.nomeBeneficiario === input.nomeBeneficiario &&
+      existente.pix?.documentoBeneficiario === input.documentoBeneficiario;
+    if (!mesmosDados) {
+      throw new ConflictException(
+        'referenciaExterna já usada num saque com dados diferentes. Uma retentativa ' +
+          'deve repetir exatamente os mesmos dados; para um saque novo, use uma referência nova.',
+      );
+    }
+
+    if (existente.situacao === SITUACAO_TRANSACAO.PROCESSANDO) {
+      const ativa = await this.prisma.tentativaTransacao.findFirst({
+        where: {
+          transacaoId: existente.id,
+          situacao: { not: SITUACAO_TENTATIVA.FALHA },
+        },
+        select: { id: true },
+      });
+      if (!ativa) {
+        const codigo =
+          existente.contaProvedor?.provedor.codigo ??
+          (
+            await this.prisma.contaProvedor.findUnique({
+              where: { id: existente.contaProvedorId! },
+              include: { provedor: true },
+            })
+          )?.provedor.codigo;
+        if (codigo) {
+          await this.queues.enqueuePixCashOut({
+            provider: codigo,
+            contaProvedorId: existente.contaProvedorId?.toString(),
+            payload: {
+              transacaoId: existente.id.toString(),
+              idTransacaoPrivado: existente.idTransacaoPrivado,
+            },
+            identificadorRastreio: getRastreio(),
+          });
+          this.log.warn(
+            `replay saque tx=${existente.id} reenfileirado (PROCESSANDO sem tentativa ativa)`,
+          );
+        }
+      }
+    }
+
+    return {
+      idInterno: existente.id.toString(),
+      idTransacao: existente.idTransacaoPublico,
+      // Situação ATUAL: o replay pode chegar com o saque já CONCLUIDA ou
+      // FALHA (estornado) — repetir PROCESSANDO esconderia o desfecho.
+      situacao: existente.situacao,
+      valor: money(existente.valorBruto.toString()).toFixed(2),
+    };
   }
 
   async criarCobranca(params: {
@@ -135,6 +259,89 @@ export class PixService {
     pularContingencia?: boolean;
   }) {
     const valor = money(params.input.valor);
+
+    /**
+     * Idempotência por `referenciaExterna` — regra do produto: **cobrança
+     * nunca responde 409 por causa da referência**; o checkout sempre termina
+     * com um QR utilizável, senão a venda se perde.
+     *
+     * A MESMA referência com os MESMOS dados devolve a MESMA cobrança (é
+     * retentativa). Qualquer diferença nos dados gera uma cobrança NOVA sob a
+     * mesma referência — o pedido mudou (carrinho editado), e recusar deixaria
+     * o comprador sem QR. Roda ANTES das validações de ticket/adquirente: o
+     * replay não é operação nova e não pode mudar de resultado porque a
+     * configuração da conta mudou no meio tempo.
+     *
+     * O reaproveitamento exige que a cobrança existente ainda SIRVA:
+     * - CONCLUIDA/MED: a venda desta referência já foi paga — devolvê-la com a
+     *   situação atual avisa o lojista, em vez de abrir uma segunda cobrança
+     *   para pedido pago.
+     * - AGUARDANDO_PAGAMENTO com QR dentro da validade: o replay clássico.
+     * FALHA, QR expirado ou cobrança ainda sem código (1ª chamada em voo após
+     * timeout no lojista) seguem para gerar uma cobrança NOVA — era exatamente
+     * a venda que um 409 perderia.
+     */
+    const existente = await this.ultimaTransacaoDaReferencia(
+      params.usuarioId,
+      params.input.referenciaExterna,
+      'ENTRADA',
+    );
+    if (existente) {
+      const itensEnviados = params.input.itens ?? [];
+      const mesmosDados =
+        money(existente.valorBruto.toString()).eq(valor) &&
+        (existente.pix?.nomePagador ?? null) === (params.input.pagador?.nome ?? null) &&
+        (existente.pix?.documentoPagador ?? null) ===
+          (params.input.pagador?.documento ?? null) &&
+        (existente.pix?.emailPagador ?? null) === (params.input.pagador?.email ?? null) &&
+        existente.itens.length === itensEnviados.length &&
+        existente.itens.every((gravado, i) => {
+          const enviado = itensEnviados[i];
+          return (
+            gravado.titulo === enviado.titulo &&
+            gravado.quantidade === enviado.quantidade &&
+            gravado.tangivel === enviado.tangivel &&
+            // `valorUnitario` é gravado com toFixed(2), mas o schema aceita mais
+            // casas — comparar contra o valor cru faria um retry byte-idêntico
+            // de 19.999 (gravado 20.00) parecer "dado diferente" e gerar uma
+            // cobrança nova a cada tentativa. Arredonda o enviado do MESMO jeito
+            // que a criação persiste, senão a idempotência nunca casaria.
+            money(gravado.valorUnitario.toString()).eq(
+              money(String(enviado.valorUnitario)).toDecimalPlaces(2),
+            )
+          );
+        });
+
+      const jaPaga =
+        existente.situacao === SITUACAO_TRANSACAO.CONCLUIDA ||
+        existente.situacao === SITUACAO_TRANSACAO.MED;
+      const qrUtilizavel =
+        !!existente.pix?.pixCopiaCola &&
+        (!existente.pix.expiraEm || existente.pix.expiraEm > new Date());
+      const aguardandoComQr =
+        existente.situacao === SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO && qrUtilizavel;
+
+      if (mesmosDados && (jaPaga || aguardandoComQr)) {
+        return {
+          idInterno: existente.id.toString(),
+          idTransacao: existente.idTransacaoPublico,
+          // Situação ATUAL, não a de criação: o replay pode chegar depois do
+          // pagamento, e responder AGUARDANDO_PAGAMENTO numa venda CONCLUIDA
+          // faria o lojista reexibir um QR já pago.
+          situacao: existente.situacao,
+          valor: money(existente.valorBruto.toString()).toFixed(2),
+          pixCopiaCola: existente.pix!.pixCopiaCola,
+          urlCheckout: existente.pix!.urlCheckout,
+          txid: existente.pix!.txid,
+          expiraEm: existente.pix!.expiraEm,
+        };
+      }
+      // Cai aqui = gera cobrança NOVA com a MESMA referência. O QR anterior
+      // que ainda estiver de pé continua pagável na liquidante (não há cancel
+      // no contrato das adquirentes) — cada cobrança credita só o próprio
+      // pagamento, e o callback distingue pelas `idTransacao`.
+    }
+
     const cfg = await this.configPix.resolverEfetiva(params.usuarioId);
 
     if (valor.lt(cfg.ticketMinimoPixEntrada) || valor.gt(cfg.ticketMaximoPixEntrada)) {
@@ -265,7 +472,7 @@ export class PixService {
       const inicio = Date.now();
       try {
         const provider = this.providers.get(tentativa.conta.provedor.codigo);
-        const charge = await this.contingencia.executarComTimeout(() =>
+        const charge = await this.contingencia.executarComTimeout((signal) =>
           provider.createCharge({
             valor,
             idTransacaoPrivado: tx.idTransacaoPrivado,
@@ -275,6 +482,7 @@ export class PixService {
             itens: params.input.itens,
             expiracaoSegundos: params.input.expiracaoSegundos,
             credenciais: this.credenciaisDa(tentativa.conta),
+            signal,
           }),
         );
         // 200 sem código PIX é falha: o pagador não tem o que copiar.
@@ -286,17 +494,31 @@ export class PixService {
           );
         }
         vencedora = { conta: tentativa.conta, charge, ordem: tentativa.ordem };
-        await this.registrarTentativa({
-          transacaoId: tx.id,
-          contaProvedorId: tentativa.conta.id,
-          numero: tentativa.ordem + 1,
-          situacao: SITUACAO_TENTATIVA.SUCESSO,
-          idTransacaoLiquidante: charge.idTransacaoLiquidante,
-          dadosResposta: charge.raw,
-          latenciaMs: Date.now() - inicio,
-        });
+        try {
+          await this.registrarTentativa({
+            transacaoId: tx.id,
+            contaProvedorId: tentativa.conta.id,
+            numero: tentativa.ordem + 1,
+            situacao: SITUACAO_TENTATIVA.SUCESSO,
+            idTransacaoLiquidante: charge.idTransacaoLiquidante,
+            dadosResposta: charge.raw,
+            latenciaMs: Date.now() - inicio,
+          });
+        } catch (vinculoErro) {
+          // Não seguir a contingência: a adquirente A já tem a cobrança.
+          // Continuar geraria QR de B e deixaria A pagável sem match.
+          this.log.error(
+            `Vínculo local falhou após createCharge (${tentativa.conta.provedor.codigo}): ` +
+              `${(vinculoErro as Error).message}`,
+          );
+          throw new ServiceUnavailableException(
+            'Cobrança criada na liquidante mas o vínculo local falhou. ' +
+              'Tente novamente em instantes; se persistir, contate o suporte.',
+          );
+        }
         break;
       } catch (erro) {
+        if (erro instanceof ServiceUnavailableException) throw erro;
         ultimoErro = erro;
         const latenciaMs = Date.now() - inicio;
         const tipo = ContingenciaService.classificar(erro);
@@ -319,9 +541,25 @@ export class PixService {
           contaProvedorId: tentativa.conta.id,
           numero: tentativa.ordem + 1,
           situacao: SITUACAO_TENTATIVA.FALHA,
-          mensagemErro: (erro as Error).message,
+          // Prefixo TIMEOUT: a conciliação usa isto para alertar OPS de fantasma.
+          mensagemErro:
+            tipo === TIPO_FALHA_ADQUIRENTE.TIMEOUT
+              ? `TIMEOUT: ${(erro as Error).message}`
+              : (erro as Error).message,
           latenciaMs,
         });
+        /**
+         * TIMEOUT: o fetch foi abortado, mas a liquidante pode ter aceitado a
+         * cobrança antes. Seguir a cadeia geraria QR em B com A pagável e
+         * órfão. Para a cadeia e falha a venda — retry do lojista / suporte.
+         */
+        if (tipo === TIPO_FALHA_ADQUIRENTE.TIMEOUT) {
+          this.log.error(
+            `TIMEOUT na adquirente ${tentativa.conta.provedor.codigo} — ` +
+              'cadeia de contingência interrompida (risco de cobrança fantasma)',
+          );
+          break;
+        }
       }
     }
 
@@ -434,6 +672,29 @@ export class PixService {
     input: CriarSaquePixInput;
   }) {
     const valor = money(params.input.valor);
+
+    /**
+     * Detecção de RETENTATIVA — melhor esforço, não é a trava de dinheiro.
+     *
+     * Só o lojista sabe que a segunda chamada é a mesma operação, e a única
+     * coisa que ele nos dá para dizer isso é a `referenciaExterna` (opcional,
+     * por decisão de produto: é o id do sistema DELE). Quando vem, repetir com
+     * os mesmos dados devolve o saque existente sem debitar de novo; divergir
+     * é 409, porque dinheiro SAINDO com a mesma referência e dados diferentes
+     * é quase certo bug do lado dele — criar a segunda ordem é como se paga
+     * duas vezes. Quando NÃO vem, a chamada é tratada como saque novo.
+     *
+     * A integridade do nosso ledger NÃO depende disto: as chaves de
+     * idempotência derivam do `idTransacaoPrivado` (id nosso) e o débito nasce
+     * no mesmo commit da transação — ver `criarSaque` mais abaixo.
+     */
+    const existente = await this.ultimaTransacaoDaReferencia(
+      params.usuarioId,
+      params.input.referenciaExterna,
+      'SAIDA',
+    );
+    if (existente) return await this.replayDoSaque(existente, valor, params.input);
+
     const cfg = await this.configPix.resolverEfetiva(params.usuarioId);
 
     // Origem permitida: quem tem credencial de API veio pela API; sem ela, veio
@@ -494,57 +755,33 @@ export class PixService {
     const totalDebito = valor.plus(valorTarifa);
 
     /**
-     * Saque NUNCA usa saldo negativo, nem em conta que permite ficar negativa.
+     * Transação e débito NASCEM JUNTOS, no mesmo commit.
      *
+     * A chave de idempotência do ledger deriva do `idTransacaoPrivado` — id
+     * gerado por NÓS. Antes ela derivava da `referenciaExterna`, que é o id do
+     * sistema do LOJISTA: a integridade do nosso dinheiro não pode depender de
+     * um dado que chega de fora (e que é opcional — sem ele o código caía num
+     * `randomUUID()` por chamada, ou seja, saque sem idempotência nenhuma).
+     *
+     * Criar a transação primeiro, dentro da MESMA transação de banco, resolve
+     * três coisas de uma vez: a chave passa a ser interna e estável, as
+     * movimentações já nascem com `transacao_id` (o `PixCashOutProcessor`
+     * revalida o débito somando por `transacao_id`, e antes isso dependia de um
+     * `updateMany` posterior) e deixa de existir a janela em que um crash
+     * deixava movimentação órfã com o saldo debitado e nenhuma transação.
+     *
+     * Saldo insuficiente derruba o commit inteiro: nenhuma transação é gravada,
+     * exatamente como antes.
+     *
+     * Saque NUNCA usa saldo negativo, nem em conta que permite ficar negativa.
      * "Conta pode ficar negativa" existe para o dinheiro que a adquirente leva
      * de volta (MED): a dívida é consequência de algo que já aconteceu. Saque é
      * o contrário — é a conta pedindo dinheiro que ela não tem, e quem pagaria
      * seria a VPay, sem nenhuma garantia de reaver. Este débito é a ÚNICA trava
      * de saldo do saque: não existe outra checagem antes daqui.
      */
-    // As duas chaves ficam em variável porque o vínculo com a transação é feito
-    // logo abaixo, por elas — a transação ainda não existe neste ponto.
-    const referenciaDebito = params.input.referenciaExterna ?? randomUUID();
-    const chaveHold = `saque:hold:${params.usuarioId}:${referenciaDebito}`;
-    const chaveTarifa = `saque:tarifa:${params.usuarioId}:${referenciaDebito}`;
-
-    await this.ledger.aplicarMovimentacoes({
-      usuarioId: params.usuarioId,
-      permiteSaldoNegativo: false,
-      entries: [
-        {
-          tipoSaldo: 'DISPONIVEL',
-          tipoMovimento: 'DEBITO',
-          natureza: 'SAIDA',
-          valor,
-          chaveIdempotencia: chaveHold,
-          descricao: 'Reserva de valor para saque PIX',
-        },
-        {
-          tipoSaldo: 'DISPONIVEL',
-          tipoMovimento: 'DEBITO',
-          natureza: 'TARIFA',
-          valor: valorTarifa,
-          chaveIdempotencia: chaveTarifa,
-          descricao: 'Tarifa saque PIX',
-        },
-      ],
-    });
-
-    /**
-     * Transação + vínculo das movimentações no MESMO commit.
-     *
-     * O `PixCashOutProcessor` revalida o débito somando
-     * `movimentacoes_saldo` POR `transacao_id` antes de mandar dinheiro para a
-     * liquidante. As movimentações nascem sem esse vínculo (o débito acontece
-     * antes da transação existir, de propósito), então sem este `updateMany` a
-     * soma dava zero e TODO saque parava na revalidação — com o saldo do
-     * lojista já debitado e a transação presa em `PROCESSANDO`.
-     *
-     * Atômico porque uma falha entre o `create` e o vínculo recriaria
-     * exatamente esse estado.
-     */
-    const tx = await this.prisma.$transaction(async (db) => {
+    const criarComDebito = () =>
+      this.prisma.$transaction(async (db) => {
       const criada = await db.transacao.create({
         data: {
           usuarioId: params.usuarioId,
@@ -573,16 +810,66 @@ export class PixService {
           },
         },
       });
-      await db.movimentacaoSaldo.updateMany({
-        where: {
-          chaveIdempotencia: { in: [chaveHold, chaveTarifa] },
+
+      await this.ledger.aplicarMovimentacoes(
+        {
           usuarioId: params.usuarioId,
-          transacaoId: null,
+          permiteSaldoNegativo: false,
+          entries: [
+            {
+              tipoSaldo: 'DISPONIVEL',
+              tipoMovimento: 'DEBITO',
+              natureza: 'SAIDA',
+              valor,
+              transacaoId: criada.id,
+              chaveIdempotencia: `saque:hold:${criada.idTransacaoPrivado}`,
+              descricao: 'Reserva de valor para saque PIX',
+            },
+            {
+              tipoSaldo: 'DISPONIVEL',
+              tipoMovimento: 'DEBITO',
+              natureza: 'TARIFA',
+              valor: valorTarifa,
+              transacaoId: criada.id,
+              chaveIdempotencia: `saque:tarifa:${criada.idTransacaoPrivado}`,
+              descricao: 'Tarifa saque PIX',
+            },
+          ],
         },
-        data: { transacaoId: criada.id },
-      });
+        db,
+      );
+
       return criada;
-    });
+      });
+
+    /**
+     * A corrida do bot: duas chamadas idênticas no MESMO instante passam as
+     * duas pelo pre-check (read-then-write) e chegam aqui juntas. Quem decide
+     * é a unique parcial `transacoes_saque_referencia_key`: a perdedora leva
+     * P2002 e é tratada como o que ela é — uma retentativa. Relê a vencedora e
+     * devolve o MESMO saque, sem segundo débito e sem segundo PIX.
+     *
+     * Sem isto o teste `saque-concorrencia.spec.ts` mostrava dois saques
+     * criados, saldo debitado duas vezes e os dois indo para a fila.
+     */
+    let tx: Awaited<ReturnType<typeof criarComDebito>>;
+    try {
+      tx = await criarComDebito();
+    } catch (e) {
+      const violouReferencia =
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002' &&
+        params.input.referenciaExterna;
+      if (violouReferencia) {
+        const vencedora = await this.ultimaTransacaoDaReferencia(
+          params.usuarioId,
+          params.input.referenciaExterna,
+          'SAIDA',
+        );
+        if (vencedora) return await this.replayDoSaque(vencedora, valor, params.input);
+      }
+      throw e;
+    }
 
     await this.queues.enqueuePixCashOut({
       provider: conta.provedor.codigo,

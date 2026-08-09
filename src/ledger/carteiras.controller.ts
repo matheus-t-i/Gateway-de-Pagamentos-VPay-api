@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -9,11 +10,19 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { z } from 'zod';
 import { PERMISSOES, SITUACAO_LIBERACAO, SITUACAO_USUARIO } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
 import { BloqueiosSaldoService } from './bloqueios-saldo.service';
+import { assertStepUpTotp } from '../common/step-up-totp';
+
+const stepUpBody = z.object({
+  codigoTotp: z.string().regex(/^\d{6}$/),
+  valor: z.string().optional(),
+  motivo: z.string().optional(),
+});
 
 type ReqAdmin = { user: { id: string }; ip?: string };
 
@@ -225,13 +234,16 @@ export class CarteirasController {
   @RequerPermissao(PERMISSOES.ADMIN_CARTEIRAS_EXECUTAR)
   async bloquear(
     @Param('idPublico') idPublico: string,
-    @Body() body: { valor?: string; motivo?: string },
+    @Body() body: unknown,
     @Req() req: ReqAdmin,
   ) {
+    const parsed = stepUpBody.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     return this.bloqueios.criar({
       usuarioIdPublico: idPublico,
-      valor: String(body.valor ?? ''),
-      motivo: String(body.motivo ?? ''),
+      valor: String(parsed.data.valor ?? ''),
+      motivo: String(parsed.data.motivo ?? ''),
       atorId: BigInt(req.user.id),
       enderecoIp: req.ip,
     });
@@ -241,13 +253,16 @@ export class CarteirasController {
   @RequerPermissao(PERMISSOES.ADMIN_CARTEIRAS_EXECUTAR)
   async liberarBloqueio(
     @Param('idPublico') idPublico: string,
-    @Body() body: { motivo?: string },
+    @Body() body: unknown,
     @Req() req: ReqAdmin,
   ) {
+    const parsed = stepUpBody.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     return this.bloqueios.liberar({
       idPublico,
       atorId: BigInt(req.user.id),
-      motivo: body?.motivo,
+      motivo: parsed.data.motivo,
       enderecoIp: req.ip,
     });
   }
@@ -256,13 +271,16 @@ export class CarteirasController {
   @RequerPermissao(PERMISSOES.ADMIN_CARTEIRAS_EXECUTAR)
   async debitarBloqueio(
     @Param('idPublico') idPublico: string,
-    @Body() body: { motivo?: string },
+    @Body() body: unknown,
     @Req() req: ReqAdmin,
   ) {
+    const parsed = stepUpBody.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     return this.bloqueios.debitar({
       idPublico,
       atorId: BigInt(req.user.id),
-      motivo: String(body?.motivo ?? ''),
+      motivo: String(parsed.data.motivo ?? ''),
       enderecoIp: req.ip,
     });
   }
