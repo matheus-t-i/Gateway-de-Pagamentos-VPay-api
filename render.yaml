@@ -1,0 +1,133 @@
+# Blueprint do Render — API + Worker da MESMA imagem Docker, Postgres e
+# Key Value (Redis) SÓ em rede privada (`ipAllowList: []`).
+#
+# Os segredos ficam com `sync: false`: o Render pede o valor no primeiro
+# deploy e nunca versiona — nada de segredo em YAML. O fail-fast do boot
+# (src/common/env.validation.ts) recusa subir com valor de exemplo/faltando.
+#
+# O painel web NÃO está aqui: é Next.js na Vercel (ver docs/RUNBOOK-GOLIVE.md);
+# defina NEXT_PUBLIC_API_URL no build da Vercel — sem ela o build agora FALHA
+# em vez de publicar um painel apontando para localhost.
+
+services:
+  - type: web
+    name: vpay-api
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health/ready
+    # `migrate deploy` ANTES de trocar a versão no ar, com a CLI pinada da
+    # imagem (não `npx` avulso). Falhou a migração → o deploy não promove.
+    preDeployCommand: node node_modules/prisma/build/index.js migrate deploy
+    dockerCommand: node dist/main.js
+    envVars:
+      - fromGroup: vpay-backend
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vpay-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: vpay-redis
+          property: connectionString
+
+  - type: worker
+    name: vpay-worker
+    runtime: docker
+    plan: starter
+    dockerCommand: node dist/worker.js
+    envVars:
+      - fromGroup: vpay-backend
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vpay-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: vpay-redis
+          property: connectionString
+
+  - type: keyvalue
+    name: vpay-redis
+    plan: starter
+    # Sem IP público: só os serviços do blueprint alcançam o Redis.
+    ipAllowList: []
+    maxmemoryPolicy: noeviction # fila BullMQ nunca pode perder job por evicção
+
+databases:
+  - name: vpay-postgres
+    plan: basic-256mb
+    # Sem IP público: acesso só pela rede privada do Render.
+    ipAllowList: []
+
+envVarGroups:
+  - name: vpay-backend
+    envVars:
+      # ── Fixos de produção (o fail-fast do boot confere todos) ──────────
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "1"
+      - key: STORAGE_DRIVER
+        value: s3
+      # ── URLs públicas ──────────────────────────────────────────────────
+      - key: WEB_URL
+        sync: false # ex.: https://painel.suavpay.com.br (origem do CORS)
+      - key: API_PUBLIC_URL
+        sync: false # ex.: https://api.suavpay.com.br (monta o postbackUrl)
+      # ── Segredos (gerar valores próprios; exemplo derruba o boot) ──────
+      - key: JWT_SECRET
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false # 64 hex (32 bytes)
+      - key: API_SECRET_PEPPER
+        sync: false
+      - key: TURNSTILE_SECRET_KEY
+        sync: false
+      # ── Storage KYC ────────────────────────────────────────────────────
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      # ── Valorion (liquidante) ──────────────────────────────────────────
+      - key: VALORION_WEBHOOK_TOKEN
+        sync: false
+      - key: VALORION_API_KEY
+        sync: false
+      - key: VALORION_PIX_KEY
+        sync: false
+      - key: VALORION_BASIC_KEY
+        sync: false
+      - key: VALORION_SELLER_ID
+        sync: false
+      - key: VALORION_BASE_URL
+        sync: false
+      - key: VALORION_FILA_URL
+        sync: false
+      # Pagador padrão usado quando a cobrança chega sem dados completos.
+      - key: VALORION_PAGADOR_PADRAO_NOME
+        sync: false
+      - key: VALORION_PAGADOR_PADRAO_EMAIL
+        sync: false
+      - key: VALORION_PAGADOR_PADRAO_CPF
+        sync: false
+      - key: VALORION_PAGADOR_PADRAO_IP
+        sync: false
+      # ── E-mail (SMTP) ──────────────────────────────────────────────────
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_SECURE
+        sync: false

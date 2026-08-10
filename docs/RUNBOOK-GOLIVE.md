@@ -6,6 +6,22 @@ ambíguo e cobrança fantasma de cash-in. Complementa o fail-fast de código
 
 ---
 
+## 0. Empacotamento
+
+- **API + Worker (Render):** blueprint `render.yaml` na raiz — dois serviços da
+  MESMA imagem (`Dockerfile`), Postgres e Key Value (Redis) **sem IP público**
+  (`ipAllowList: []`). O `preDeployCommand` roda `prisma migrate deploy` com a
+  CLI pinada da imagem ANTES de promover a versão — migração falhou, deploy não
+  sobe. Health check em `/health/ready`. Segredos entram com `sync: false`
+  (o Render pede no primeiro deploy; nada versionado).
+- **Painel (Vercel):** projeto `Gateway-de-Pagamentos-VPay-web`, sem config
+  extra — mas `NEXT_PUBLIC_API_URL` é OBRIGATÓRIA no ambiente de build: sem
+  ela o `next build` agora **falha de propósito** (antes publicava um painel
+  chamando localhost e o erro só aparecia no browser do cliente).
+- Smoke local da imagem: `docker build -t vpay-api .` na raiz da API.
+
+---
+
 ## 1. Checklist antes de subir produção
 
 1. Backup Postgres recente e janela de restore testada.

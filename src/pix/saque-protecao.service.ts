@@ -49,8 +49,14 @@ export class SaqueProtecaoService {
     usuarioId: bigint;
     valor: Decimal;
     cfg: ConfigPixEfetiva;
-    /** Quando true, não incrementa contador de abuso (só o create conta). */
-    soLeitura?: boolean;
+    /**
+     * Id da transação JÁ CRIADA deste saque (revalidação no worker). Sem isto,
+     * o saque em processamento entra no próprio `aggregate`/`count` e conta
+     * DUAS vezes: qualquer saque acima de metade do limite diário (ou o
+     * N-ésimo com `maxSaquesPorHora = N`) era recusado no worker com o saldo
+     * já debitado. É só filtro de leitura — nenhuma linha é alterada.
+     */
+    ignorarTransacaoId?: bigint;
   }) {
     const cfgLinha = await this.prisma.configuracaoPixUsuario.findUnique({
       where: { usuarioId: params.usuarioId },
@@ -100,6 +106,9 @@ export class SaqueProtecaoService {
           // FALHA também conta: senão o lojista cria/falha em loop para
           // furar o teto. Estorno devolve saldo, não a cota do dia.
           situacao: { not: SITUACAO_TRANSACAO.CANCELADA },
+          ...(params.ignorarTransacaoId
+            ? { id: { not: params.ignorarTransacaoId } }
+            : {}),
         },
         _sum: { valorBruto: true },
       });
@@ -120,6 +129,9 @@ export class SaqueProtecaoService {
           direcao: 'SAIDA',
           criadoEm: { gte: desde },
           situacao: { not: SITUACAO_TRANSACAO.CANCELADA },
+          ...(params.ignorarTransacaoId
+            ? { id: { not: params.ignorarTransacaoId } }
+            : {}),
         },
       });
       if (qtd >= maxPorHora) {

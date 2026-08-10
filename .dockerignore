@@ -1,0 +1,14 @@
+# Nada de segredo, estado local ou artefato de dev dentro da imagem.
+node_modules
+dist
+.env
+.env.*
+!.env.example
+uploads
+docs
+scripts
+*.log
+.git
+.idea
+.cursor
+coverage

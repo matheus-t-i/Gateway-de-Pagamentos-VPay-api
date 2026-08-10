@@ -88,13 +88,18 @@ export class QueuesService {
     }
   }
 
+  // ⚠️ jobId customizado NÃO pode conter ':' — o BullMQ 5 valida e o `add`
+  // LANÇA ("Custom Id cannot contain :"). Com `saque:<id>` o enqueue do
+  // próprio saque falhava DEPOIS do débito (saldo debitado, nenhum job) e o
+  // webhook de cash-in nem entrava na fila. Encontrado no smoke da imagem
+  // Docker — separador é '-' daqui em diante.
   enqueuePixWebhookReceived(data: PixJobPayload) {
     const webhookId = data.webhookRecebidoId;
     return this.addComJobIdEstavel(
       this.pixWebhookReceived,
       'process',
       data,
-      webhookId ? `webhook-in:${webhookId}` : undefined,
+      webhookId ? `webhook-in-${webhookId}` : undefined,
     );
   }
 
@@ -108,7 +113,7 @@ export class QueuesService {
       this.pixWebhookCashout,
       'process',
       data,
-      webhookId ? `webhook-out:${webhookId}` : undefined,
+      webhookId ? `webhook-out-${webhookId}` : undefined,
     );
   }
 
@@ -124,7 +129,7 @@ export class QueuesService {
       this.pixCashOut,
       'process',
       data,
-      txId ? `saque:${txId}` : undefined,
+      txId ? `saque-${txId}` : undefined,
     );
   }
 

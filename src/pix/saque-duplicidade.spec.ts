@@ -404,6 +404,55 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
     expect(tentativa.situacao).toBe(SITUACAO_TENTATIVA.ENVIANDO);
   });
 
+  it('recusa TARDIA não rebaixa CONCLUIDA nem estorna PIX pago', async () => {
+    const transacaoId = await criarSaque(`dup-recusa-tardia-${sufixo}`);
+    const saldoDebitado = await prisma.saldoUsuario.findUniqueOrThrow({
+      where: { usuarioId },
+    });
+
+    // Webhook PAID contraditório sela CONCLUIDA enquanto o POST está em voo;
+    // em seguida o POST volta 4xx. Sem a guarda, a recusa estornava o saldo E
+    // rebaixava CONCLUIDA -> FALHA: o beneficiário ficava com o PIX e o
+    // lojista com o dinheiro de volta — perda dupla da VPay.
+    comportamento = async () => {
+      await prisma.transacao.update({
+        where: { id: transacaoId },
+        data: { situacao: SITUACAO_TRANSACAO.CONCLUIDA, concluidoEm: new Date() },
+      });
+      throw new RecusaAdquirenteError('Valorion HTTP 400: contraditório', {
+        statusHttp: 400,
+      });
+    };
+
+    const r = (await processorCom().process(job(transacaoId))) as {
+      recusado?: boolean;
+    };
+    expect(r.recusado).toBe(true);
+
+    // Nada foi estornado e o estado final não regrediu.
+    const tx = await prisma.transacao.findUniqueOrThrow({ where: { id: transacaoId } });
+    expect(tx.situacao).toBe(SITUACAO_TRANSACAO.CONCLUIDA);
+    const estorno = await prisma.movimentacaoSaldo.findUnique({
+      where: { chaveIdempotencia: `saque:estorno:${transacaoId}` },
+    });
+    expect(estorno).toBeNull();
+    const saldoDepois = await prisma.saldoUsuario.findUniqueOrThrow({
+      where: { usuarioId },
+    });
+    expect(Number(saldoDepois.saldoDisponivel)).toBe(
+      Number(saldoDebitado.saldoDisponivel),
+    );
+
+    // E o lojista NÃO recebe callback de falha de um saque pago.
+    const evento = await prisma.eventoOutbox.findFirst({
+      where: {
+        identificadorAgregado: tx.idTransacaoPublico,
+        tipoEvento: 'pix.cashout.falhou',
+      },
+    });
+    expect(evento).toBeNull();
+  });
+
   it('estorno é idempotente: reprocessar não credita duas vezes', async () => {
     const transacaoId = await criarSaque(`dup-estorno-idem-${sufixo}`);
     const processor = processorCom();

@@ -1,5 +1,6 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import Decimal from 'decimal.js';
 import {
   EVENTOS_LOJISTA,
@@ -35,6 +36,8 @@ const DECIDIVEIS: string[] = [
 
 @Injectable()
 export class MedService {
+  private readonly logger = new Logger(MedService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
@@ -88,12 +91,7 @@ export class MedService {
         .update(`${tx.id}:${params.valorSolicitado}:${params.motivo ?? ''}`)
         .digest('hex');
 
-    const existente = await this.prisma.casoMed.findUnique({
-      where: { chaveIdempotencia: chave },
-    });
-    if (existente) {
-      return { idPublico: existente.idPublico, situacao: existente.situacao, duplicado: true };
-    }
+    const cfg = await this.configPix.resolverEfetiva(tx.usuarioId);
 
     /**
      * Teto ACUMULADO da venda: a soma dos MEDs vivos daquela transação não pode
@@ -107,49 +105,98 @@ export class MedService {
      * Depois do dedupe de propósito: reentrega do MESMO aviso tem que continuar
      * devolvendo `duplicado: true`, e não 400 por "teto estourado" — o caso já
      * gravado entraria na própria soma.
+     *
+     * Tudo num único commit serializado por FOR UPDATE na VENDA: o teto era
+     * read-then-write e dois avisos simultâneos com identificadores diferentes
+     * liam ambos "nada contestado" e passavam juntos — a soma estourava o
+     * valor da venda com dois débitos.
      */
-    const vivos = await this.prisma.casoMed.aggregate({
-      where: { transacaoId: tx.id, situacao: { not: SITUACAO_MED.RECUSADO } },
-      _sum: { valorSolicitado: true },
-    });
-    const jaContestado = money(vivos._sum.valorSolicitado?.toString() ?? '0');
-    if (jaContestado.plus(valor).gt(valorBruto)) {
-      throw new BadRequestException(
-        `MED acima do saldo contestável da venda: já existem ${jaContestado.toFixed(2)} ` +
-          `contestados de ${valorBruto.toFixed(2)}.`,
-      );
-    }
+    let criado: Awaited<
+      ReturnType<typeof this.prisma.casoMed.create>
+    > | null = null;
+    let existente: Awaited<
+      ReturnType<typeof this.prisma.casoMed.create>
+    > | null = null;
+    try {
+      await this.prisma.$transaction(async (db) => {
+        await db.$queryRaw`
+          SELECT id FROM transacoes WHERE id = ${tx.id} FOR UPDATE
+        `;
+        existente = await db.casoMed.findUnique({
+          where: { chaveIdempotencia: chave },
+        });
+        if (existente) return;
 
-    const cfg = await this.configPix.resolverEfetiva(tx.usuarioId);
-    const caso = await this.prisma.casoMed.create({
-      data: {
-        usuarioId: tx.usuarioId,
-        transacaoId: tx.id,
-        contaProvedorId: tx.contaProvedorId,
-        webhookRecebidoId: params.webhookRecebidoId,
-        identificadorMedProvedor: params.identificadorMedProvedor,
-        chaveIdempotencia: chave,
-        valorSolicitado: valor.toFixed(2),
-        modoTratamentoAplicado: cfg.modoTratamentoMed,
-        motivo: params.motivo,
-        situacao: SITUACAO_MED.RECEBIDO,
-        historicos: {
-          create: {
-            novaSituacao: SITUACAO_MED.RECEBIDO,
-            acao: 'RECEBER_MED',
-            origem: params.origem,
-            usuarioAtorId: params.usuarioAtorId,
+        const vivos = await db.casoMed.aggregate({
+          where: { transacaoId: tx.id, situacao: { not: SITUACAO_MED.RECUSADO } },
+          _sum: { valorSolicitado: true },
+        });
+        const jaContestado = money(vivos._sum.valorSolicitado?.toString() ?? '0');
+        if (jaContestado.plus(valor).gt(valorBruto)) {
+          throw new BadRequestException(
+            `MED acima do saldo contestável da venda: já existem ${jaContestado.toFixed(2)} ` +
+              `contestados de ${valorBruto.toFixed(2)}.`,
+          );
+        }
+
+        criado = await db.casoMed.create({
+          data: {
+            usuarioId: tx.usuarioId,
+            transacaoId: tx.id,
+            contaProvedorId: tx.contaProvedorId,
+            webhookRecebidoId: params.webhookRecebidoId,
+            identificadorMedProvedor: params.identificadorMedProvedor,
+            chaveIdempotencia: chave,
+            valorSolicitado: valor.toFixed(2),
+            modoTratamentoAplicado: cfg.modoTratamentoMed,
+            motivo: params.motivo,
+            situacao: SITUACAO_MED.RECEBIDO,
+            historicos: {
+              create: {
+                novaSituacao: SITUACAO_MED.RECEBIDO,
+                acao: 'RECEBER_MED',
+                origem: params.origem,
+                usuarioAtorId: params.usuarioAtorId,
+              },
+            },
           },
-        },
-      },
-    });
+        });
 
-    if (!tx.primeiroMedRecebidoEm) {
-      await this.prisma.transacao.update({
-        where: { id: tx.id },
-        data: { primeiroMedRecebidoEm: new Date() },
+        if (!tx.primeiroMedRecebidoEm) {
+          await db.transacao.update({
+            where: { id: tx.id },
+            data: { primeiroMedRecebidoEm: new Date() },
+          });
+        }
       });
+    } catch (e) {
+      // Cinto além da serialização (ex.: entrega duplicada em conexões que não
+      // disputaram o mesmo lock): a unique responde e a perdedora vira
+      // `duplicado`, nunca erro — que geraria tempestade de retries.
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        const vencedor = await this.prisma.casoMed.findUnique({
+          where: { chaveIdempotencia: chave },
+        });
+        if (vencedor) {
+          return {
+            idPublico: vencedor.idPublico,
+            situacao: vencedor.situacao,
+            duplicado: true,
+          };
+        }
+      }
+      throw e;
     }
+    if (existente) {
+      const dup = existente as Awaited<
+        ReturnType<typeof this.prisma.casoMed.create>
+      >;
+      return { idPublico: dup.idPublico, situacao: dup.situacao, duplicado: true };
+    }
+    const caso = criado!;
 
     let situacaoFinal: string = SITUACAO_MED.EM_ANALISE;
 
@@ -160,53 +207,63 @@ export class MedService {
       const bloquear = Decimal.min(valor, Decimal.max(disponivel, new Decimal(0)));
       const naoCoberto = valor.minus(bloquear);
 
-      if (bloquear.gt(0)) {
-        await this.ledger.aplicarMovimentacoes({
-          usuarioId: tx.usuarioId,
-          entries: [
+      // Bloqueio + situação + registro no MESMO commit. Com o ledger em commit
+      // próprio, um crash entre eles deixava o caso RECEBIDO (decidível) com
+      // `valorBloqueado = 0` gravado e o dinheiro JÁ movido para BLOQUEADO_MED:
+      // o ACEITO debitava o valor cheio do disponível de novo e o bloqueado
+      // ficava preso para sempre.
+      await this.prisma.$transaction(async (db) => {
+        if (bloquear.gt(0)) {
+          await this.ledger.aplicarMovimentacoes(
             {
-              tipoSaldo: 'DISPONIVEL',
-              tipoMovimento: 'DEBITO',
-              natureza: 'BLOQUEIO_MED',
-              valor: bloquear,
-              chaveIdempotencia: `med:bloq:disp:${caso.id}`,
-              casoMedId: caso.id,
-              transacaoId: tx.id,
-              descricao: 'Bloqueio por MED',
+              usuarioId: tx.usuarioId,
+              entries: [
+                {
+                  tipoSaldo: 'DISPONIVEL',
+                  tipoMovimento: 'DEBITO',
+                  natureza: 'BLOQUEIO_MED',
+                  valor: bloquear,
+                  chaveIdempotencia: `med:bloq:disp:${caso.id}`,
+                  casoMedId: caso.id,
+                  transacaoId: tx.id,
+                  descricao: 'Bloqueio por MED',
+                },
+                {
+                  tipoSaldo: 'BLOQUEADO_MED',
+                  tipoMovimento: 'CREDITO',
+                  natureza: 'BLOQUEIO_MED',
+                  valor: bloquear,
+                  chaveIdempotencia: `med:bloq:med:${caso.id}`,
+                  casoMedId: caso.id,
+                  transacaoId: tx.id,
+                  descricao: 'Bloqueio por MED',
+                },
+              ],
             },
-            {
-              tipoSaldo: 'BLOQUEADO_MED',
-              tipoMovimento: 'CREDITO',
-              natureza: 'BLOQUEIO_MED',
-              valor: bloquear,
-              chaveIdempotencia: `med:bloq:med:${caso.id}`,
-              casoMedId: caso.id,
-              transacaoId: tx.id,
-              descricao: 'Bloqueio por MED',
-            },
-          ],
-        });
-      }
+            db,
+          );
+        }
 
-      await this.prisma.casoMed.update({
-        where: { id: caso.id },
-        data: {
-          situacao: SITUACAO_MED.SALDO_BLOQUEADO,
-          valorBloqueado: bloquear.toFixed(2),
-          valorNaoCoberto: naoCoberto.toFixed(2),
-        },
-      });
-      await this.prisma.bloqueioSaldo.create({
-        data: {
-          usuarioId: tx.usuarioId,
-          casoMedId: caso.id,
-          tipo: 'MED',
-          valorSolicitado: valor.toFixed(2),
-          valorBloqueado: bloquear.toFixed(2),
-          valorNaoCoberto: naoCoberto.toFixed(2),
-          situacao: SITUACAO_BLOQUEIO.ATIVO,
-          criadoPorUsuarioId: params.usuarioAtorId,
-        },
+        await db.casoMed.update({
+          where: { id: caso.id },
+          data: {
+            situacao: SITUACAO_MED.SALDO_BLOQUEADO,
+            valorBloqueado: bloquear.toFixed(2),
+            valorNaoCoberto: naoCoberto.toFixed(2),
+          },
+        });
+        await db.bloqueioSaldo.create({
+          data: {
+            usuarioId: tx.usuarioId,
+            casoMedId: caso.id,
+            tipo: 'MED',
+            valorSolicitado: valor.toFixed(2),
+            valorBloqueado: bloquear.toFixed(2),
+            valorNaoCoberto: naoCoberto.toFixed(2),
+            situacao: SITUACAO_BLOQUEIO.ATIVO,
+            criadoPorUsuarioId: params.usuarioAtorId,
+          },
+        });
       });
       situacaoFinal = SITUACAO_MED.SALDO_BLOQUEADO;
     } else if (cfg.modoTratamentoMed === MODO_TRATAMENTO_MED.DEBITAR_IMEDIATAMENTE) {
@@ -214,39 +271,47 @@ export class MedService {
       // ENCERRADO — a conta configurada assim não tem fila em `/admin/med`, e
       // por isso também não acumula saldo bloqueado por MED. A venda vira MED e
       // o lojista é avisado pelo callback, igual ao MED automático.
-      const ledgerResult = await this.ledger.aplicarMovimentacoes({
-        usuarioId: tx.usuarioId,
-        // Sempre negativo-permitido: a adquirente já levou o dinheiro, então o
-        // débito precisa sair mesmo com a conta zerada. Recusar aqui não
-        // guardaria nada — só deixaria a perda inteira do nosso lado, com o job
-        // falhando em retry infinito.
-        permiteSaldoNegativo: true,
-        entries: [
-          {
-            tipoSaldo: 'DISPONIVEL',
-            tipoMovimento: 'DEBITO',
-            natureza: 'DEBITO_MED',
-            valor,
-            chaveIdempotencia: `med:deb:${caso.id}`,
-            casoMedId: caso.id,
-            transacaoId: tx.id,
-            descricao: 'Débito imediato por MED',
-          },
-        ],
-        outbox: {
-          tipoAgregado: 'DEVOLUCAO_PIX',
-          identificadorAgregado: tx.idTransacaoPublico,
-          tipoEvento: EVENTOS_LOJISTA.PIX_DEVOLUCAO_CONCLUIDA,
-          conteudo: {
-            idTransacao: tx.idTransacaoPublico,
-            valor: valor.toFixed(2),
-            motivo: params.motivo ?? 'MED',
-          },
-        },
-      });
-
+      // Débito + encerramento do caso no MESMO commit. Com o débito em commit
+      // próprio, um crash entre eles deixava o caso RECEBIDO — que é decidível:
+      // o analista via o caso "aberto" em /admin/med, clicava ACEITO e o
+      // `decidir` debitava DE NOVO (a chave lá é `med:aceite:disp:<caso>`,
+      // diferente de `med:deb:<caso>`, então o ledger não barrava) — e ainda
+      // nascia uma devolucao_pix que não existe neste modo.
       const agora = new Date();
-      await this.prisma.$transaction(async (db) => {
+      const ledgerResult = await this.prisma.$transaction(async (db) => {
+        const resultado = await this.ledger.aplicarMovimentacoes(
+          {
+            usuarioId: tx.usuarioId,
+            // Sempre negativo-permitido: a adquirente já levou o dinheiro,
+            // então o débito precisa sair mesmo com a conta zerada. Recusar
+            // aqui não guardaria nada — só deixaria a perda inteira do nosso
+            // lado, com o job falhando em retry infinito.
+            permiteSaldoNegativo: true,
+            entries: [
+              {
+                tipoSaldo: 'DISPONIVEL',
+                tipoMovimento: 'DEBITO',
+                natureza: 'DEBITO_MED',
+                valor,
+                chaveIdempotencia: `med:deb:${caso.id}`,
+                casoMedId: caso.id,
+                transacaoId: tx.id,
+                descricao: 'Débito imediato por MED',
+              },
+            ],
+            outbox: {
+              tipoAgregado: 'DEVOLUCAO_PIX',
+              identificadorAgregado: tx.idTransacaoPublico,
+              tipoEvento: EVENTOS_LOJISTA.PIX_DEVOLUCAO_CONCLUIDA,
+              conteudo: {
+                idTransacao: tx.idTransacaoPublico,
+                valor: valor.toFixed(2),
+                motivo: params.motivo ?? 'MED',
+              },
+            },
+          },
+          db,
+        );
         await db.casoMed.update({
           where: { id: caso.id },
           data: {
@@ -283,6 +348,7 @@ export class MedService {
             },
           });
         }
+        return resultado;
       });
 
       if (ledgerResult.outboxId) {
@@ -498,10 +564,21 @@ export class MedService {
     });
 
     if (params.decisao === 'ACEITO' && devolucaoId) {
-      await this.queues.enqueueDevolucaoPix({
-        devolucaoId: devolucaoId.toString(),
-        identificadorRastreio: getRastreio(),
-      });
+      // Enqueue FORA do commit e sem derrubar a decisão: a devolução já existe
+      // como PENDENTE — se o Redis falhar aqui, a varredura da conciliação a
+      // reenfileira no próximo tick. Falhar o request depois do commit só
+      // mostraria erro ao admin com a decisão JÁ tomada.
+      try {
+        await this.queues.enqueueDevolucaoPix({
+          devolucaoId: devolucaoId.toString(),
+          identificadorRastreio: getRastreio(),
+        });
+      } catch (e) {
+        this.logger.error(
+          `enqueue da devolução ${devolucaoId} falhou — varredura da ` +
+            `conciliação recupera: ${e instanceof Error ? e.message : e}`,
+        );
+      }
     } else if (params.decisao === 'RECUSADO' && bloqueado.gt(0)) {
       await this.bloqueios.capturarSemFalhar(
         caso.usuarioId,

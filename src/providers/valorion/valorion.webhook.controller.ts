@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Headers,
+  Logger,
   Post,
   Query,
   Req,
@@ -18,6 +19,7 @@ import { MedService } from '../../med/med.service';
 import { Throttle } from '../../common/ip-throttle.guard';
 import { ValorionPaymentProvider } from './valorion.client';
 import { decryptCredentials } from '../../common/crypto.util';
+import { extrairValorDePayload } from '../valor-remoto.util';
 
 /**
  * Postback da Valorion. Mesmo racional do controller mock: o teto global de
@@ -33,6 +35,30 @@ import { decryptCredentials } from '../../common/crypto.util';
  * esperam `transactionId`/`PAID` — a tradução acontece AQUI, no controller por
  * adquirente, para as filas continuarem genéricas.
  */
+
+/**
+ * Eco da referência que mandamos no create — recovery quando o id liquidante
+ * ainda não estava gravado na tentativa (crash pós-aceite).
+ *
+ * O nome REAL no postback da Valorion é `externalreference` (tudo minúsculo,
+ * sem separador — é o mesmo campo que o refund lê do corpo armazenado em
+ * `valorion.client.ts`). Os outros nomes ficam como tolerância a variação de
+ * ambiente; o eco aninhado cobre o caso de devolverem o objeto `customer` que
+ * enviamos no create (`customer.externaRef`).
+ */
+function extrairExternaRef(body: Record<string, unknown>): unknown {
+  const customer = body.customer as Record<string, unknown> | undefined;
+  return (
+    body.externalreference ??
+    body.externaRef ??
+    body.externalRef ??
+    body.externa_ref ??
+    body.external_reference ??
+    customer?.externaRef ??
+    customer?.externalreference ??
+    undefined
+  );
+}
 @Controller('webhooks/valorion')
 @Throttle({ limit: 6000, windowSec: 60 })
 export class ValorionWebhookController {
@@ -86,6 +112,96 @@ export class ValorionWebhookController {
    * Camada 1 do MED: consulta a liquidante antes de mexer em saldo.
    * Sem isto, postback forjado com status=MED (e Camada 2 frouxa) debitava.
    */
+  private readonly logger = new Logger(ValorionWebhookController.name);
+
+  /**
+   * MED de cash-in: Camada 1 + registro do caso, com a regra do webhook
+   * ("responder 200 mesmo ao descartar") aplicada de verdade.
+   *
+   * Erro de NEGÓCIO aqui é determinístico — teto da venda estourado, `amount`
+   * ausente, transação desconhecida, Camada 1 não confirmando: responder 4xx
+   * fazia a Valorion retentar PARA SEMPRE o mesmo aviso, tomando o mesmo 400 a
+   * cada entrega. Pior que o ruído: a adquirente JÁ tirou o dinheiro da nossa
+   * conta, e o aviso rejeitado significava lojista nunca debitado — rombo
+   * permanente e silencioso da VPay. Agora o descarte devolve 200 com o motivo
+   * gravado em `mensagemErro`, e a linha fica fora de PROCESSADO para o
+   * suporte reprocessar. Erro TRANSITÓRIO (rede/timeout na consulta) continua
+   * estourando 500 — a reentrega da liquidante é a retentativa correta.
+   *
+   * 400 continua existindo só para transporte inválido (payload sem
+   * `idtransaction`), como manda a regra.
+   */
+  private async processarMedCashin(
+    body: Record<string, unknown>,
+    liquidanteId: string,
+    chave: string,
+    webhookId: bigint,
+  ): Promise<{ casoMed?: unknown; descartado?: string }> {
+    if (!liquidanteId) {
+      throw new BadRequestException('Payload MED sem idtransaction.');
+    }
+    try {
+      const tentativa = await this.prisma.tentativaTransacao.findFirst({
+        where: { idTransacaoLiquidante: liquidanteId },
+        include: {
+          transacao: { include: { contaProvedor: true } },
+        },
+        orderBy: { criadoEm: 'desc' },
+      });
+      if (!tentativa) {
+        throw new BadRequestException(
+          `MED para transação desconhecida: ${liquidanteId}`,
+        );
+      }
+      if (!tentativa.transacao.contaProvedor) {
+        throw new BadRequestException('Transação MED sem conta de provedor');
+      }
+      // `String(body.amount ?? '0')` virava valor `0` (400 eterno) quando o
+      // campo faltava — o resto do código já usa o extrator tolerante.
+      const valor = extrairValorDePayload(body);
+      if (!valor || valor.lte(0)) {
+        throw new BadRequestException('Payload MED sem valor utilizável.');
+      }
+      await this.confirmarMedNaLiquidante({
+        liquidanteId,
+        idTransacaoPrivado: tentativa.transacao.idTransacaoPrivado,
+        credenciaisCriptografadas:
+          tentativa.transacao.contaProvedor.credenciaisCriptografadas,
+      });
+      const caso = await this.med.receber({
+        idTransacaoPublico: tentativa.transacao.idTransacaoPublico,
+        valorSolicitado: valor.toFixed(2),
+        identificadorMedProvedor: String(body.endToEnd ?? '') || chave,
+        motivo: 'MED informado pela Valorion',
+        webhookRecebidoId: webhookId,
+        origem: 'WEBHOOK_PROVEDOR',
+      });
+      await this.prisma.webhookRecebidoProvedor.update({
+        where: { id: webhookId },
+        data: {
+          situacao: SITUACAO_WEBHOOK_RECEBIDO.PROCESSADO,
+          processadoEm: new Date(),
+          mensagemErro: null,
+        },
+      });
+      return { casoMed: caso };
+    } catch (e) {
+      if (e instanceof BadRequestException) {
+        const motivo = e.message;
+        this.logger.error(
+          `MED descartado (200) liquidante=${liquidanteId}: ${motivo} — ` +
+            `webhook=${webhookId} segue fora de PROCESSADO para conferência`,
+        );
+        await this.prisma.webhookRecebidoProvedor.update({
+          where: { id: webhookId },
+          data: { mensagemErro: `MED descartado: ${motivo}`.slice(0, 1000) },
+        });
+        return { descartado: motivo };
+      }
+      throw e;
+    }
+  }
+
   private async confirmarMedNaLiquidante(params: {
     liquidanteId: string;
     idTransacaoPrivado: string;
@@ -155,50 +271,17 @@ export class ValorionWebhookController {
       // liquidante não pode virar no-op silencioso com o dinheiro ainda sem crédito.
       if (existing.situacao !== SITUACAO_WEBHOOK_RECEBIDO.PROCESSADO) {
         if (kind === 'cashin' && statusOriginal === 'MED') {
-          if (!liquidanteId) {
-            throw new BadRequestException('Payload MED sem idtransaction.');
-          }
-          const tentativa = await this.prisma.tentativaTransacao.findFirst({
-            where: { idTransacaoLiquidante: liquidanteId },
-            include: {
-              transacao: { include: { contaProvedor: true } },
-            },
-            orderBy: { criadoEm: 'desc' },
-          });
-          if (!tentativa) {
-            throw new BadRequestException(
-              `MED para transação desconhecida: ${liquidanteId}`,
-            );
-          }
-          if (!tentativa.transacao.contaProvedor) {
-            throw new BadRequestException('Transação MED sem conta de provedor');
-          }
-          await this.confirmarMedNaLiquidante({
+          const r = await this.processarMedCashin(
+            body,
             liquidanteId,
-            idTransacaoPrivado: tentativa.transacao.idTransacaoPrivado,
-            credenciaisCriptografadas:
-              tentativa.transacao.contaProvedor.credenciaisCriptografadas,
-          });
-          const caso = await this.med.receber({
-            idTransacaoPublico: tentativa.transacao.idTransacaoPublico,
-            valorSolicitado: String(body.amount ?? '0'),
-            identificadorMedProvedor: String(body.endToEnd ?? '') || chave,
-            motivo: 'MED informado pela Valorion',
-            webhookRecebidoId: existing.id,
-            origem: 'WEBHOOK_PROVEDOR',
-          });
-          await this.prisma.webhookRecebidoProvedor.update({
-            where: { id: existing.id },
-            data: {
-              situacao: SITUACAO_WEBHOOK_RECEBIDO.PROCESSADO,
-              processadoEm: new Date(),
-            },
-          });
+            chave,
+            existing.id,
+          );
           return {
             ok: true,
             duplicated: true,
             id: existing.id.toString(),
-            casoMed: caso,
+            ...r,
           };
         }
         await this.reenfileirarWebhook(
@@ -227,46 +310,8 @@ export class ValorionWebhookController {
 
     // Contestação: a Valorion avisa MED pelo mesmo postback de cash-in.
     if (kind === 'cashin' && statusOriginal === 'MED') {
-      if (!liquidanteId) {
-        throw new BadRequestException('Payload MED sem idtransaction.');
-      }
-      const tentativa = await this.prisma.tentativaTransacao.findFirst({
-        where: { idTransacaoLiquidante: liquidanteId },
-        include: {
-          transacao: { include: { contaProvedor: true } },
-        },
-        orderBy: { criadoEm: 'desc' },
-      });
-      if (!tentativa) {
-        throw new BadRequestException(
-          `MED para transação desconhecida: ${liquidanteId}`,
-        );
-      }
-      if (!tentativa.transacao.contaProvedor) {
-        throw new BadRequestException('Transação MED sem conta de provedor');
-      }
-      await this.confirmarMedNaLiquidante({
-        liquidanteId,
-        idTransacaoPrivado: tentativa.transacao.idTransacaoPrivado,
-        credenciaisCriptografadas:
-          tentativa.transacao.contaProvedor.credenciaisCriptografadas,
-      });
-      const caso = await this.med.receber({
-        idTransacaoPublico: tentativa.transacao.idTransacaoPublico,
-        valorSolicitado: String(body.amount ?? '0'),
-        identificadorMedProvedor: String(body.endToEnd ?? '') || chave,
-        motivo: 'MED informado pela Valorion',
-        webhookRecebidoId: webhook.id,
-        origem: 'WEBHOOK_PROVEDOR',
-      });
-      await this.prisma.webhookRecebidoProvedor.update({
-        where: { id: webhook.id },
-        data: {
-          situacao: SITUACAO_WEBHOOK_RECEBIDO.PROCESSADO,
-          processadoEm: new Date(),
-        },
-      });
-      return { ok: true, id: webhook.id.toString(), casoMed: caso };
+      const r = await this.processarMedCashin(body, liquidanteId, chave, webhook.id);
+      return { ok: true, id: webhook.id.toString(), ...r };
     }
 
     // Tradução para o contrato genérico das filas.
@@ -277,14 +322,7 @@ export class ValorionWebhookController {
         statusOriginal,
         kind === 'cashout' ? 'CASH OUT' : 'CASH IN',
       ),
-      // Eco da ref que mandamos no create — recovery se id liquidante ainda
-      // não estava gravado na tentativa (crash pós-aceite).
-      externaRef:
-        body.externaRef ??
-        body.externalRef ??
-        body.externa_ref ??
-        body.external_reference ??
-        undefined,
+      externaRef: extrairExternaRef(body),
     };
 
     if (kind === 'cashin') {
@@ -320,12 +358,7 @@ export class ValorionWebhookController {
         statusOriginal,
         kind === 'cashout' ? 'CASH OUT' : 'CASH IN',
       ),
-      externaRef:
-        body.externaRef ??
-        body.externalRef ??
-        body.externa_ref ??
-        body.external_reference ??
-        undefined,
+      externaRef: extrairExternaRef(body),
     };
     const rastreio = getRastreio();
     if (kind === 'cashin') {

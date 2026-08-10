@@ -190,7 +190,11 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
         body.externalRef ??
         body.externa_ref ??
         body.external_reference ??
-        body.metadata ??
+        // Nome real do eco no postback Valorion (o controller já traduz para
+        // `externaRef`, mas payload reprocessado à mão pode vir cru).
+        body.externalreference ??
+        // `metadata` objeto viraria "[object Object]" e nunca casaria.
+        (typeof body.metadata === 'string' ? body.metadata : '') ??
         '',
     ).trim();
     if (!ref) return null;
@@ -216,24 +220,41 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
 
     // Fallback: referenciaExterna do lojista ou id público (metadata Valorion).
     // Só candidatos ainda creditáveis (não terminais de sucesso).
-    const porRef = await this.prisma.tentativaTransacao.findFirst({
-      where: {
-        situacao: { in: [SITUACAO_TENTATIVA.SUCESSO, SITUACAO_TENTATIVA.FALHA] },
-        transacao: {
-          direcao: 'ENTRADA',
-          situacao: {
-            in: [
-              SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO,
-              SITUACAO_TRANSACAO.FALHA,
-              SITUACAO_TRANSACAO.PENDENTE,
-            ],
-          },
-          OR: [{ referenciaExterna: ref }, { idTransacaoPublico: ref }],
-        },
+    //
+    // Com "nunca 409", a MESMA referência acumula N cobranças vivas — e este
+    // fallback só roda quando o id liquidante do webhook não casou com nenhuma
+    // tentativa. A dona do pagamento órfão é, por construção, a tentativa que
+    // ficou SEM `idTransacaoLiquidante` (crash/TIMEOUT antes de gravar):
+    // preferi-la evita creditar a cobrança errada e carimbar o id de um
+    // pagamento na tentativa de outro. `id asc` = a mais antiga primeiro,
+    // que é a que está esperando há mais tempo.
+    const filtroRef = {
+      situacao: {
+        in: [SITUACAO_TENTATIVA.SUCESSO, SITUACAO_TENTATIVA.FALHA],
       },
-      include,
-      orderBy: { id: 'desc' },
-    });
+      transacao: {
+        direcao: 'ENTRADA' as const,
+        situacao: {
+          in: [
+            SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO,
+            SITUACAO_TRANSACAO.FALHA,
+            SITUACAO_TRANSACAO.PENDENTE,
+          ],
+        },
+        OR: [{ referenciaExterna: ref }, { idTransacaoPublico: ref }],
+      },
+    };
+    const porRef =
+      (await this.prisma.tentativaTransacao.findFirst({
+        where: { ...filtroRef, idTransacaoLiquidante: null },
+        include,
+        orderBy: { id: 'asc' },
+      })) ??
+      (await this.prisma.tentativaTransacao.findFirst({
+        where: filtroRef,
+        include,
+        orderBy: { id: 'asc' },
+      }));
     if (!porRef) return null;
     if (porRef.transacao.contaProvedor?.provedor.codigo !== provider) {
       throw new Error('Mismatch provedor vs transação local');

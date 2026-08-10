@@ -9,6 +9,7 @@ import {
   OutboxPublishJobPayload,
   PixJobPayload,
   QUEUE_NAMES,
+  SITUACAO_DEVOLUCAO,
   SITUACAO_LIBERACAO,
   SITUACAO_PROVEDOR,
   SITUACAO_TENTATIVA,
@@ -421,6 +422,17 @@ export class ConciliacaoProcessor extends WorkerHost {
         },
         criadoEm: { lte: new Date(Date.now() - 5 * 60 * 1000) },
       },
+      /**
+       * Round-robin: nunca visitada primeiro, depois a visitada há mais tempo.
+       * Sem esta ordenação (e sem nada que expire cobrança abandonada), o
+       * `take: 40` relia para sempre as MESMAS pendentes mais antigas e uma
+       * transação recente presa nunca era alcançada — starvation da única rede
+       * de recuperação de cash-in fantasma e saque órfão.
+       */
+      orderBy: [
+        { ultimaConciliacaoEm: { sort: 'asc', nulls: 'first' } },
+        { criadoEm: 'asc' },
+      ],
       take: 40,
       include: {
         contaProvedor: { include: { provedor: true } },
@@ -428,6 +440,16 @@ export class ConciliacaoProcessor extends WorkerHost {
       },
     });
     this.logger.log(`conciliação pendentes=${pendentes.length}`);
+
+    // Carimba ANTES de processar: mesmo quem lançar erro no meio do passe sai
+    // do topo da fila e devolve a vez — senão uma transação problemática
+    // monopolizava o tick tanto quanto a starvation que isto corrige.
+    if (pendentes.length > 0) {
+      await this.prisma.transacao.updateMany({
+        where: { id: { in: pendentes.map((t) => t.id) } },
+        data: { ultimaConciliacaoEm: new Date() },
+      });
+    }
 
     let liquidados = 0;
     for (const tx of pendentes) {
@@ -699,6 +721,73 @@ export class ConciliacaoProcessor extends WorkerHost {
       }
     }
 
-    return { checked: pendentes.length, liquidados, orfaosReenfileirados: orfaos.length };
+    const devolucoes = await this.varrerDevolucoes();
+
+    return {
+      checked: pendentes.length,
+      liquidados,
+      orfaosReenfileirados: orfaos.length,
+      ...devolucoes,
+    };
+  }
+
+  /**
+   * Rede de recuperação das devoluções PIX (MED aceito).
+   *
+   * Reenfileira SÓ `PENDENTE`: é o único estado em que se sabe que NADA saiu
+   * para a liquidante — cobre o enqueue perdido depois do commit do
+   * `MedService.decidir` e o attempts:5 esgotado em blip curto. O teto de
+   * tentativas é do processor (claim incrementa; 8 vira FALHA), então dois
+   * ticks sobrepostos no máximo enfileiram job duplicado — que morre no claim.
+   *
+   * `PROCESSANDO` parado, `AMBIGUA` e `FALHA` NUNCA voltam por aqui: o refund
+   * da Valorion não tem chave de idempotência, e reenviar um POST que pode ter
+   * saído devolveria o dinheiro DUAS vezes. Esses só aparecem no alerta OPS e
+   * em /admin/dinheiro-parado — reprocessá-los é decisão humana.
+   */
+  private async varrerDevolucoes() {
+    const presas = await this.prisma.devolucaoPix.findMany({
+      where: {
+        situacao: SITUACAO_DEVOLUCAO.PENDENTE,
+        atualizadoEm: { lte: new Date(Date.now() - 10 * 60 * 1000) },
+        quantidadeTentativas: { lt: 8 },
+      },
+      select: { id: true },
+      orderBy: { atualizadoEm: 'asc' },
+      take: 20,
+    });
+    for (const d of presas) {
+      try {
+        await this.queues.enqueueDevolucaoPix({
+          devolucaoId: d.id.toString(),
+          identificadorRastreio: `conciliacao-devolucao:${d.id}`,
+        });
+        this.logger.warn(`conciliação reenfileirou devolução presa id=${d.id}`);
+      } catch (e) {
+        this.logger.warn(`falha ao reenfileirar devolução ${d.id}: ${e}`);
+      }
+    }
+
+    // Paradas SEM recuperação automática: só visibilidade, nunca retry.
+    const congeladas = await this.prisma.devolucaoPix.count({
+      where: {
+        situacao: {
+          in: [
+            SITUACAO_DEVOLUCAO.PROCESSANDO,
+            SITUACAO_DEVOLUCAO.AMBIGUA,
+            SITUACAO_DEVOLUCAO.FALHA,
+          ],
+        },
+        atualizadoEm: { lte: new Date(Date.now() - 15 * 60 * 1000) },
+      },
+    });
+    if (congeladas > 0) {
+      this.logger.error(
+        `OPS ${congeladas} devolução(ões) parada(s) sem recuperação automática ` +
+          '(PROCESSANDO órfã / AMBIGUA / FALHA) — ver /admin/dinheiro-parado',
+      );
+    }
+
+    return { devolucoesReenfileiradas: presas.length, devolucoesCongeladas: congeladas };
   }
 }

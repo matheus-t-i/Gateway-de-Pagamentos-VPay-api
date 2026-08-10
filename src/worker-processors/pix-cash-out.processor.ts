@@ -26,10 +26,27 @@ import { SaqueProtecaoService } from '../pix/saque-protecao.service';
 
 /**
  * Erro de regra de negócio na revalidação: o saque NÃO pode ser enviado.
- * Sobe como falha do job para ficar visível no Bull Board e ser analisado —
- * nunca "conserta" sozinho mexendo em saldo.
+ *
+ * O desfecho é `encerrarPorBloqueio`: FALHA + estorno automático — nada saiu
+ * para a liquidante (o bloqueio dispara ANTES do claim ENVIANDO), então segurar
+ * o saldo seria reter dinheiro do lojista, com a transação presa em
+ * `PROCESSANDO` e o recovery de órfãos reenfileirando o mesmo bloqueio a cada
+ * tick, para sempre. Era exatamente esse o loop: dinheiro debitado, motivo
+ * invisível ao lojista e `ALERTA_FILA` da mesma tx se acumulando.
  */
 class SaqueBloqueadoError extends Error {}
+
+/** Forma da transação carregada pelo processor (include do `process`). */
+type TxSaque = Prisma.TransacaoGetPayload<{
+  include: {
+    pix: true;
+    contaProvedor: { include: { provedor: true } };
+    usuario: { select: { situacao: true; contaBloqueada: true } };
+    credencialApi: {
+      select: { ativo: true; revogadoEm: true; expiraEm: true; escopos: true };
+    };
+  };
+}>;
 
 /** Claim ENVIANDO perdeu para tentativa já existente (mesmo processo ou outro). */
 class SaqueJaEnviadoError extends Error {
@@ -104,9 +121,35 @@ export class PixCashOutProcessor extends WorkerHost {
       return { ok: true, ignorado: true, motivo: `situação ${tx.situacao}` };
     }
     if (tx.direcao !== 'SAIDA') {
-      throw new SaqueBloqueadoError(`tx=${tx.id} não é um saque (${tx.direcao})`);
+      // NÃO é SaqueBloqueadoError de propósito: marcar FALHA/estornar uma tx
+      // que nem é saque seria corromper um cash-in. Job morre e fica visível.
+      throw new Error(`tx=${tx.id} não é um saque (${tx.direcao})`);
     }
 
+    // ── 3–7. Revalidação total ────────────────────────────────────────────
+    // Bloqueio aqui = regra violada com NADA enviado. O encerramento devolve o
+    // saldo e sela FALHA — ver `encerrarPorBloqueio` para o porquê de cada guarda.
+    let valor: ReturnType<typeof money>;
+    try {
+      valor = await this.revalidar(tx);
+    } catch (e) {
+      if (e instanceof SaqueBloqueadoError) {
+        const desfecho = await this.encerrarPorBloqueio(tx, e.message);
+        return { ok: false, bloqueado: true, desfecho, motivo: e.message };
+      }
+      throw e;
+    }
+    return this.enviar(tx, valor);
+  }
+
+  /**
+   * Passos 3–7: tudo que a criação validou é conferido DE NOVO, imediatamente
+   * antes de mover dinheiro. Regra violada → `SaqueBloqueadoError` (o chamador
+   * encerra com estorno). Devolve o `valor` conferido para o envio.
+   */
+  private async revalidar(
+    tx: TxSaque,
+  ): Promise<ReturnType<typeof money>> {
     // ── 3. Conta do lojista ───────────────────────────────────────────────
     if (tx.usuario.situacao !== SITUACAO_USUARIO.ATIVO || tx.usuario.contaBloqueada) {
       throw new SaqueBloqueadoError(
@@ -156,7 +199,10 @@ export class PixCashOutProcessor extends WorkerHost {
         usuarioId: tx.usuarioId,
         valor,
         cfg,
-        soLeitura: true,
+        // Este saque JÁ existe como SAIDA de hoje: sem excluí-lo da conta,
+        // ele estoura o próprio limite (valor contado duas vezes) e congela
+        // com o saldo debitado.
+        ignorarTransacaoId: tx.id,
       });
     } catch (e) {
       throw new SaqueBloqueadoError(
@@ -232,10 +278,15 @@ export class PixCashOutProcessor extends WorkerHost {
       }
     }
 
+    return valor;
+  }
+
+  /** Claim ENVIANDO + POST na liquidante + os três desfechos do envio. */
+  private async enviar(tx: TxSaque, valor: ReturnType<typeof money>) {
     // ── Envio ─────────────────────────────────────────────────────────────
-    const provider = this.providers.get(tx.contaProvedor.provedor.codigo);
+    const provider = this.providers.get(tx.contaProvedor!.provedor.codigo);
     const credenciais = decryptCredentials(
-      tx.contaProvedor.credenciaisCriptografadas,
+      tx.contaProvedor!.credenciaisCriptografadas,
     );
 
     /**
@@ -410,36 +461,20 @@ export class PixCashOutProcessor extends WorkerHost {
   }
 
   /**
-   * Fecha um saque recusado: tentativa FALHA, transação FALHA e callback ao
-   * lojista — tudo na mesma transação, para não existir "FALHA sem evento".
-   *
-   * **O saldo NÃO volta aqui.** O débito acontece na criação do saque e devolvê-lo
-   * é decisão humana: é dinheiro, e a regra do projeto é que nenhum automatismo
-   * mexe nele. O lojista é avisado pelo callback e o estorno sai pelo suporte —
-   * mas agora ele SABE que precisa acionar, em vez de ficar olhando um saque
-   * parado em PROCESSANDO para sempre.
-   */
-  /**
-   * Devolve valor + tarifa de um saque que NÃO foi executado.
-   *
-   * Só é chamado em recusa CONFIRMADA: a liquidante disse não, então o dinheiro
-   * nunca saiu e segurar o saldo do lojista seria reter dinheiro que é dele. Em
-   * desfecho AMBÍGUO isto nunca roda — lá o valor pode ter saído, e estornar
-   * criaria um rombo.
-   *
-   * Idempotente pela chave por transação: rodar duas vezes (retry, ou o webhook
-   * chegando depois da recusa síncrona) credita uma vez só.
-   */
-  /**
-   * Devolve valor + tarifa ao lojista, em transação PRÓPRIA e como primeiro
-   * commit da recusa. Idempotente pelas chaves por transação
+   * Devolve valor + tarifa ao lojista. Idempotente pelas chaves por transação
    * (`saque:estorno:<txId>` / `saque:estorno-tarifa:<txId>`): rodar de novo
    * (retry, ou o webhook/conciliação chegando depois da recusa síncrona)
    * credita uma vez só.
+   *
+   * Só roda em recusa CONFIRMADA: a liquidante disse não, então o dinheiro
+   * nunca saiu e segurar o saldo seria reter dinheiro do lojista. Em desfecho
+   * AMBÍGUO isto nunca roda — lá o valor pode ter saído, e estornar criaria um
+   * rombo.
    */
   private async estornarSaque(
     tx: { id: bigint; usuarioId: bigint; valorBruto: unknown; valorTarifaPix: unknown },
     motivo: string,
+    db?: Prisma.TransactionClient,
   ) {
     const valor = money(String(tx.valorBruto));
     const tarifa = money(String(tx.valorTarifaPix));
@@ -468,10 +503,163 @@ export class PixCashOutProcessor extends WorkerHost {
       });
     }
 
-    await this.ledger.aplicarMovimentacoes({ usuarioId: tx.usuarioId, entries });
+    await this.ledger.aplicarMovimentacoes(
+      { usuarioId: tx.usuarioId, entries },
+      db,
+    );
     this.logger.log(
       `saque tx=${tx.id} estornado: ${valor.toFixed(2)} + tarifa ${tarifa.toFixed(2)}`,
     );
+  }
+
+  /**
+   * Encerra saque BLOQUEADO na revalidação: FALHA + estorno automático.
+   *
+   * Bloqueio ≠ recusa: aqui a liquidante nunca foi chamada. Mas a doutrina é a
+   * MESMA da recusa síncrona — não há tentativa nem id da liquidante, logo não
+   * há rede de recuperação pela conciliação: o ESTORNO vem primeiro, em commit
+   * próprio; a marcação de FALHA vem depois. Um blip entre os dois deixa
+   * inconsistência de STATUS com o dinheiro já devolvido (o crédito tem chave
+   * idempotente `saque:estorno:<txId>` — reprocessar não paga de novo).
+   *
+   * Três guardas dentro do FOR UPDATE, nesta ordem:
+   *
+   * 1. **Situação ainda enviável.** Terminal = outro caminho já selou; não
+   *    regride nem estorna.
+   * 2. **Nenhuma tentativa não-FALHA.** O bloqueio roda ANTES do claim, mas um
+   *    retry manual de saque JÁ ENVIADO (tentativa SUCESSO/ENVIANDO à espera do
+   *    webhook) também cai aqui — p.ex. admin bloqueou a conta com a ordem em
+   *    voo. Estornar esse seria devolver o saldo de um PIX que saiu: perda
+   *    dupla. Nada é tocado; webhook/conciliação decidem (têm o id).
+   * 3. **Débito integral existe.** `criarSaque` grava débito e transação no
+   *    mesmo commit, então faltar débito é estado corrompido (dado legado /
+   *    intervenção manual) — estornar criaria dinheiro. Sela FALHA sem estorno,
+   *    com `conferenciaManual: true` no histórico e erro alto no log.
+   */
+  private async encerrarPorBloqueio(
+    tx: {
+      id: bigint;
+      usuarioId: bigint;
+      idTransacaoPublico: string;
+      situacao: string;
+      valorBruto: unknown;
+      valorTarifaPix: unknown;
+    },
+    motivo: string,
+  ): Promise<'estornado' | 'sem-debito' | 'em-voo' | 'selado'> {
+    const enviaveis = [
+      SITUACAO_TRANSACAO.PENDENTE,
+      SITUACAO_TRANSACAO.PROCESSANDO,
+    ];
+
+    const desfecho = await this.prisma.$transaction(async (db) => {
+      const rows = await db.$queryRaw<Array<{ situacao: string }>>`
+        SELECT situacao FROM transacoes WHERE id = ${tx.id} FOR UPDATE
+      `;
+      const atual = rows[0]?.situacao ?? '';
+      if (!(enviaveis as string[]).includes(atual)) return 'selado' as const;
+
+      const emVoo = await db.tentativaTransacao.findFirst({
+        where: {
+          transacaoId: tx.id,
+          situacao: { not: SITUACAO_TENTATIVA.FALHA },
+        },
+        select: { id: true },
+      });
+      if (emVoo) return 'em-voo' as const;
+
+      const debitos = await db.movimentacaoSaldo.aggregate({
+        where: { transacaoId: tx.id, tipoMovimento: 'DEBITO' },
+        _sum: { valor: true },
+      });
+      const debitado = money(debitos._sum.valor?.toString() ?? '0');
+      const esperado = money(String(tx.valorBruto)).plus(
+        money(String(tx.valorTarifaPix)),
+      );
+      if (debitado.lt(esperado)) return 'sem-debito' as const;
+
+      await this.estornarSaque(tx, `bloqueado: ${motivo}`.slice(0, 200), db);
+      return 'estornado' as const;
+    });
+
+    if (desfecho === 'selado') {
+      this.logger.warn(
+        `saque tx=${tx.id} bloqueado (${motivo.slice(0, 200)}) mas desfecho já ` +
+          'selado por outro caminho — nada a fazer',
+      );
+      return desfecho;
+    }
+    if (desfecho === 'em-voo') {
+      this.logger.error(
+        `saque tx=${tx.id} bloqueado (${motivo.slice(0, 200)}) com ordem JÁ ` +
+          'ENVIADA/EM VOO — sem estorno e sem FALHA; webhook/conciliação decidem',
+      );
+      return desfecho;
+    }
+    if (desfecho === 'sem-debito') {
+      this.logger.error(
+        `OPS saque tx=${tx.id} bloqueado (${motivo.slice(0, 200)}) SEM débito ` +
+          'integral no ledger — FALHA sem estorno; conferência manual obrigatória',
+      );
+    }
+
+    await this.prisma.$transaction(async (db) => {
+      // Guarda de estado final: nunca regride desfecho selado em corrida.
+      const claim = await db.transacao.updateMany({
+        where: { id: tx.id, situacao: { in: enviaveis } },
+        data: { situacao: SITUACAO_TRANSACAO.FALHA, falhouEm: new Date() },
+      });
+      if (claim.count !== 1) {
+        this.logger.error(
+          `saque tx=${tx.id} bloqueado e ESTORNADO mas desfecho selado antes ` +
+            'da marcação de FALHA — conferência manual obrigatória',
+        );
+        await db.historicoSituacaoTransacao.create({
+          data: {
+            transacaoId: tx.id,
+            situacaoAnterior: tx.situacao,
+            novaSituacao: tx.situacao,
+            origem: 'WORKER',
+            motivo:
+              'Bloqueio na revalidação APÓS desfecho selado por outro caminho — ' +
+              'estorno já aplicado, conferir manualmente',
+            metadados: { saldoDevolvido: true, conferenciaManual: true },
+          },
+        });
+        return;
+      }
+      await db.historicoSituacaoTransacao.create({
+        data: {
+          transacaoId: tx.id,
+          situacaoAnterior: tx.situacao,
+          novaSituacao: SITUACAO_TRANSACAO.FALHA,
+          origem: 'WORKER',
+          motivo: `Saque bloqueado na revalidação: ${motivo.slice(0, 400)}`,
+          metadados:
+            desfecho === 'estornado'
+              ? { saldoDevolvido: true, estorno: 'automatico' }
+              : { saldoDevolvido: false, conferenciaManual: true },
+        },
+      });
+      await db.eventoOutbox.create({
+        data: {
+          usuarioId: tx.usuarioId,
+          tipoAgregado: 'TRANSACAO',
+          identificadorAgregado: tx.idTransacaoPublico,
+          tipoEvento: EVENTOS_LOJISTA.PIX_CASHOUT_FALHOU,
+          conteudo: {
+            idTransacao: tx.idTransacaoPublico,
+            situacao: SITUACAO_TRANSACAO.FALHA,
+            motivo: motivo.slice(0, 400),
+          },
+        },
+      });
+    });
+
+    this.logger.warn(
+      `saque tx=${tx.id} encerrado por bloqueio (${desfecho}): ${motivo.slice(0, 200)}`,
+    );
+    return desfecho;
   }
 
   private async registrarRecusa(
@@ -499,16 +687,37 @@ export class PixCashOutProcessor extends WorkerHost {
      * um blip no commit reverteria a DEVOLUÇÃO junto, e sem conciliação para
      * refazer o dinheiro ficaria retido. Por isso: estorno primeiro, sempre.
      *
+     * O estorno é GUARDADO pela situação, com FOR UPDATE: se um webhook PAID
+     * contraditório selou `CONCLUIDA` enquanto o 4xx estava em trânsito, o PIX
+     * saiu — estornar aqui devolveria o saldo de um PIX pago (perda dupla).
+     * Nesse caso nada é estornado e a situação não regride.
+     *
      * (No webhook e na conciliação é o oposto — lá o saque FOI enviado, tem id
      * da liquidante, então a conciliação recupera e o commit atômico é seguro.)
      */
-    await this.estornarSaque(tx, erro.message.slice(0, 200));
+    const enviaveis = [
+      SITUACAO_TRANSACAO.PENDENTE,
+      SITUACAO_TRANSACAO.PROCESSANDO,
+    ];
+    const estornado = await this.prisma.$transaction(async (db) => {
+      const rows = await db.$queryRaw<Array<{ situacao: string }>>`
+        SELECT situacao FROM transacoes WHERE id = ${tx.id} FOR UPDATE
+      `;
+      const atual = rows[0]?.situacao ?? '';
+      if (!(enviaveis as string[]).includes(atual)) return false;
+      await this.estornarSaque(tx, erro.message.slice(0, 200), db);
+      return true;
+    });
 
-    await this.prisma.$transaction([
-      // Fecha a tentativa em FALHA: a ordem foi recusada, então ela NÃO conta
-      // como "em voo" e não trava um reenvio futuro legítimo.
-      this.prisma.tentativaTransacao.update({
-        where: { id: tentativaId },
+    if (!estornado) {
+      this.logger.error(
+        `saque tx=${tx.id} recusa 4xx com desfecho já selado por outro caminho ` +
+          `— sem estorno e sem rebaixar a situação; conferir na liquidante`,
+      );
+      // A tentativa só fecha em FALHA se ainda estava em voo — se o webhook a
+      // promoveu a SUCESSO, o registro do pagamento não é apagado.
+      await this.prisma.tentativaTransacao.updateMany({
+        where: { id: tentativaId, situacao: SITUACAO_TENTATIVA.ENVIANDO },
         data: {
           situacao: SITUACAO_TENTATIVA.FALHA,
           statusHttp: erro.detalhe.statusHttp,
@@ -516,12 +725,49 @@ export class PixCashOutProcessor extends WorkerHost {
           dadosResposta: (erro.detalhe.dadosResposta ?? undefined) as never,
           concluidoEm: new Date(),
         },
-      }),
-      this.prisma.transacao.update({
-        where: { id: tx.id },
+      });
+      return;
+    }
+
+    await this.prisma.$transaction(async (db) => {
+      // Fecha a tentativa em FALHA: a ordem foi recusada, então ela NÃO conta
+      // como "em voo" e não trava um reenvio futuro legítimo.
+      await db.tentativaTransacao.updateMany({
+        where: { id: tentativaId, situacao: SITUACAO_TENTATIVA.ENVIANDO },
+        data: {
+          situacao: SITUACAO_TENTATIVA.FALHA,
+          statusHttp: erro.detalhe.statusHttp,
+          mensagemErro: erro.message.slice(0, 2000),
+          dadosResposta: (erro.detalhe.dadosResposta ?? undefined) as never,
+          concluidoEm: new Date(),
+        },
+      });
+      // Guarda de estado final: `count === 0` significa que outro caminho selou
+      // o desfecho entre o estorno e esta marcação. A situação nunca regride.
+      const claim = await db.transacao.updateMany({
+        where: { id: tx.id, situacao: { in: enviaveis } },
         data: { situacao: SITUACAO_TRANSACAO.FALHA, falhouEm: new Date() },
-      }),
-      this.prisma.historicoSituacaoTransacao.create({
+      });
+      if (claim.count !== 1) {
+        this.logger.error(
+          `saque tx=${tx.id} ESTORNADO mas desfecho selado por outro caminho ` +
+            `antes da marcação de FALHA — conferência manual obrigatória`,
+        );
+        await db.historicoSituacaoTransacao.create({
+          data: {
+            transacaoId: tx.id,
+            situacaoAnterior: tx.situacao,
+            novaSituacao: tx.situacao,
+            origem: 'WORKER',
+            motivo:
+              'Recusa da liquidante APÓS desfecho selado por outro caminho — ' +
+              'estorno já aplicado, conferir manualmente',
+            metadados: { saldoDevolvido: true, conferenciaManual: true },
+          },
+        });
+        return;
+      }
+      await db.historicoSituacaoTransacao.create({
         data: {
           transacaoId: tx.id,
           situacaoAnterior: tx.situacao,
@@ -530,8 +776,8 @@ export class PixCashOutProcessor extends WorkerHost {
           motivo: `Saque recusado pela liquidante: ${erro.message.slice(0, 400)}`,
           metadados: { saldoDevolvido: true, estorno: 'automatico' },
         },
-      }),
-      this.prisma.eventoOutbox.create({
+      });
+      await db.eventoOutbox.create({
         data: {
           usuarioId: tx.usuarioId,
           tipoAgregado: 'TRANSACAO',
@@ -543,7 +789,7 @@ export class PixCashOutProcessor extends WorkerHost {
             motivo: erro.message.slice(0, 400),
           },
         },
-      }),
-    ]);
+      });
+    });
   }
 }

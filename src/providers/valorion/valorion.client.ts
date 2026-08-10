@@ -422,26 +422,53 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
 
   // ----------------------------------------------------------------- refund
 
+  /**
+   * ⚠️ O endpoint de refund só recebe `{ id, external_reference }` — NÃO existe
+   * chave de idempotência por devolução (o `idDevolucaoPublico` não entra na
+   * request). Reenviar pode devolver DUAS vezes; por isso o processor congela
+   * qualquer desfecho ambíguo em vez de retentar (mesma doutrina do cash-out).
+   *
+   * A classificação dos erros segue o contrato do port:
+   * - pré-envio (sellerId ausente, lookup do webhook) → `ErroAntesDoEnvioError`
+   *   (nada saiu; retry é seguro);
+   * - HTTP 4xx exceto 408/429 → `RecusaAdquirenteError` (via `request`);
+   * - 200 com `status !== success` → `RecusaAdquirenteError` (resposta
+   *   explícita deles: retry dá o mesmo não);
+   * - timeout/5xx → Error cru (ambíguo — quem chama congela).
+   */
   async createRefund(input: CreateRefundInput): Promise<CreateRefundResult> {
     const c = input.credenciais;
     const sellerId = this.cred(c, 'sellerId', 'VALORION_SELLER_ID');
     if (!sellerId) {
-      throw new Error('Valorion: VALORION_SELLER_ID/credencial sellerId ausente para devolução');
+      throw new ErroAntesDoEnvioError(
+        'Valorion: VALORION_SELLER_ID/credencial sellerId ausente para devolução',
+      );
     }
 
     // A devolução referencia a `externalreference` DELES, que só chega no
     // webhook de pagamento — buscar lá; sem webhook, tentar com o próprio id.
-    const wh = await this.prisma.webhookRecebidoProvedor.findFirst({
-      where: {
-        provedor: { codigo: this.code },
-        conteudo: { path: ['idtransaction'], equals: input.idTransacaoLiquidante },
-      },
-      orderBy: { id: 'desc' },
-    });
-    const conteudo = wh?.conteudo as Record<string, unknown> | undefined;
-    const externalReference = String(
-      conteudo?.externalreference ?? input.idTransacaoLiquidante,
-    );
+    let externalReference: string;
+    try {
+      const wh = await this.prisma.webhookRecebidoProvedor.findFirst({
+        where: {
+          provedor: { codigo: this.code },
+          conteudo: { path: ['idtransaction'], equals: input.idTransacaoLiquidante },
+        },
+        orderBy: { id: 'desc' },
+      });
+      const conteudo = wh?.conteudo as Record<string, unknown> | undefined;
+      externalReference = String(
+        conteudo?.externalreference ?? input.idTransacaoLiquidante,
+      );
+    } catch (e) {
+      // Banco local falhou ANTES de qualquer chamada externa — retentável.
+      throw new ErroAntesDoEnvioError(
+        `Valorion refund: falha ao resolver external_reference — ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+        e,
+      );
+    }
 
     const resp = await this.request({
       method: 'POST',
@@ -451,7 +478,11 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
     });
 
     if (String(resp.status ?? '') !== 'success') {
-      throw new Error(`Valorion recusou a devolução: ${JSON.stringify(resp).slice(0, 500)}`);
+      // 200 com corpo de erro: a Valorion respondeu e disse não — definitivo.
+      throw new RecusaAdquirenteError(
+        `Valorion recusou a devolução: ${JSON.stringify(resp).slice(0, 500)}`,
+        { statusHttp: 200, dadosResposta: resp },
+      );
     }
     return {
       identificadorDevolucaoProvedor: String(

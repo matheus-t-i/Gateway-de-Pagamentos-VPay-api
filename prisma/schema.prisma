@@ -874,6 +874,12 @@ model Transacao {
   concluidoEm                         DateTime?           @map("concluido_em") @db.Timestamptz
   primeiroMedRecebidoEm               DateTime?           @map("primeiro_med_recebido_em") @db.Timestamptz
   falhouEm                            DateTime?           @map("falhou_em") @db.Timestamptz
+  /// Última passada da conciliação sobre esta transação. Round-robin: a
+  /// varredura ordena por esta coluna (NULLS FIRST) e a carimba a cada passe.
+  /// Sem ela, o `take: 40` sem cursor relia para sempre as MESMAS pendentes
+  /// mais antigas e nunca alcançava as recentes — starvation da rede de
+  /// recuperação (cash-in fantasma, saque órfão).
+  ultimaConciliacaoEm                 DateTime?           @map("ultima_conciliacao_em") @db.Timestamptz
   /// Histórico: a venda foi retida pelo método. Não zera na liberação manual.
   retidaMetodo                        Boolean             @default(false) @map("retida_metodo")
   /// MED simulado pelo automático (venda de ontem convertida).
@@ -915,6 +921,7 @@ model Transacao {
   @@index([usuarioId])
   @@index([situacao])
   @@index([criadoEm])
+  @@index([ultimaConciliacaoEm])
   @@index([usuarioId, criadoEm])
   @@index([retidaMetodo])
   @@index([medAutomatico])
@@ -1048,6 +1055,11 @@ model DevolucaoPix {
   valor                         Decimal  @db.Decimal(19, 2)
   motivo                        String?
   situacao                      String   @default("PENDENTE") @db.VarChar(30)
+  /// Tentativas de envio à liquidante (claim PENDENTE→PROCESSANDO incrementa).
+  /// Teto de 8: depois disso a varredura para e a linha vira decisão humana.
+  quantidadeTentativas          Int      @default(0) @map("quantidade_tentativas")
+  /// Último erro do envio — é o "motivo" que /admin/dinheiro-parado mostra.
+  ultimoErro                    String?  @map("ultimo_erro")
   metadados                     Json     @default("{}")
   criadoEm                      DateTime @default(now()) @map("criado_em") @db.Timestamptz
   atualizadoEm                  DateTime @updatedAt @map("atualizado_em") @db.Timestamptz

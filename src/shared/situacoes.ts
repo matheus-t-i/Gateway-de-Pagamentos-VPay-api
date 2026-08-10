@@ -104,12 +104,26 @@ export const SITUACAO_CASO_MED = {
 export type SituacaoCasoMedValor =
   (typeof SITUACAO_CASO_MED)[keyof typeof SITUACAO_CASO_MED];
 
-/** devolucoes_pix.situacao — VarChar(30); vocabulário oficial. */
+/**
+ * devolucoes_pix.situacao — VarChar(30); vocabulário oficial.
+ *
+ * Mesma doutrina de desfechos do saque (`PixCashOutProcessor`):
+ * - `PENDENTE`: ainda não saiu nada — retentável; a varredura da conciliação
+ *   reenfileira PENDENTE preso (é o ÚNICO estado que ela reenfileira).
+ * - `PROCESSANDO`: claim feito, POST pode estar em voo. Parado aqui = worker
+ *   morto no meio; NÃO é retentável automático (o refund da Valorion não tem
+ *   chave de idempotência — reenviar pode devolver DUAS vezes).
+ * - `FALHA`: recusa explícita da liquidante ou teto de tentativas — decisão
+ *   humana; visível em /admin/dinheiro-parado.
+ * - `AMBIGUA`: timeout/5xx DEPOIS do POST — o refund pode ter saído. Congelada
+ *   para conferência manual, como o saque ENVIANDO.
+ */
 export const SITUACAO_DEVOLUCAO = {
   PENDENTE: 'PENDENTE',
   PROCESSANDO: 'PROCESSANDO',
   CONCLUIDA: 'CONCLUIDA',
   FALHA: 'FALHA',
+  AMBIGUA: 'AMBIGUA',
 } as const;
 
 /** bloqueios_saldo.situacao — VarChar(30); vocabulário oficial. */

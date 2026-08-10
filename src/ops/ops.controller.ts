@@ -21,7 +21,10 @@ import {
   PERMISSOES,
   resumoProduto,
   DISPONIBILIDADE_ADQUIRENTE,
+  SITUACAO_DEVOLUCAO,
+  SITUACAO_LIBERACAO,
   SITUACAO_PROVEDOR,
+  SITUACAO_TENTATIVA,
   SITUACAO_TRANSACAO,
   SITUACAO_USUARIO,
   normalizarIpOuCidr as normalizarRede,
@@ -743,6 +746,150 @@ export class AdminOpsController {
         conteudo: w.conteudo,
         recebidoEm: w.recebidoEm,
         processadoEm: w.processadoEm,
+      })),
+    };
+  }
+
+  /**
+   * DINHEIRO PARADO — todo valor que está preso em algum ponto do sistema, com
+   * o MOTIVO já gravado, num lugar só.
+   *
+   * Substitui a "análise caso a caso": em vez de o admin descobrir nos logs o
+   * que travou, cada categoria lista as linhas com a causa que o próprio fluxo
+   * registrou (mensagemErro da tentativa, ultimoErro da devolução, ultimoErro
+   * da liberação). As categorias são exatamente os pontos onde o desenho
+   * CONGELA em vez de retentar:
+   *
+   * - saque sem desfecho: PROCESSANDO com tentativa ENVIANDO (ambíguo — runbook
+   *   §2) ou sem nenhuma tentativa ativa há mais de 15 min (enfileiramento/
+   *   revalidação falhando; o reprocesso automático da conciliação cuida, mas
+   *   se persiste aqui é porque está em loop e precisa de gente);
+   * - devolução presa: tudo que não é CONCLUIDA (PENDENTE velha em retry,
+   *   PROCESSANDO órfã, AMBIGUA congelada, FALHA recusada/teto);
+   * - liberação travada: FALHA no teto de tentativas (a fila 6 já desistiu);
+   * - cash-in fantasma: FALHA com TIMEOUT — pode existir cobrança pagável na
+   *   liquidante sem venda local (runbook §3).
+   *
+   * Cada lista tem um teto (`take`) e vem ordenada da mais antiga para a mais
+   * nova — a paginação fina é do front (client-side, padrão das telas de fila).
+   */
+  @Get('relatorios/dinheiro-parado')
+  @RequerPermissao(PERMISSOES.ADMIN_RELATORIOS_VER)
+  async dinheiroParado() {
+    const agora = Date.now();
+    const min = (n: number) => new Date(agora - n * 60 * 1000);
+
+    const [saques, devolucoes, liberacoes, fantasmas] = await Promise.all([
+      this.prisma.transacao.findMany({
+        where: {
+          direcao: 'SAIDA',
+          situacao: SITUACAO_TRANSACAO.PROCESSANDO,
+          criadoEm: { lte: min(15) },
+        },
+        include: {
+          usuario: { select: { nomeRazaoSocial: true, idPublico: true } },
+          tentativas: { orderBy: { numeroTentativa: 'desc' }, take: 1 },
+        },
+        orderBy: { criadoEm: 'asc' },
+        take: 100,
+      }),
+      this.prisma.devolucaoPix.findMany({
+        where: {
+          situacao: { not: SITUACAO_DEVOLUCAO.CONCLUIDA },
+          criadoEm: { lte: min(10) },
+        },
+        include: {
+          transacao: {
+            select: {
+              idTransacaoPublico: true,
+              usuario: { select: { nomeRazaoSocial: true, idPublico: true } },
+            },
+          },
+        },
+        orderBy: { criadoEm: 'asc' },
+        take: 100,
+      }),
+      this.prisma.liberacaoSaldo.findMany({
+        where: {
+          situacao: SITUACAO_LIBERACAO.FALHA,
+          quantidadeTentativas: { gte: 8 },
+        },
+        // LiberacaoSaldo não tem relação direta com usuario — vem pela venda.
+        include: {
+          transacao: {
+            select: {
+              idTransacaoPublico: true,
+              usuario: { select: { nomeRazaoSocial: true, idPublico: true } },
+            },
+          },
+        },
+        orderBy: { liberarEm: 'asc' },
+        take: 100,
+      }),
+      this.prisma.transacao.findMany({
+        where: {
+          direcao: 'ENTRADA',
+          situacao: SITUACAO_TRANSACAO.FALHA,
+          tentativas: { some: { mensagemErro: { contains: 'TIMEOUT' } } },
+          criadoEm: { gte: min(30 * 24 * 60) },
+        },
+        include: {
+          usuario: { select: { nomeRazaoSocial: true, idPublico: true } },
+          tentativas: { orderBy: { numeroTentativa: 'desc' }, take: 1 },
+        },
+        orderBy: { criadoEm: 'asc' },
+        take: 100,
+      }),
+    ]);
+
+    return {
+      saquesSemDesfecho: saques.map((tx) => {
+        const ultima = tx.tentativas[0];
+        const emVoo = ultima?.situacao === SITUACAO_TENTATIVA.ENVIANDO;
+        return {
+          idTransacao: tx.idTransacaoPublico,
+          cliente: tx.usuario.nomeRazaoSocial,
+          clienteIdPublico: tx.usuario.idPublico,
+          valor: tx.valorBruto.toString(),
+          criadoEm: tx.criadoEm,
+          /** AMBIGUO = ordem em voo (runbook §2); SEM_TENTATIVA = nunca saiu. */
+          tipo: emVoo ? 'AMBIGUO' : ultima ? 'COM_TENTATIVA' : 'SEM_TENTATIVA',
+          motivo:
+            ultima?.mensagemErro ??
+            (ultima
+              ? `tentativa ${ultima.situacao} sem mensagem`
+              : 'nenhuma tentativa registrada — enfileiramento/revalidação em loop'),
+        };
+      }),
+      devolucoesPresas: devolucoes.map((d) => ({
+        idDevolucao: d.idDevolucaoPublico,
+        idTransacao: d.transacao.idTransacaoPublico,
+        cliente: d.transacao.usuario.nomeRazaoSocial,
+        clienteIdPublico: d.transacao.usuario.idPublico,
+        valor: d.valor.toString(),
+        situacao: d.situacao,
+        tentativas: d.quantidadeTentativas,
+        criadoEm: d.criadoEm,
+        motivo: d.ultimoErro ?? 'aguardando processamento',
+      })),
+      liberacoesTravadas: liberacoes.map((l) => ({
+        id: l.id.toString(),
+        idTransacao: l.transacao.idTransacaoPublico,
+        cliente: l.transacao.usuario.nomeRazaoSocial,
+        clienteIdPublico: l.transacao.usuario.idPublico,
+        valor: l.valor.toString(),
+        tipo: l.tipoLiberacao,
+        liberarEm: l.liberarEm,
+        tentativas: l.quantidadeTentativas,
+        motivo: l.ultimoErro ?? 'teto de tentativas atingido',
+      })),
+      cashinFantasma: fantasmas.map((tx) => ({
+        idTransacao: tx.idTransacaoPublico,
+        cliente: tx.usuario.nomeRazaoSocial,
+        clienteIdPublico: tx.usuario.idPublico,
+        valor: tx.valorBruto.toString(),
+        criadoEm: tx.criadoEm,
+        motivo: tx.tentativas[0]?.mensagemErro ?? 'TIMEOUT sem detalhe',
       })),
     };
   }

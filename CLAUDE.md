@@ -80,14 +80,46 @@ Ativar/desativar adquirente, contingência e saque automático exigem permissão
 - `6-liberacao-saldo` (varre AGENDADA vencida + reprocessa FALHA/PROCESSANDO órfã,
   com claim atômico, espera de 10 min e teto de 8 tentativas — antes, FALHA era
   terminal e congelava o dinheiro do lojista para sempre)
-- `7-conciliacao`
+- `7-conciliacao` (round-robin por `transacoes.ultima_conciliacao_em`: ordena
+  NULLS FIRST + mais antiga visita primeiro e carimba o lote lido — sem isso o
+  `take: 40` relia para sempre as MESMAS pendentes mais antigas e nunca
+  alcançava transação recente presa, já que nada expira cobrança abandonada)
 - `8-emails`
-- `9-devolucao-pix`
+- `9-devolucao-pix` (desfechos separados como no saque, porque o refund da
+  Valorion NÃO manda chave de idempotência: pré-envio volta a `PENDENTE`
+  [retentável, teto 8 → FALHA], recusa explícita → `FALHA`, timeout/5xx
+  pós-POST → `AMBIGUA` congelada. Claim `PENDENTE→PROCESSANDO` serializa job
+  duplicado. A varredura da conciliação reenfileira **SÓ `PENDENTE`** preso —
+  cobre enqueue perdido após o commit do `MedService.decidir`, que por isso
+  engole erro de fila. `PROCESSANDO` órfã/`AMBIGUA`/`FALHA` nunca voltam
+  sozinhas: aparecem em `/admin/dinheiro-parado` e são decisão humana.
+  Specs: `src/worker-processors/devolucao-desfechos.spec.ts`)
 - `10-saque-automatico`
 - `11-webhook-reenvio` (reenvio MANUAL do callback, pelo botão do painel/admin)
 - `12-integracao-envio` (envio da venda aos APPS que o lojista conectou)
 
 Constantes em `src/shared/queues.ts`. Bull Board `/admin/queues` com ADMINISTRADOR.
+
+⚠️ **jobId customizado NUNCA leva `:` (nem pode ser número puro).** O BullMQ 5
+valida no `add` e LANÇA (`Custom Id cannot contain :`) — com `saque:<id>` o
+enqueue do saque falhava DEPOIS do débito (saldo debitado, nenhum job, 500 ao
+lojista) e o webhook de cash-in nem entrava na fila; a conciliação também não
+conseguia reenfileirar órfão. Entrou em silêncio via update de minor do bullmq
+(^5.34 → 5.81) e foi encontrado no smoke da imagem Docker. Separador é `-`
+(`saque-<id>`, `webhook-in-<id>`, `webhook-out-<id>`). Regressão em
+`src/queues/job-id.spec.ts`, que reproduz a validação do BullMQ.
+
+## Deploy (empacotamento)
+
+`Dockerfile` na raiz (imagem única, node:22-slim, multi-stage; API =
+`node dist/main.js`, Worker = `node dist/worker.js`) + `render.yaml` (blueprint:
+web + worker + Postgres + Key Value privados com `ipAllowList: []`,
+`preDeployCommand` roda `prisma migrate deploy` com a CLI PINADA da imagem —
+`node node_modules/prisma/build/index.js`, nunca `npx` avulso). Health em
+`/health/ready`. Segredos só com `sync: false`. Painel na Vercel: sem config
+extra, mas `NEXT_PUBLIC_API_URL` é obrigatória — o `next build` FALHA sem ela
+(fail-fast em `web/src/lib/api.ts`). Checklist completo em
+`docs/RUNBOOK-GOLIVE.md` §0.
 
 ## Integrações (apps conectados pelo lojista)
 
@@ -375,7 +407,7 @@ nesta ordem:
 Regra violada → `throw` (job falha e fica visível para análise). **Nunca** devolver
 saldo nem "consertar" sozinho: mexer em dinheiro automaticamente é decisão humana.
 
-### Saque: TRÊS desfechos, e confundi-los paga duas vezes
+### Saque: QUATRO desfechos, e confundi-los paga duas vezes
 
 A tentativa nasce **`ENVIANDO` ANTES do POST** — é ela que torna a ordem "em voo"
 visível. `jaEnviado` barra qualquer tentativa que **não seja FALHA**, então
@@ -383,9 +415,23 @@ timeout não reenvia. Coberto por `src/pix/saque-duplicidade.spec.ts`.
 
 | Desfecho | Erro | O que o processor faz |
 |---|---|---|
+| Bloqueio na revalidação | `SaqueBloqueadoError` (chave não aprovada, conta bloqueada, ticket, escopo…) | `encerrarPorBloqueio`: FALHA + **estorno automático** + `pix.cashout.falhou` |
 | Antes do envio | `ErroAntesDoEnvioError` (auth, credencial) | apaga a tentativa e relança — **retry é seguro e necessário** |
 | Recusa | `RecusaAdquirenteError` (4xx da criação, menos 408/429) | tentativa FALHA + transação FALHA + `pix.cashout.falhou`, numa transação |
 | Ambíguo | qualquer outro (timeout, 5xx) | tentativa fica `ENVIANDO` + `UnrecoverableError` — **congela** |
+
+**Bloqueio ≠ deixar preso.** Antes, `SaqueBloqueadoError` só relançava: a tx
+ficava `PROCESSANDO` com saldo debitado, sem estorno, sem callback — e o
+recovery de órfãos da conciliação reenfileirava o MESMO bloqueio a cada 5 min,
+para sempre (loop infinito com `ALERTA_FILA` se acumulando). Agora o bloqueio é
+desfecho: mesma doutrina da recusa síncrona (não há tentativa nem id da
+liquidante ⇒ não há rede ⇒ **estorno primeiro, em commit próprio**). Três
+guardas dentro do FOR UPDATE, nesta ordem: situação ainda enviável (não regride
+desfecho selado); **nenhuma tentativa não-FALHA** (retry manual de saque JÁ
+ENVIADO também cai na revalidação — estornar com ordem em voo devolveria o
+saldo de um PIX pago); débito integral existe (estornar sem débito criaria
+dinheiro — `sem-debito` sela FALHA sem estorno + `conferenciaManual`). Coberto
+por `src/pix/saque-bloqueio-estorno.spec.ts`.
 
 ⚠️ **`throw` cru NÃO congela nada**: a fila roda com `attempts: 5`, então relançar
 REAGENDA. Congelar exige `UnrecoverableError` do BullMQ. Foi exatamente esse
@@ -432,6 +478,34 @@ bloco de sucesso a rebaixava para `PROCESSANDO`. A tentativa registra
 `SUCESSO`+resposta mesmo quando o `updateMany` da transação dá `count: 0` (o
 desfecho já foi selado por outro caminho). Coberto por `saque-duplicidade.spec.ts`
 ('SUCESSO não regride estado final').
+
+A MESMA guarda vale para `registrarRecusa` (era o único caminho sem ela): o
+ESTORNO da recusa síncrona é guardado por `SELECT ... FOR UPDATE` na transação
+— se um webhook `PAID` contraditório selou `CONCLUIDA` enquanto o 4xx estava em
+trânsito, nada é estornado e nada regride (estornar ali devolveria o saldo de um
+PIX pago: perda dupla). Coberto por 'recusa TARDIA não rebaixa CONCLUIDA'.
+
+### Limite diário/velocity nunca contam o saque em curso
+
+`SaqueProtecaoService.assertSaquePermitido` recebe `ignorarTransacaoId` na
+REVALIDAÇÃO do worker: o débito acontece na criação, então a transação já
+existe como SAIDA do dia e entrava no próprio `aggregate`/`count` — qualquer
+saque acima de metade do limite diário (ou o N-ésimo com `maxSaquesPorHora = N`)
+era recusado deterministicamente no worker com o saldo debitado, sem estorno e
+sem rede (a conciliação exige tentativa com id, e ali nenhuma tentativa chegou a
+existir). É filtro de leitura (`id: { not: ... }`) — nada é apagado. Coberto por
+`src/pix/saque-protecao.spec.ts`, incluindo o fluxo inteiro pelo processor.
+
+### Dinheiro parado tem UMA tela
+
+**`GET /admin/relatorios/dinheiro-parado`** (`ADMIN_RELATORIOS_VER`) junta tudo
+que está preso com o motivo já gravado: saque `PROCESSANDO` sem desfecho
+(ambíguo em voo / sem tentativa), devolução não-CONCLUIDA (com
+`quantidadeTentativas`/`ultimoErro`), liberação `FALHA` no teto e cash-in
+fantasma (FALHA com TIMEOUT). Página `/admin/dinheiro-parado` no web (abas com
+contadores, refetch de 60s). Congelar sem mostrar é perda silenciosa — todo
+desfecho que congela (`AMBIGUA`, `ENVIANDO` ambíguo, teto) TEM que aparecer ali;
+desfecho novo que congele e não entre nessa tela está errado por definição.
 
 ### A resposta do banco é sempre salva E visível ao admin
 
