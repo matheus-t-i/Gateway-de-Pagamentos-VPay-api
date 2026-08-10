@@ -34,11 +34,7 @@ export class TesourariaService {
   ) {}
 
   private credenciaisDaConta(criptografadas: string): Record<string, unknown> {
-    try {
-      return decryptCredentials(criptografadas);
-    } catch {
-      return JSON.parse(criptografadas) as Record<string, unknown>;
-    }
+    return decryptCredentials(criptografadas);
   }
 
   /**

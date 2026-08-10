@@ -19,6 +19,7 @@ import { CreateChargeResult } from '../providers/payment-provider.port';
 import { AdquirentesService } from '../providers/adquirentes.service';
 import { ProviderRegistry } from '../providers/provider.registry';
 import { QueuesService } from '../queues/queues.service';
+import { SaqueProtecaoService } from './saque-protecao.service';
 import {
   CriarCobrancaPixInput,
   CriarSaquePixInput,
@@ -68,15 +69,12 @@ export class PixService {
     private readonly contingencia: ContingenciaService,
     private readonly adquirentes: AdquirentesService,
     private readonly integracoes: IntegracoesService,
+    private readonly saqueProtecao: SaqueProtecaoService,
   ) {}
 
-  /** Credenciais da conta; contas antigas ainda guardam JSON em claro. */
+  /** Credenciais da conta — só AES-GCM; JSON em claro não é mais aceito. */
   private credenciaisDa(conta: { credenciaisCriptografadas: string }) {
-    try {
-      return decryptCredentials(conta.credenciaisCriptografadas);
-    } catch {
-      return JSON.parse(conta.credenciaisCriptografadas) as Record<string, unknown>;
-    }
+    return decryptCredentials(conta.credenciaisCriptografadas);
   }
 
   private custosDa(conta: ContaParaCobranca) {
@@ -704,11 +702,15 @@ export class PixService {
       cfg.origemSaquePermitida === 'AMBOS' ||
       (viaApi ? cfg.origemSaquePermitida === 'API' : cfg.origemSaquePermitida === 'PAINEL');
     if (!origemLiberada) {
-      throw new BadRequestException(
-        viaApi
-          ? 'Saque via API não está habilitado para esta conta.'
-          : 'Saque pelo painel não está habilitado para esta conta.',
-      );
+      const msg = viaApi
+        ? 'Saque via API não está habilitado para esta conta.'
+        : 'Saque pelo painel não está habilitado para esta conta.';
+      await this.saqueProtecao.registrarRecusaSaque({
+        usuarioId: params.usuarioId,
+        motivo: msg,
+        credencialApiId: params.credencialApiId,
+      });
+      throw new BadRequestException(msg);
     }
 
     // Chave de destino: quando a conta exige chave cadastrada, o saque só sai
@@ -723,10 +725,15 @@ export class PixService {
         },
       });
       if (!chave) {
-        throw new BadRequestException(
+        const msg =
           'Esta conta só permite saque para chave PIX cadastrada e aprovada. ' +
-            'Cadastre a chave no painel e aguarde a aprovação.',
-        );
+          'Cadastre a chave no painel e aguarde a aprovação.';
+        await this.saqueProtecao.registrarRecusaSaque({
+          usuarioId: params.usuarioId,
+          motivo: msg,
+          credencialApiId: params.credencialApiId,
+        });
+        throw new BadRequestException(msg);
       }
     }
 
@@ -735,6 +742,23 @@ export class PixService {
     }
     if (cfg.ticketMaximoPixSaida && valor.gt(cfg.ticketMaximoPixSaida)) {
       throw new BadRequestException('Valor acima do máximo');
+    }
+
+    try {
+      await this.saqueProtecao.assertSaquePermitido({
+        usuarioId: params.usuarioId,
+        valor,
+        cfg,
+      });
+    } catch (e) {
+      if (e instanceof BadRequestException) {
+        await this.saqueProtecao.registrarRecusaSaque({
+          usuarioId: params.usuarioId,
+          motivo: String(e.message),
+          credencialApiId: params.credencialApiId,
+        });
+      }
+      throw e;
     }
 
     const conta = await this.prisma.contaProvedor.findUniqueOrThrow({

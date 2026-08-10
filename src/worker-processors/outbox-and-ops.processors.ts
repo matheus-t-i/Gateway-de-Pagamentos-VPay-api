@@ -475,11 +475,7 @@ export class ConciliacaoProcessor extends WorkerHost {
       }
 
       let credenciais: Record<string, unknown>;
-      try {
-        credenciais = decryptCredentials(tx.contaProvedor.credenciaisCriptografadas);
-      } catch {
-        credenciais = JSON.parse(tx.contaProvedor.credenciaisCriptografadas);
-      }
+      credenciais = decryptCredentials(tx.contaProvedor.credenciaisCriptografadas);
 
       try {
         const status = await this.providers

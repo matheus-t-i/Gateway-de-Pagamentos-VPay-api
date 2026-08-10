@@ -81,6 +81,7 @@ describe('PixService — idempotência por referenciaExterna', () => {
       {} as never,
       {} as never,
       {} as never,
+      { assertSaquePermitido: async () => undefined, registrarRecusaSaque: async () => undefined } as never,
     );
   }
 

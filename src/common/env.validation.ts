@@ -83,6 +83,11 @@ export function validarAmbiente(env: Record<string, string | undefined>) {
         'API_PUBLIC_URL é obrigatória em produção (monta o postbackUrl enviado à liquidante).',
       );
     }
+    if (!env.TURNSTILE_SECRET_KEY || env.TURNSTILE_SECRET_KEY.trim().length < 16) {
+      erros.push(
+        'TURNSTILE_SECRET_KEY é obrigatória em produção (Cloudflare Turnstile no login).',
+      );
+    }
   }
 
   if (erros.length > 0) {

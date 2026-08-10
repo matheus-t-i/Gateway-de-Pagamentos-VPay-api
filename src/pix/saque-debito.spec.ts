@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
+import { encryptCredentials } from '../common/crypto.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfigPixService, LedgerService } from '../ledger/ledger.service';
 import { PixService } from './pix.service';
@@ -48,6 +49,10 @@ describe('PixService.criarSaque — débito amarrado à transação', () => {
       {} as never,
       {} as never,
       {} as never,
+      {
+        assertSaquePermitido: async () => undefined,
+        registrarRecusaSaque: async () => undefined,
+      } as never,
     );
 
     sufixo = `${Date.now()}`;
@@ -88,7 +93,8 @@ describe('PixService.criarSaque — débito amarrado à transação', () => {
           provedorPagamentoId: provedor.id,
           nome: 'Conta teste saque',
           chaveUnicaConta: 'teste_saque:conta-principal',
-          credenciaisCriptografadas: '{}',
+          // AES-GCM: JSON em claro não é mais aceito por `decryptCredentials`.
+          credenciaisCriptografadas: encryptCredentials({}),
           pixEntradaHabilitado: true,
           pixSaidaHabilitado: true,
           situacao: SITUACAO_PROVEDOR.ATIVO,

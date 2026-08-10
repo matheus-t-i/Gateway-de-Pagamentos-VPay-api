@@ -17,6 +17,7 @@ import {
   DOCUMENTOS_LEGAIS,
   loginSchema,
   PAPEIS,
+  PERMISSOES,
   SITUACAO_ANALISE,
   SITUACAO_USUARIO,
   VERSAO_DOCUMENTOS_LEGAIS,
@@ -30,6 +31,7 @@ import { validarTotp } from './totp.controller';
 import { montarStatusOnboarding } from '../onboarding/onboarding.util';
 import { Throttle } from '../common/ip-throttle.guard';
 import { assertStepUpTotp } from '../common/step-up-totp';
+import { assertTurnstileLogin } from '../common/turnstile.util';
 
 /** Janela deslizante do lockout de login (expira sozinha). */
 const JANELA_LOCKOUT_MS = 15 * 60 * 1000;
@@ -148,13 +150,15 @@ export class AuthController {
     if (!parsed.success) {
       throw new BadRequestException(parsed.error.flatten());
     }
-    const { email, senha, codigoTotp } = parsed.data;
+    const { email, senha, codigoTotp, turnstileToken } = parsed.data;
+    const ip = req.ip;
+    const ua = req.headers['user-agent'];
+    // Anti-bot antes do argon2 / lookup — Turnstile fail-closed em produção.
+    await assertTurnstileLogin({ token: turnstileToken, ip });
     const usuario = await this.prisma.usuario.findUnique({
       where: { email },
       include: { papeis: { include: { papel: true } } },
     });
-    const ip = req.ip;
-    const ua = req.headers['user-agent'];
 
     if (!usuario) {
       await this.prisma.auditoriaAcesso.create({
@@ -213,6 +217,21 @@ export class AuthController {
       throw new UnauthorizedException('Credenciais inválidas');
     }
 
+    const papeisAtivos = usuario.papeis
+      .filter((p) => p.papel.ativo)
+      .map((p) => p.papel.nome);
+    const permissoesLogin = await permissoesEfetivas(
+      this.prisma,
+      usuario.id,
+      papeisAtivos,
+    );
+    // Perfis com escopo global / ADMINISTRADOR: 2FA obrigatório no login.
+    // Sem TOTP ainda, o token é emitido mas o JwtAuthGuard só libera rotas de
+    // ativação — chicken-and-egg resolvido sem bootstrap especial.
+    const perfilAdmin =
+      papeisAtivos.includes(PAPEIS.ADMINISTRADOR) ||
+      permissoesLogin.includes(PERMISSOES.ESCOPO_GLOBAL);
+
     // 2FA: com TOTP ativo, a senha correta sozinha NÃO emite token.
     if (usuario.totpHabilitado && usuario.segredoTotpCriptografado) {
       if (!codigoTotp) {
@@ -236,6 +255,8 @@ export class AuthController {
         });
         throw new UnauthorizedException('Código de verificação inválido.');
       }
+    } else if (perfilAdmin && !codigoTotp) {
+      // Admin sem 2FA ainda entra, mas o front deve forçar a ativação.
     }
 
     /**
@@ -280,9 +301,7 @@ export class AuthController {
         data: { ultimoAcessoEm: new Date() },
       });
 
-      const papeis = usuario.papeis
-        .filter((p) => p.papel.ativo)
-        .map((p) => p.papel.nome);
+      const papeis = papeisAtivos;
       const accessToken = await this.jwt.signAsync({
         sub: usuario.id.toString(),
         email: usuario.email,
@@ -292,6 +311,8 @@ export class AuthController {
       return {
         situacao: SITUACAO_USUARIO.ATIVO,
         accessToken,
+        /** Admin sem TOTP: painel redireciona para ativar 2FA. */
+        requerAtivar2FA: perfilAdmin && !usuario.totpHabilitado,
         usuario: {
           idPublico: usuario.idPublico,
           email: usuario.email,
@@ -303,7 +324,7 @@ export class AuthController {
           papeis,
           // O painel monta menu e guardas de rota com isto; sem enviar já no
           // login, a primeira tela renderiza sem nada até o /auth/me responder.
-          permissoes: await permissoesEfetivas(this.prisma, usuario.id, papeis),
+          permissoes: permissoesLogin,
         },
       };
     }

@@ -1,6 +1,10 @@
 import { Controller, Post, Req, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import {
+  JWT_AUDIENCE_API,
+  JWT_ISSUER,
+} from '../common/jwt-claims';
 import { CredencialAuthService } from './credencial-auth.service';
 
 /**
@@ -54,7 +58,11 @@ export class TokenApiController {
 
     const ttlSegundos = Number(this.config.get('API_TOKEN_TTL_SEGUNDOS') ?? 3600);
     const payload: TokenApiPayload = { sub: cred.id, tipo: TIPO_TOKEN_API };
-    const accessToken = await this.jwt.signAsync(payload, { expiresIn: ttlSegundos });
+    const accessToken = await this.jwt.signAsync(payload, {
+      expiresIn: ttlSegundos,
+      issuer: JWT_ISSUER(),
+      audience: JWT_AUDIENCE_API(),
+    });
 
     /**
      * Formato de resposta do OAuth2 (RFC 6749): é o que SDKs e ferramentas de

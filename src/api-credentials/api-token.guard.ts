@@ -5,9 +5,21 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { ESCOPOS_API } from '../shared';
+import {
+  JWT_AUDIENCE_API,
+  JWT_ISSUER,
+} from '../common/jwt-claims';
 import { CredencialAuthService } from './credencial-auth.service';
+import { RateLimitService } from './rate-limit.service';
+import {
+  HEADER_VPAY_NONCE,
+  HEADER_VPAY_SIGNATURE,
+  HEADER_VPAY_TIMESTAMP,
+  verificarAssinaturaHmacRequest,
+} from './request-hmac';
 import { TIPO_TOKEN_API, type TokenApiPayload } from './token.controller';
 
 /**
@@ -18,12 +30,17 @@ import { TIPO_TOKEN_API, type TokenApiPayload } from './token.controller';
  * estado — revogar credencial, bloquear conta, editar allowlist de IP — é
  * relido do banco a cada requisição via `carregarCredencialAtiva`: revogação
  * corta o acesso na chamada seguinte, sem esperar o token expirar.
+ *
+ * Quando a credencial exige HMAC (ou `API_HMAC_OBRIGATORIO=true`), valida
+ * também `x-vpay-timestamp` + `x-vpay-nonce` + `x-vpay-signature`.
  */
 @Injectable()
 export class ApiTokenGuard implements CanActivate {
   constructor(
     private readonly jwt: JwtService,
     private readonly credAuth: CredencialAuthService,
+    private readonly rateLimit: RateLimitService,
+    private readonly config: ConfigService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -37,7 +54,10 @@ export class ApiTokenGuard implements CanActivate {
 
     let payload: TokenApiPayload;
     try {
-      payload = await this.jwt.verifyAsync<TokenApiPayload>(header.slice(7));
+      payload = await this.jwt.verifyAsync<TokenApiPayload>(header.slice(7), {
+        issuer: JWT_ISSUER(),
+        audience: JWT_AUDIENCE_API(),
+      });
     } catch (e) {
       /**
        * Expiração tem mensagem própria: é o único 401 esperado na operação
@@ -57,10 +77,37 @@ export class ApiTokenGuard implements CanActivate {
       throw new UnauthorizedException('Token de acesso inválido');
     }
 
-    req.apiCredential = await this.credAuth.carregarCredencialAtiva(
+    const cred = await this.credAuth.carregarCredencialAtiva(
       BigInt(payload.sub),
       { ip: req.ip, path: req.path },
     );
+    req.apiCredential = cred;
+
+    const hmacGlobal =
+      this.config.get<string>('API_HMAC_OBRIGATORIO') === 'true' ||
+      this.config.get<string>('API_HMAC_OBRIGATORIO') === '1';
+    if (hmacGlobal || cred.exigirAssinaturaHmac) {
+      const nonce = String(req.headers[HEADER_VPAY_NONCE] ?? '');
+      // Anti-replay: nonce de uso único por credencial (TTL = janela HMAC).
+      if (nonce && !(await this.rateLimit.reservarNonceHmac(cred.id, nonce))) {
+        throw new UnauthorizedException('x-vpay-nonce já utilizado');
+      }
+      const bodyRaw =
+        typeof req.rawBody === 'string' || Buffer.isBuffer(req.rawBody)
+          ? req.rawBody
+          : JSON.stringify(req.body ?? {});
+      verificarAssinaturaHmacRequest({
+        method: req.method,
+        path: req.path,
+        timestampHeader: req.headers[HEADER_VPAY_TIMESTAMP] as string | undefined,
+        nonceHeader: nonce || undefined,
+        signatureHeader: req.headers[HEADER_VPAY_SIGNATURE] as string | undefined,
+        bodyRaw,
+        segredoHmacCriptografado: cred.segredoHmacCriptografado,
+        segredoHmacAnteriorCriptografado: cred.segredoHmacAnteriorCriptografado,
+      });
+    }
+
     return true;
   }
 }

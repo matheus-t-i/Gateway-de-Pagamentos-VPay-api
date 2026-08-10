@@ -149,4 +149,21 @@ export class RateLimitService implements OnModuleDestroy {
       HttpStatus.TOO_MANY_REQUESTS,
     );
   }
+
+  /**
+   * Reserva nonce HMAC (SET NX). `true` = primeira vez; `false` = replay.
+   * Fail-open se Redis cair — assinatura ainda protege o body.
+   */
+  async reservarNonceHmac(credencialId: string, nonce: string): Promise<boolean> {
+    try {
+      const key = `hmac:nonce:${credencialId}:${nonce}`;
+      const ok = await this.redis.set(key, '1', 'EX', 600, 'NX');
+      return ok === 'OK';
+    } catch (e) {
+      this.log.error(
+        `Nonce HMAC indisponível (${(e as Error).message}) — liberando`,
+      );
+      return true;
+    }
+  }
 }

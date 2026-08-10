@@ -488,6 +488,15 @@ model CredencialApi {
   segredoAnteriorExpiraEm  DateTime? @map("segredo_anterior_expira_em") @db.Timestamptz
   escopos            Json      @default("[]")
   ativo              Boolean   @default(true)
+  /// true = toda chamada Bearer exige `x-vpay-timestamp` + `x-vpay-nonce` +
+  /// `x-vpay-signature` (HMAC-SHA256 do segredo). Também pode ser forçado
+  /// globalmente com `API_HMAC_OBRIGATORIO=true`.
+  exigirAssinaturaHmac Boolean @default(false) @map("exigir_assinatura_hmac")
+  /// Cópia AES-GCM do segredo atual — só para verificar HMAC de request.
+  /// O hash (`segredoHash`) continua sendo a fonte da autenticação do token.
+  segredoHmacCriptografado String? @map("segredo_hmac_criptografado")
+  /// Segredo anterior cifrado, válido na janela de rotação (mesmo prazo do hash).
+  segredoHmacAnteriorCriptografado String? @map("segredo_hmac_anterior_criptografado")
   expiraEm           DateTime? @map("expira_em") @db.Timestamptz
   revogadoEm         DateTime? @map("revogado_em") @db.Timestamptz
   criadoEm           DateTime  @default(now()) @map("criado_em") @db.Timestamptz
@@ -671,6 +680,10 @@ model ConfiguracaoPadraoPixUsuario {
   ticketMaximoPixEntrada      Decimal             @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
   ticketMinimoPixSaida        Decimal             @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
   ticketMaximoPixSaida        Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
+  /// Teto de valor bruto de saques no dia (America/Sao_Paulo). null = sem teto.
+  limiteDiarioPixSaida        Decimal?            @map("limite_diario_pix_saida") @db.Decimal(19, 2)
+  /// Máximo de saques criados por hora corrida. null = sem teto de velocity.
+  maxSaquesPorHora            Int?                @map("max_saques_por_hora")
   permitirPixSaidaViaApi      Boolean             @default(false) @map("permitir_pix_saida_via_api")
   origemSaquePermitida        OrigemSaque         @default(PAINEL) @map("origem_saque_permitida")
   exigirChavePixCadastrada    Boolean             @default(true) @map("exigir_chave_pix_cadastrada")
@@ -708,6 +721,10 @@ model ConfiguracaoPixUsuario {
   ticketMaximoPixEntrada        Decimal             @map("ticket_maximo_pix_entrada") @db.Decimal(19, 2)
   ticketMinimoPixSaida          Decimal             @default(0) @map("ticket_minimo_pix_saida") @db.Decimal(19, 2)
   ticketMaximoPixSaida          Decimal?            @map("ticket_maximo_pix_saida") @db.Decimal(19, 2)
+  /// Teto de valor bruto de saques no dia (America/Sao_Paulo). null = sem teto.
+  limiteDiarioPixSaida          Decimal?            @map("limite_diario_pix_saida") @db.Decimal(19, 2)
+  /// Máximo de saques criados por hora corrida. null = sem teto de velocity.
+  maxSaquesPorHora              Int?                @map("max_saques_por_hora")
   permitirPixSaidaViaApi        Boolean             @default(false) @map("permitir_pix_saida_via_api")
   /// Por onde o saque pode ser pedido. Substitui a leitura de
   /// `permitirPixSaidaViaApi` (mantido só para não quebrar dado antigo).
@@ -715,6 +732,10 @@ model ConfiguracaoPixUsuario {
   /// true = saque só para chave PIX cadastrada e APROVADA na conta; false = a
   /// chave pode vir solta na requisição. Vale para API e painel.
   exigirChavePixCadastrada      Boolean             @default(true) @map("exigir_chave_pix_cadastrada")
+  /// Antifraude: muitas recusas em pouco tempo desligam o saque até o admin liberar.
+  saqueBloqueadoPorAbuso        Boolean             @default(false) @map("saque_bloqueado_por_abuso")
+  saqueBloqueadoPorAbusoEm       DateTime?           @map("saque_bloqueado_por_abuso_em") @db.Timestamptz
+  saqueBloqueadoPorAbusoMotivo   String?             @map("saque_bloqueado_por_abuso_motivo")
   diasLiberacaoSaldo            Int                 @default(0) @map("dias_liberacao_saldo")
   percentualReserva             Decimal             @default(0) @map("percentual_reserva") @db.Decimal(7, 4)
   baseCalculoReserva            BaseCalculoReserva  @default(VALOR_LIQUIDO_EMPRESA) @map("base_calculo_reserva")

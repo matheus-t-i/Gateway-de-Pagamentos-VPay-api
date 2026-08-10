@@ -14,6 +14,10 @@ import {
   PERMISSOES,
   SITUACAO_USUARIO,
 } from '../shared';
+import {
+  JWT_AUDIENCE_PAINEL,
+  JWT_ISSUER,
+} from '../common/jwt-claims';
 import { CHAVE_PERMISSOES } from './permissoes.decorator';
 import { permissoesEfetivas } from './permissoes.util';
 
@@ -31,6 +35,7 @@ export type UsuarioAutenticado = {
   papeis: string[];
   /** Permissões efetivas — união dos perfis ATIVOS do usuário. */
   permissoes: string[];
+  totpHabilitado: boolean;
 };
 
 /** Checagem de permissão fora do guard (regra de negócio dentro do handler). */
@@ -49,6 +54,14 @@ export function temEscopoGlobal(user: { permissoes?: string[] } | undefined) {
   return temPermissao(user, PERMISSOES.ESCOPO_GLOBAL);
 }
 
+/** Rotas liberadas enquanto admin ainda não ativou 2FA. */
+const ROTAS_SEM_2FA_ADMIN = [
+  '/auth/me',
+  '/auth/totp',
+  '/auth/logout',
+  '/auth/tema',
+];
+
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
   constructor(
@@ -66,7 +79,10 @@ export class JwtAuthGuard implements CanActivate {
     const token = header.slice(7);
     let payload: JwtPayload & { tipo?: string };
     try {
-      payload = await this.jwt.verifyAsync(token);
+      payload = await this.jwt.verifyAsync(token, {
+        issuer: JWT_ISSUER(),
+        audience: JWT_AUDIENCE_PAINEL(),
+      });
     } catch {
       throw new UnauthorizedException('Token inválido');
     }
@@ -106,8 +122,22 @@ export class JwtAuthGuard implements CanActivate {
       temaPreferido: usuario.temaPreferido,
       papeis,
       permissoes,
+      totpHabilitado: usuario.totpHabilitado,
     };
     req.user = user;
+
+    // Admin / escopo global sem 2FA: só consegue ativar TOTP e ver a própria conta.
+    if (temEscopoGlobal(user) && !usuario.totpHabilitado) {
+      const path = String(req.path ?? req.url ?? '');
+      const liberado = ROTAS_SEM_2FA_ADMIN.some(
+        (p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`),
+      );
+      if (!liberado) {
+        throw new ForbiddenException(
+          'Perfis administrativos exigem 2FA. Ative em Configurações → Segurança.',
+        );
+      }
+    }
 
     this.assertPermissoes(context, user);
     return true;

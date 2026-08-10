@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import * as argon2 from 'argon2';
+import { createCipheriv, randomBytes } from 'node:crypto';
 import { DISPONIBILIDADE_ADQUIRENTE } from '../src/shared/situacoes';
 import {
   CATALOGO_PERMISSOES,
@@ -12,6 +13,23 @@ import {
 } from '../src/shared/permissoes';
 
 const prisma = new PrismaClient();
+
+/** Mesmo AES-GCM de `crypto.util.ts` — seed não importa Nest. */
+function encryptCredentialsSeed(plain: Record<string, unknown>): string {
+  const hex = process.env.ENCRYPTION_KEY;
+  if (!hex || hex.length !== 64) {
+    throw new Error('ENCRYPTION_KEY deve ter 64 hex chars para o seed');
+  }
+  const key = Buffer.from(hex, 'hex');
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([
+    cipher.update(JSON.stringify(plain), 'utf8'),
+    cipher.final(),
+  ]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, enc]).toString('base64');
+}
 
 const PRODUCAO = process.env.NODE_ENV === 'production';
 /**
@@ -187,14 +205,18 @@ async function main() {
       nome: 'Mock Gateway Default',
       chaveUnicaConta: 'mock:GATEWAY:default',
       identificadorContaExterna: 'mock-default',
-      credenciaisCriptografadas: JSON.stringify({ apiKey: 'mock-key' }),
+      credenciaisCriptografadas: encryptCredentialsSeed({ apiKey: 'mock-key' }),
       pixEntradaHabilitado: true,
       pixSaidaHabilitado: true,
       ticketMaximoPixEntrada: '100000.00',
       ticketMaximoPixSaida: '100000.00',
       situacao: 'ATIVO',
     },
-    update: { situacao: 'ATIVO' },
+    update: {
+      situacao: 'ATIVO',
+      // Migra contas antigas que ainda tinham JSON em claro.
+      credenciaisCriptografadas: encryptCredentialsSeed({ apiKey: 'mock-key' }),
+    },
   });
 
   await prisma.custoPixContaProvedor.upsert({
@@ -242,14 +264,16 @@ async function main() {
       chaveUnicaConta: 'valorion:GATEWAY:default',
       identificadorContaExterna: 'valorion-default',
       // Vazio de propósito: o client usa os envs VALORION_* como fallback.
-      credenciaisCriptografadas: JSON.stringify({}),
+      credenciaisCriptografadas: encryptCredentialsSeed({}),
       pixEntradaHabilitado: true,
       pixSaidaHabilitado: true,
       ticketMaximoPixEntrada: '100000.00',
       ticketMaximoPixSaida: '100000.00',
       situacao: 'ATIVO',
     },
-    update: {},
+    update: {
+      credenciaisCriptografadas: encryptCredentialsSeed({}),
+    },
   });
 
   await prisma.custoPixContaProvedor.upsert({
@@ -417,6 +441,8 @@ async function main() {
         ticketMaximoPixEntrada: padrao.ticketMaximoPixEntrada,
         ticketMinimoPixSaida: padrao.ticketMinimoPixSaida,
         ticketMaximoPixSaida: padrao.ticketMaximoPixSaida,
+        limiteDiarioPixSaida: padrao.limiteDiarioPixSaida,
+        maxSaquesPorHora: padrao.maxSaquesPorHora,
         permitirPixSaidaViaApi: padrao.permitirPixSaidaViaApi,
         diasLiberacaoSaldo: padrao.diasLiberacaoSaldo,
         percentualReserva: padrao.percentualReserva,

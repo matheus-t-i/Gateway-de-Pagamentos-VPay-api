@@ -22,6 +22,7 @@ import {
 import { ProviderRegistry } from '../providers/provider.registry';
 import { ConfigPixService, LedgerService } from '../ledger/ledger.service';
 import { decryptCredentials } from '../common/crypto.util';
+import { SaqueProtecaoService } from '../pix/saque-protecao.service';
 
 /**
  * Erro de regra de negócio na revalidação: o saque NÃO pode ser enviado.
@@ -63,6 +64,7 @@ export class PixCashOutProcessor extends WorkerHost {
     private readonly providers: ProviderRegistry,
     private readonly configPix: ConfigPixService,
     private readonly ledger: LedgerService,
+    private readonly saqueProtecao: SaqueProtecaoService,
   ) {
     super();
   }
@@ -149,6 +151,18 @@ export class PixCashOutProcessor extends WorkerHost {
     if (cfg.ticketMaximoPixSaida && valor.gt(cfg.ticketMaximoPixSaida)) {
       throw new SaqueBloqueadoError('valor acima do máximo vigente');
     }
+    try {
+      await this.saqueProtecao.assertSaquePermitido({
+        usuarioId: tx.usuarioId,
+        valor,
+        cfg,
+        soLeitura: true,
+      });
+    } catch (e) {
+      throw new SaqueBloqueadoError(
+        e instanceof Error ? e.message : 'saque bloqueado por proteção',
+      );
+    }
 
     // ── 7. Origem: API ou painel ──────────────────────────────────────────
     // A origem permitida é reconferida AGORA: o admin pode ter desligado o
@@ -220,12 +234,9 @@ export class PixCashOutProcessor extends WorkerHost {
 
     // ── Envio ─────────────────────────────────────────────────────────────
     const provider = this.providers.get(tx.contaProvedor.provedor.codigo);
-    let credenciais: Record<string, unknown>;
-    try {
-      credenciais = decryptCredentials(tx.contaProvedor.credenciaisCriptografadas);
-    } catch {
-      credenciais = JSON.parse(tx.contaProvedor.credenciaisCriptografadas);
-    }
+    const credenciais = decryptCredentials(
+      tx.contaProvedor.credenciaisCriptografadas,
+    );
 
     /**
      * Claim atômico: FOR UPDATE na transação + insert ENVIANDO.

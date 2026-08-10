@@ -10,18 +10,19 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import * as argon2 from 'argon2';
 import {
+  MIMES_DOCUMENTO_PERMITIDOS,
   onboardingCredenciaisSchema,
   SITUACAO_DOCUMENTO,
   SITUACAO_USUARIO,
+  TAMANHO_MAX_UPLOAD_BYTES,
   TIPOS_DOCUMENTO,
+  validarArquivoDocumento,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { salvarArquivo } from '../common/storage.util';
 import { montarStatusOnboarding, reavaliarSituacoes } from './onboarding.util';
 import { Throttle } from '../common/ip-throttle.guard';
 
-const MIMES_PERMITIDOS = ['application/pdf', 'image/jpeg', 'image/png'];
-const TAMANHO_MAXIMO_BYTES = 10 * 1024 * 1024; // 10MB
 const TIPOS_VALIDOS = Object.values(TIPOS_DOCUMENTO) as string[];
 /**
  * Cota por conta no canal público (sem JWT). Sem isto, quem tem uma credencial
@@ -95,12 +96,16 @@ export class OnboardingController {
   @Post('documentos')
   @UseInterceptors(
     FileInterceptor('arquivo', {
-      limits: { fileSize: TAMANHO_MAXIMO_BYTES },
+      limits: { fileSize: TAMANHO_MAX_UPLOAD_BYTES },
       fileFilter: (_req, file, cb) => {
-        if (!MIMES_PERMITIDOS.includes(file.mimetype)) {
+        if (
+          !(MIMES_DOCUMENTO_PERMITIDOS as readonly string[]).includes(
+            file.mimetype,
+          )
+        ) {
           cb(
             new BadRequestException(
-              `Tipo de arquivo não permitido: ${file.mimetype}`,
+              `Tipo de arquivo não permitido${file.mimetype ? ` (${file.mimetype})` : ''}. Envie apenas PDF, PNG ou JPEG.`,
             ),
             false,
           );
@@ -123,6 +128,13 @@ export class OnboardingController {
 
     if (!arquivo) {
       throw new BadRequestException('Arquivo ausente (campo "arquivo").');
+    }
+    try {
+      validarArquivoDocumento(arquivo);
+    } catch (e) {
+      throw new BadRequestException(
+        e instanceof Error ? e.message : 'Arquivo inválido.',
+      );
     }
     const tipoDocumento = body.tipoDocumento ?? '';
     if (!TIPOS_VALIDOS.includes(tipoDocumento)) {

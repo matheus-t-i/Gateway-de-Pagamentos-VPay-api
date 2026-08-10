@@ -18,6 +18,9 @@ export type CredencialAutenticada = {
   usuarioId: string;
   escopos: string[];
   temIpAllowlist: boolean;
+  exigirAssinaturaHmac: boolean;
+  segredoHmacCriptografado: string | null;
+  segredoHmacAnteriorCriptografado: string | null;
 };
 
 /** Contexto da requisição que a validação precisa (auditoria + allowlist). */
@@ -186,6 +189,10 @@ export class CredencialAuthService {
         ativo: true,
         revogadoEm: true,
         expiraEm: true,
+        exigirAssinaturaHmac: true,
+        segredoHmacCriptografado: true,
+        segredoHmacAnteriorCriptografado: true,
+        segredoAnteriorExpiraEm: true,
         ipsPermitidos: { select: { ipOuCidr: true } },
         usuario: { select: { situacao: true, contaBloqueada: true } },
       },
@@ -216,6 +223,10 @@ export class CredencialAuthService {
       escopos: unknown;
       ipsPermitidos: { ipOuCidr: string }[];
       usuario: { situacao: string; contaBloqueada: boolean };
+      exigirAssinaturaHmac?: boolean;
+      segredoHmacCriptografado?: string | null;
+      segredoHmacAnteriorCriptografado?: string | null;
+      segredoAnteriorExpiraEm?: Date | null;
     },
     ctx: ContextoRequisicao,
   ): CredencialAutenticada {
@@ -243,11 +254,20 @@ export class CredencialAuthService {
       }
     }
 
+    const anteriorAtivo =
+      !!cred.segredoHmacAnteriorCriptografado &&
+      (!cred.segredoAnteriorExpiraEm || cred.segredoAnteriorExpiraEm > new Date());
+
     return {
       id: cred.id.toString(),
       usuarioId: cred.usuarioId.toString(),
       escopos: (cred.escopos as string[]) ?? [],
       temIpAllowlist: cred.ipsPermitidos.length > 0,
+      exigirAssinaturaHmac: cred.exigirAssinaturaHmac ?? false,
+      segredoHmacCriptografado: cred.segredoHmacCriptografado ?? null,
+      segredoHmacAnteriorCriptografado: anteriorAtivo
+        ? (cred.segredoHmacAnteriorCriptografado ?? null)
+        : null,
     };
   }
 }

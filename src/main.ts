@@ -25,7 +25,15 @@ async function bootstrap() {
 
   // Corpo JSON limitado: payload gigante é vetor de DoS. Multipart (upload) não
   // passa por aqui — é tratado pelo multer (FileInterceptor) com limite próprio.
-  app.use(json({ limit: '256kb' }));
+  // `rawBody` alimenta a verificação HMAC B2B (assinatura do body original).
+  app.use(
+    json({
+      limit: '256kb',
+      verify: (req, _res, buf) => {
+        (req as { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
 
   // Cabeçalhos de segurança (HSTS, nosniff, frame-options, etc.). A API é JSON,
   // mas também serve o Bull Board (/admin/queues) — um app React same-origin que

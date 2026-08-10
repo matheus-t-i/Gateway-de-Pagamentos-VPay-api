@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
+import { encryptCredentials } from '../common/crypto.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfigPixService, LedgerService } from '../ledger/ledger.service';
 import { PixService } from './pix.service';
@@ -54,7 +55,16 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
         },
       }),
     };
-    return new PixCashOutProcessor(prisma, registry as never, configPix, ledger);
+    return new PixCashOutProcessor(
+      prisma,
+      registry as never,
+      configPix,
+      ledger,
+      {
+        assertSaquePermitido: async () => undefined,
+        registrarRecusaSaque: async () => undefined,
+      } as never,
+    );
   }
 
   async function criarSaque(referencia: string) {
@@ -103,6 +113,10 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
       {} as never,
       {} as never,
       {} as never,
+      {
+        assertSaquePermitido: async () => undefined,
+        registrarRecusaSaque: async () => undefined,
+      } as never,
     );
 
     sufixo = `${Date.now()}`;
@@ -133,23 +147,31 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
       update: { situacao: SITUACAO_PROVEDOR.ATIVO },
     });
 
-    const contaExistente = await prisma.contaProvedor.findFirst({
-      where: { provedorPagamentoId: provedor.id, usuarioId: null },
+    /**
+     * As credenciais precisam ser AES-GCM de verdade: o processor chama
+     * `decryptCredentials` antes do envio e o JSON em claro deixou de ser aceito.
+     * Com `'{}'` a suíte inteira morria em "Invalid initialization vector" ANTES
+     * do POST — e um teste que nunca chega ao envio não prova nada sobre pagar
+     * duas vezes. O upsert também reescreve conta de execução anterior.
+     */
+    const conta = await prisma.contaProvedor.upsert({
+      where: { chaveUnicaConta: 'teste_dup:conta-principal' },
+      create: {
+        provedorPagamentoId: provedor.id,
+        nome: 'Conta teste duplicidade',
+        chaveUnicaConta: 'teste_dup:conta-principal',
+        credenciaisCriptografadas: encryptCredentials({}),
+        pixEntradaHabilitado: true,
+        pixSaidaHabilitado: true,
+        situacao: SITUACAO_PROVEDOR.ATIVO,
+        ticketMaximoPixEntrada: '100000',
+      },
+      update: {
+        credenciaisCriptografadas: encryptCredentials({}),
+        situacao: SITUACAO_PROVEDOR.ATIVO,
+        pixSaidaHabilitado: true,
+      },
     });
-    const conta =
-      contaExistente ??
-      (await prisma.contaProvedor.create({
-        data: {
-          provedorPagamentoId: provedor.id,
-          nome: 'Conta teste duplicidade',
-          chaveUnicaConta: 'teste_dup:conta-principal',
-          credenciaisCriptografadas: '{}',
-          pixEntradaHabilitado: true,
-          pixSaidaHabilitado: true,
-          situacao: SITUACAO_PROVEDOR.ATIVO,
-          ticketMaximoPixEntrada: '100000',
-        },
-      }));
 
     await prisma.configuracaoPixUsuario.upsert({
       where: { usuarioId },
@@ -349,6 +371,10 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
       registry as never,
       configPix,
       ledgerQuebrado as never,
+      {
+        assertSaquePermitido: async () => undefined,
+        registrarRecusaSaque: async () => undefined,
+      } as never,
     );
 
     await expect(processor.process(job(transacaoId))).rejects.toThrow();

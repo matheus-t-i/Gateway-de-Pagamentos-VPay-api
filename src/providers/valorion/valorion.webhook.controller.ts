@@ -91,12 +91,7 @@ export class ValorionWebhookController {
     idTransacaoPrivado: string;
     credenciaisCriptografadas: string;
   }) {
-    let credenciais: Record<string, unknown>;
-    try {
-      credenciais = decryptCredentials(params.credenciaisCriptografadas);
-    } catch {
-      credenciais = JSON.parse(params.credenciaisCriptografadas);
-    }
+    const credenciais = decryptCredentials(params.credenciaisCriptografadas);
     const remote = await this.valorion.getStatus({
       idTransacaoLiquidante: params.liquidanteId,
       idTransacaoPrivado: params.idTransacaoPrivado,

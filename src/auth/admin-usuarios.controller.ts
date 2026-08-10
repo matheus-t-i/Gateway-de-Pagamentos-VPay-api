@@ -148,6 +148,8 @@ export class AdminUsuariosController {
       taxaPixSaidaFixa: c.taxaPixSaidaFixa.toString(),
       ticketMinimoPixEntrada: c.ticketMinimoPixEntrada.toString(),
       ticketMaximoPixEntrada: c.ticketMaximoPixEntrada.toString(),
+      limiteDiarioPixSaida: c.limiteDiarioPixSaida?.toString() ?? '',
+      maxSaquesPorHora: c.maxSaquesPorHora?.toString() ?? '',
       diasLiberacaoSaldo: c.diasLiberacaoSaldo,
       percentualReserva: c.percentualReserva.toString(),
       baseCalculoReserva: c.baseCalculoReserva,
@@ -459,6 +461,10 @@ export class AdminUsuariosController {
       ticketMaximoPixEntrada: (base?.ticketMaximoPixEntrada ?? 0).toString(),
       ticketMinimoPixSaida: (base?.ticketMinimoPixSaida ?? 0).toString(),
       ticketMaximoPixSaida: base?.ticketMaximoPixSaida?.toString() ?? '',
+      limiteDiarioPixSaida: base?.limiteDiarioPixSaida?.toString() ?? '',
+      maxSaquesPorHora: base?.maxSaquesPorHora?.toString() ?? '',
+      saqueBloqueadoPorAbuso: cfg?.saqueBloqueadoPorAbuso ?? false,
+      saqueBloqueadoPorAbusoMotivo: cfg?.saqueBloqueadoPorAbusoMotivo ?? null,
       origemSaquePermitida: base?.origemSaquePermitida ?? 'PAINEL',
       exigirChavePixCadastrada: base?.exigirChavePixCadastrada ?? true,
       retencaoMetodoAtivo: cfg?.retencaoMetodoAtivo ?? false,
@@ -576,9 +582,20 @@ export class AdminUsuariosController {
         configuracaoPadraoOrigemId: padrao?.id,
         ticketMinimoPixSaida: padrao?.ticketMinimoPixSaida ?? 0,
         ticketMaximoPixSaida: padrao?.ticketMaximoPixSaida ?? undefined,
+        limiteDiarioPixSaida: padrao?.limiteDiarioPixSaida ?? undefined,
+        maxSaquesPorHora: padrao?.maxSaquesPorHora ?? undefined,
         ...taxas,
       },
-      update: taxas,
+      update: {
+        ...taxas,
+        ...(body.limparBloqueioSaqueAbuso === 'true'
+          ? {
+              saqueBloqueadoPorAbuso: false,
+              saqueBloqueadoPorAbusoEm: null,
+              saqueBloqueadoPorAbusoMotivo: null,
+            }
+          : {}),
+      },
     });
 
     await this.prisma.registroAuditoria.create({
@@ -703,6 +720,8 @@ export class AdminUsuariosController {
           ticketMaximoPixEntrada: padrao.ticketMaximoPixEntrada,
           ticketMinimoPixSaida: padrao.ticketMinimoPixSaida,
           ticketMaximoPixSaida: padrao.ticketMaximoPixSaida,
+          limiteDiarioPixSaida: padrao.limiteDiarioPixSaida,
+          maxSaquesPorHora: padrao.maxSaquesPorHora,
           permitirPixSaidaViaApi: padrao.permitirPixSaidaViaApi,
           origemSaquePermitida: padrao.origemSaquePermitida,
           exigirChavePixCadastrada: padrao.exigirChavePixCadastrada,
@@ -1284,6 +1303,38 @@ function regrasComerciais(body: Record<string, string>) {
     }
   }
 
+  // Limite diário / velocity: string vazia = sem teto (null).
+  const editaLimitesVelocity =
+    body.limiteDiarioPixSaida !== undefined ||
+    body.maxSaquesPorHora !== undefined;
+  let limiteDiarioPixSaida: number | null | undefined;
+  let maxSaquesPorHora: number | null | undefined;
+  if (editaLimitesVelocity) {
+    if (!body.limiteDiarioPixSaida) {
+      limiteDiarioPixSaida = null;
+    } else {
+      limiteDiarioPixSaida = numero(
+        body.limiteDiarioPixSaida,
+        'limiteDiarioPixSaida',
+      );
+      if (limiteDiarioPixSaida <= 0) {
+        throw new BadRequestException(
+          'Limite diário de saque precisa ser maior que zero (ou vazio para sem teto).',
+        );
+      }
+    }
+    if (!body.maxSaquesPorHora) {
+      maxSaquesPorHora = null;
+    } else {
+      maxSaquesPorHora = inteiro(body.maxSaquesPorHora, 'maxSaquesPorHora', 1000);
+      if (maxSaquesPorHora <= 0) {
+        throw new BadRequestException(
+          'Máximo de saques/hora precisa ser maior que zero (ou vazio para sem teto).',
+        );
+      }
+    }
+  }
+
   if (body.origemSaquePermitida && !ORIGENS_SAQUE.includes(body.origemSaquePermitida)) {
     throw new BadRequestException('origemSaquePermitida inválida');
   }
@@ -1315,6 +1366,9 @@ function regrasComerciais(body: Record<string, string>) {
     ticketMaximoPixEntrada,
     ...(editaTicketSaida
       ? { ticketMinimoPixSaida, ticketMaximoPixSaida }
+      : {}),
+    ...(editaLimitesVelocity
+      ? { limiteDiarioPixSaida, maxSaquesPorHora }
       : {}),
     // D+N: quantos dias a venda paga fica em "a liberar" antes de virar saldo
     // disponível. 0 = cai disponível na hora do pagamento.

@@ -14,9 +14,12 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
+  MIMES_DOCUMENTO_PERMITIDOS,
   PERMISSOES,
   SITUACAO_DOCUMENTO,
+  TAMANHO_MAX_UPLOAD_BYTES,
   TIPOS_DOCUMENTO,
+  validarArquivoDocumento,
   validarDocumentoSchema,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
@@ -54,7 +57,25 @@ export class AdminDocumentosController {
    */
   @Post('usuarios/:idPublico/documentos')
   @UseInterceptors(
-    FileInterceptor('arquivo', { limits: { fileSize: 10 * 1024 * 1024 } }),
+    FileInterceptor('arquivo', {
+      limits: { fileSize: TAMANHO_MAX_UPLOAD_BYTES },
+      fileFilter: (_req, file, cb) => {
+        if (
+          !(MIMES_DOCUMENTO_PERMITIDOS as readonly string[]).includes(
+            file.mimetype,
+          )
+        ) {
+          cb(
+            new BadRequestException(
+              `Tipo de arquivo não permitido${file.mimetype ? ` (${file.mimetype})` : ''}. Envie apenas PDF, PNG ou JPEG.`,
+            ),
+            false,
+          );
+          return;
+        }
+        cb(null, true);
+      },
+    }),
   )
   @RequerPermissao(PERMISSOES.ADMIN_APROVACOES_APROVAR)
   async subirDocUsuario(
@@ -65,6 +86,13 @@ export class AdminDocumentosController {
   ) {
     await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     if (!arquivo) throw new BadRequestException('Arquivo ausente (campo "arquivo").');
+    try {
+      validarArquivoDocumento(arquivo);
+    } catch (e) {
+      throw new BadRequestException(
+        e instanceof Error ? e.message : 'Arquivo inválido.',
+      );
+    }
     const tipoDocumento = body.tipoDocumento ?? TIPOS_DOCUMENTO.CONTRATO_PRESTACAO_SERVICO;
     if (!(Object.values(TIPOS_DOCUMENTO) as string[]).includes(tipoDocumento)) {
       throw new BadRequestException(`tipoDocumento inválido: ${tipoDocumento}`);

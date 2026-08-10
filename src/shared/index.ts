@@ -11,3 +11,4 @@ export * from './rede';
 export * from './produto';
 export * from './schemas';
 export * from './marcos-faturamento';
+export * from './upload-documento';

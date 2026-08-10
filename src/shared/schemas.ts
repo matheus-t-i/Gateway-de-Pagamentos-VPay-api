@@ -15,6 +15,11 @@ export const loginSchema = z.object({
   senha: z.string().min(8),
   /** Código do app autenticador — exigido quando a conta tem 2FA ativo. */
   codigoTotp: z.string().regex(/^\d{6}$/).optional(),
+  /**
+   * Token do Cloudflare Turnstile. Em produção a API exige; em development/test
+   * sem TURNSTILE_SECRET_KEY o desafio é ignorado (fail-open).
+   */
+  turnstileToken: z.string().min(1).max(2048).optional(),
 });
 
 export const enderecoSchema = z.object({
@@ -388,6 +393,8 @@ export const criarCredencialApiSchema = z.object({
     .array(z.enum(Object.values(ESCOPOS_API) as [string, ...string[]]))
     .default([]),
   ipsPermitidos: ipsPermitidosSchema,
+  /** Exige HMAC(METHOD+PATH+TS+NONCE+SHA256(body)) em toda chamada Bearer. */
+  exigirAssinaturaHmac: z.boolean().optional().default(false),
   codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
@@ -401,6 +408,7 @@ export const criarCredencialApiSchema = z.object({
 export const editarCredencialApiSchema = z.object({
   nome: z.string().min(1).max(100),
   ipsPermitidos: ipsPermitidosSchema,
+  exigirAssinaturaHmac: z.boolean().optional(),
   codigoTotp: z.string().regex(/^\d{6}$/),
 });
 

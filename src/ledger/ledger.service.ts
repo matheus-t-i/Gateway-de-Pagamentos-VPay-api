@@ -20,6 +20,10 @@ export type ConfigPixEfetiva = {
   ticketMaximoPixEntrada: Decimal;
   ticketMinimoPixSaida: Decimal;
   ticketMaximoPixSaida: Decimal | null;
+  /** Teto diário de saque (BRT). null = sem teto. */
+  limiteDiarioPixSaida: Decimal | null;
+  /** Máximo de saques por hora. null = sem teto. */
+  maxSaquesPorHora: number | null;
   permitirPixSaidaViaApi: boolean;
   /** Por onde o saque pode ser pedido (painel, API ou os dois). */
   origemSaquePermitida: 'PAINEL' | 'API' | 'AMBOS';
@@ -94,6 +98,10 @@ export class ConfigPixService {
       ticketMaximoPixSaida: cfg.ticketMaximoPixSaida
         ? money(cfg.ticketMaximoPixSaida.toString())
         : null,
+      limiteDiarioPixSaida: cfg.limiteDiarioPixSaida
+        ? money(cfg.limiteDiarioPixSaida.toString())
+        : null,
+      maxSaquesPorHora: cfg.maxSaquesPorHora,
       permitirPixSaidaViaApi: cfg.permitirPixSaidaViaApi,
       origemSaquePermitida: cfg.origemSaquePermitida,
       exigirChavePixCadastrada: cfg.exigirChavePixCadastrada,

@@ -449,6 +449,8 @@ async function main() {
           ticketMaximoPixEntrada: padrao.ticketMaximoPixEntrada,
           ticketMinimoPixSaida: padrao.ticketMinimoPixSaida,
           ticketMaximoPixSaida: padrao.ticketMaximoPixSaida,
+          limiteDiarioPixSaida: padrao.limiteDiarioPixSaida,
+          maxSaquesPorHora: padrao.maxSaquesPorHora,
           permitirPixSaidaViaApi: padrao.permitirPixSaidaViaApi,
           diasLiberacaoSaldo: padrao.diasLiberacaoSaldo,
           percentualReserva: padrao.percentualReserva,

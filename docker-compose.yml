@@ -1,3 +1,7 @@
+# Serviços de INFRA local apenas (Postgres + Redis).
+# Em PRODUÇÃO: NÃO publicar 5432/6379 na internet — rede privada / VPC,
+# Security Group só para a API/Worker, e WAF (Cloudflare ou equivalente)
+# na frente do domínio público da API. Ver PRONTIDAO-PRODUCAO.md.
 services:
   postgres:
     image: postgres:16-alpine

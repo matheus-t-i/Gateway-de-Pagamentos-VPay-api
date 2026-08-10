@@ -61,15 +61,15 @@ export class PixWebhookCashoutProcessor extends WorkerHost {
 
     const statusEvent = String(body.status ?? '').toUpperCase();
     if (!['PAID', 'COMPLETED', 'CONCLUIDO'].includes(statusEvent)) {
-      return { ok: true, ignored: true };
+      // Mesmo padrão do cash-in: ignorar ≠ deixar RECEBIDO. Sem PROCESSADO a
+      // reentrega reenfileira o mesmo evento em loop (ruído e risco operacional).
+      await this.marcarWebhookProcessado(webhookRecebidoId, tx.usuarioId);
+      return { ok: true, ignored: true, status: statusEvent };
     }
 
-    let credenciais: Record<string, unknown>;
-    try {
-      credenciais = decryptCredentials(tx.contaProvedor!.credenciaisCriptografadas);
-    } catch {
-      credenciais = JSON.parse(tx.contaProvedor!.credenciaisCriptografadas);
-    }
+    const credenciais = decryptCredentials(
+      tx.contaProvedor!.credenciaisCriptografadas,
+    );
     const remote = await this.providers.get(provider).getStatus({
       idTransacaoLiquidante: liquidanteId || tentativa.idTransacaoLiquidante || undefined,
       idTransacaoPrivado: tx.idTransacaoPrivado,

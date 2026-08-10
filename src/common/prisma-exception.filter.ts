@@ -22,13 +22,11 @@ export class PrismaExceptionFilter implements ExceptionFilter {
 
     switch (exception.code) {
       case 'P2002': {
-        const alvo = (exception.meta?.target as string[] | undefined)?.join(', ');
+        // Não expor meta.target (nomes de colunas/índices) ao cliente.
         res.status(HttpStatus.CONFLICT).json({
           statusCode: HttpStatus.CONFLICT,
           error: 'Conflict',
-          message: alvo
-            ? `Já existe um registro com estes valores (${alvo}).`
-            : 'Registro duplicado.',
+          message: 'Já existe um registro com estes valores.',
         });
         return;
       }

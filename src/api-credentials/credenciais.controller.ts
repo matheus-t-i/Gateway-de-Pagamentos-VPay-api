@@ -19,6 +19,7 @@ import {
   PERMISSOES,
   SITUACAO_USUARIO,
 } from '../shared';
+import { encryptText } from '../common/crypto.util';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   JwtAuthGuard,
@@ -67,6 +68,7 @@ export class CredenciaisController {
       chavePublica: c.chavePublica,
       escopos: c.escopos,
       ativo: c.ativo,
+      exigirAssinaturaHmac: c.exigirAssinaturaHmac,
       ipsPermitidos: c.ipsPermitidos.map((i) => i.ipOuCidr),
       criadoEm: c.criadoEm,
       /**
@@ -103,6 +105,9 @@ export class CredenciaisController {
         nome: parsed.data.nome,
         chavePublica,
         segredoHash,
+        // Cópia cifrada do segredo: permite HMAC de request sem guardar claro.
+        segredoHmacCriptografado: encryptText(secret),
+        exigirAssinaturaHmac: parsed.data.exigirAssinaturaHmac,
 
         escopos: parsed.data.escopos,
         ipsPermitidos: {
@@ -116,6 +121,7 @@ export class CredenciaisController {
       nome: cred.nome,
       chavePublica,
       segredo: secret,
+      exigirAssinaturaHmac: cred.exigirAssinaturaHmac,
       aviso: 'O segredo é exibido apenas uma vez',
     };
   }
@@ -162,7 +168,12 @@ export class CredenciaisController {
       }
       return tx.credencialApi.update({
         where: { id: cred.id },
-        data: { nome: parsed.data.nome },
+        data: {
+          nome: parsed.data.nome,
+          ...(parsed.data.exigirAssinaturaHmac !== undefined
+            ? { exigirAssinaturaHmac: parsed.data.exigirAssinaturaHmac }
+            : {}),
+        },
         include: { ipsPermitidos: true },
       });
     });
@@ -173,6 +184,7 @@ export class CredenciaisController {
       chavePublica: atualizada.chavePublica,
       escopos: atualizada.escopos,
       ativo: atualizada.ativo,
+      exigirAssinaturaHmac: atualizada.exigirAssinaturaHmac,
       ipsPermitidos: atualizada.ipsPermitidos.map((i) => i.ipOuCidr),
       criadoEm: atualizada.criadoEm,
     };
@@ -218,6 +230,7 @@ export class CredenciaisController {
       where: { id: cred.id },
       data: {
         segredoHash: hashSegredo(novoSegredo),
+        segredoHmacCriptografado: encryptText(novoSegredo),
         /**
          * O segredo que valia até agora vira o "anterior". Rotacionar duas
          * vezes seguidas descarta o intermediário de propósito: no máximo DOIS
@@ -225,6 +238,7 @@ export class CredenciaisController {
          * credenciais válidas que ninguém rastreia.
          */
         segredoHashAnterior: cred.segredoHash,
+        segredoHmacAnteriorCriptografado: cred.segredoHmacCriptografado,
         segredoAnteriorExpiraEm: expiraEm,
       },
     });
@@ -257,7 +271,11 @@ export class CredenciaisController {
     const usuario = await this.contaAtiva(req.user);
     const r = await this.prisma.credencialApi.updateMany({
       where: { id: BigInt(id), usuarioId: usuario.id },
-      data: { segredoHashAnterior: null, segredoAnteriorExpiraEm: null },
+      data: {
+        segredoHashAnterior: null,
+        segredoHmacAnteriorCriptografado: null,
+        segredoAnteriorExpiraEm: null,
+      },
     });
     if (r.count === 0) throw new BadRequestException('Credencial não encontrada');
     return { ok: true };

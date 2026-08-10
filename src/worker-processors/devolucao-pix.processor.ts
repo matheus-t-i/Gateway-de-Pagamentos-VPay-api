@@ -74,14 +74,7 @@ export class DevolucaoPixProcessor extends WorkerHost {
     });
 
     let credenciais: Record<string, unknown>;
-    try {
-      credenciais = decryptCredentials(conta.credenciaisCriptografadas);
-    } catch {
-      credenciais = JSON.parse(conta.credenciaisCriptografadas) as Record<
-        string,
-        unknown
-      >;
-    }
+    credenciais = decryptCredentials(conta.credenciaisCriptografadas);
 
     try {
       const resultado = await this.providers.get(conta.provedor.codigo).createRefund({

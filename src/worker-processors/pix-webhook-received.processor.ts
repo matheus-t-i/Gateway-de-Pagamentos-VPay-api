@@ -101,15 +101,9 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
       throw new Error('Camada1: sem idTransacaoLiquidante para consultar status');
     }
 
-    let credenciais: Record<string, unknown>;
-    try {
-      credenciais = decryptCredentials(tx.contaProvedor!.credenciaisCriptografadas);
-    } catch {
-      credenciais = JSON.parse(tx.contaProvedor!.credenciaisCriptografadas) as Record<
-        string,
-        unknown
-      >;
-    }
+    const credenciais = decryptCredentials(
+      tx.contaProvedor!.credenciaisCriptografadas,
+    );
     const remote = await this.providers.get(provider).getStatus({
       idTransacaoLiquidante: idLiquidanteEfetivo,
       idTransacaoPrivado: tx.idTransacaoPrivado,
