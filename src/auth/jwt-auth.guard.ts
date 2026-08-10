@@ -18,6 +18,7 @@ import {
   JWT_AUDIENCE_PAINEL,
   JWT_ISSUER,
 } from '../common/jwt-claims';
+import { rotaSemPrefixo } from '../common/api-prefix';
 import { CHAVE_PERMISSOES } from './permissoes.decorator';
 import { permissoesEfetivas } from './permissoes.util';
 
@@ -54,13 +55,20 @@ export function temEscopoGlobal(user: { permissoes?: string[] } | undefined) {
   return temPermissao(user, PERMISSOES.ESCOPO_GLOBAL);
 }
 
-/** Rotas liberadas enquanto admin ainda não ativou 2FA. */
-const ROTAS_SEM_2FA_ADMIN = [
-  '/auth/me',
-  '/auth/totp',
-  '/auth/logout',
-  '/auth/tema',
-];
+/**
+ * Rotas liberadas enquanto admin ainda não ativou 2FA — escritas SEM o prefixo
+ * global, comparadas via `rotaSemPrefixo`.
+ *
+ * São exatamente as que existem para SAIR desse estado: ler a própria conta
+ * (o painel não abre nenhuma tela sem `GET /auth/me`) e o setup do TOTP.
+ * Qualquer coisa a menos aqui é deadlock: para ativar o 2FA é preciso entrar,
+ * e para entrar é preciso o 2FA.
+ *
+ * `/auth/logout` e `/auth/tema` foram removidos: não existem (logout é só
+ * client-side, e tema é `PATCH /auth/me`). Entrada morta em allowlist de
+ * segurança só dá falsa sensação de cobertura.
+ */
+const ROTAS_SEM_2FA_ADMIN = ['/auth/me', '/auth/totp'];
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
@@ -128,9 +136,12 @@ export class JwtAuthGuard implements CanActivate {
 
     // Admin / escopo global sem 2FA: só consegue ativar TOTP e ver a própria conta.
     if (temEscopoGlobal(user) && !usuario.totpHabilitado) {
-      const path = String(req.path ?? req.url ?? '');
+      // `rotaSemPrefixo` e não `req.path`: o path real vem com o prefixo global
+      // (`/api/auth/me`), então comparar direto com `/auth/me` nunca casava e
+      // barrava o próprio caminho de ativação do 2FA.
+      const path = rotaSemPrefixo(req);
       const liberado = ROTAS_SEM_2FA_ADMIN.some(
-        (p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`),
+        (p) => path === p || path.startsWith(`${p}/`),
       );
       if (!liberado) {
         throw new ForbiddenException(

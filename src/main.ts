@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { json } from 'express';
 import { AppModule } from './app.module';
 import { validarAmbiente } from './common/env.validation';
+import { API_GLOBAL_PREFIX } from './common/api-prefix';
 
 // Rede de segurança: ids do Prisma são BigInt e JSON.stringify lança
 // "Do not know how to serialize a BigInt" (vira 500). Controllers devem mapear
@@ -69,7 +70,7 @@ async function bootstrap() {
     origin: process.env.WEB_URL ?? 'http://localhost:3000',
     credentials: true,
   });
-  app.setGlobalPrefix('api', {
+  app.setGlobalPrefix(API_GLOBAL_PREFIX, {
     exclude: ['health', 'health/(.*)', 'admin/queues', 'admin/queues/(.*)'],
   });
 
