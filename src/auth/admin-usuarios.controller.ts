@@ -220,12 +220,15 @@ export class AdminUsuariosController {
       // contas de liquidante são obrigatórias no modelo — usa a primeira conta
       // apta de adquirente ATIVA em cada sentido; /admin/adquirentes troca
       // depois. Sem adquirente cadastrada não há o que apontar: erro claro.
+      // Mesmos filtros do `acharConta` do alternar-em-massa + aptidão do
+      // provedor no sentido: conta ATIVA habilitada, de adquirente ATIVA que
+      // permite aquele sentido. (Sem `usuarioId: null`: subconta por cliente é
+      // conceito que nenhum outro seletor do sistema exclui.)
       const [contaEntrada, contaSaida] = await Promise.all([
         this.prisma.contaProvedor.findFirst({
           where: {
             situacao: SITUACAO_PROVEDOR.ATIVO,
             pixEntradaHabilitado: true,
-            usuarioId: null,
             provedor: {
               situacao: SITUACAO_PROVEDOR.ATIVO,
               permitePixEntrada: true,
@@ -237,7 +240,6 @@ export class AdminUsuariosController {
           where: {
             situacao: SITUACAO_PROVEDOR.ATIVO,
             pixSaidaHabilitado: true,
-            usuarioId: null,
             provedor: {
               situacao: SITUACAO_PROVEDOR.ATIVO,
               permitePixSaida: true,
@@ -247,8 +249,15 @@ export class AdminUsuariosController {
         }),
       ]);
       if (!contaEntrada || !contaSaida) {
+        const faltando = [
+          !contaEntrada ? 'PIX in' : null,
+          !contaSaida ? 'PIX out' : null,
+        ]
+          .filter(Boolean)
+          .join(' e ');
         throw new BadRequestException(
-          'Cadastre uma adquirente ativa com conta de PIX in e PIX out antes de definir o padrão de novos clientes.',
+          `Nenhuma adquirente ATIVA tem conta habilitada para ${faltando}. ` +
+            'Abra a adquirente em Adquirentes → "Editar / taxas" e salve: além de conferir situação e sentidos permitidos, salvar recria a conta padrão se ela estiver faltando.',
         );
       }
       // Upsert pelo nome: cobre o caso raro de a linha existir com

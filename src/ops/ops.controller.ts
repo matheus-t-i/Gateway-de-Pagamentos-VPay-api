@@ -39,7 +39,7 @@ import { RequerPermissao } from '../auth/permissoes.decorator';
 import { QueuesService } from '../queues/queues.service';
 import { ReenvioWebhookService } from '../queues/reenvio-webhook.service';
 import { getRastreio } from '../common/request-context';
-import { encryptText } from '../common/crypto.util';
+import { encryptCredentials, encryptText } from '../common/crypto.util';
 import { AdquirentesService } from '../providers/adquirentes.service';
 import {
   assertStepUpFromBody,
@@ -1373,7 +1373,7 @@ export class AdminOpsController {
           tx,
         );
       }
-      return tx.provedorPagamento.update({
+      const atualizado = await tx.provedorPagamento.update({
         where: { codigo },
         data: {
           nome: body.nome?.trim() || undefined,
@@ -1382,6 +1382,10 @@ export class AdminOpsController {
           exigeAssinaturaWebhook: body.exigeAssinaturaWebhook,
         },
       });
+      // Cura adquirente cadastrada antes de a conta padrão nascer junto:
+      // salvar a edição garante a conta que o roteamento aponta.
+      await this.garantirContaPadrao(tx, atualizado);
+      return atualizado;
     });
     await this.auditar(req, 'ADQUIRENTE_EDITAR', 'provedores_pagamento', codigo, {
       nome: antes.nome,
@@ -1504,7 +1508,37 @@ export class AdminOpsController {
   // MED) vivem em `GET|PUT /admin/usuarios/config-padrao`: é contrato de
   // cliente, não configuração de adquirente.
 
-  /** Cadastro de nova adquirente (nasce INATIVA; conta/credenciais depois). */
+  /**
+   * Garante a CONTA padrão da adquirente (`<codigo>:default`). É nela que o
+   * roteamento (config do cliente e padrão do sistema) se pendura — e nenhum
+   * outro fluxo do produto cria conta: sem isto, adquirente cadastrada pelo
+   * painel ficava sem conta e nada conseguia apontar para ela (o PUT do
+   * "Padrão de novos clientes" respondia "cadastre uma adquirente" mesmo com a
+   * adquirente na tela). Credenciais nascem VAZIAS de propósito: os clients
+   * caem no fallback de env (ex.: `VALORION_*`), que é onde as chaves reais
+   * vivem em produção. Conta já existente não é tocada.
+   */
+  private async garantirContaPadrao(
+    tx: Pick<PrismaService, 'contaProvedor'>,
+    provedor: { id: bigint; codigo: string; nome: string },
+  ) {
+    await tx.contaProvedor.upsert({
+      where: { chaveUnicaConta: `${provedor.codigo}:default` },
+      create: {
+        provedorPagamentoId: provedor.id,
+        nome: `${provedor.nome} — conta padrão`,
+        chaveUnicaConta: `${provedor.codigo}:default`,
+        identificadorContaExterna: 'default',
+        credenciaisCriptografadas: encryptCredentials({}),
+        pixEntradaHabilitado: true,
+        pixSaidaHabilitado: true,
+        situacao: SITUACAO_PROVEDOR.ATIVO,
+      },
+      update: {},
+    });
+  }
+
+  /** Cadastro de nova adquirente (nasce INATIVA; a conta padrão nasce junto). */
   @Post('adquirentes')
   @RequerPermissao(PERMISSOES.ADMIN_ADQUIRENTES_CRIAR)
   async criarAdquirente(
@@ -1543,6 +1577,7 @@ export class AdminOpsController {
           : {}),
       },
     });
+    await this.garantirContaPadrao(this.prisma, p);
     await this.auditar(req, 'ADQUIRENTE_CADASTRAR', 'provedores_pagamento', codigo, null, {
       codigo: p.codigo,
       nome: p.nome,
