@@ -119,7 +119,14 @@ Ativar/desativar adquirente, contingência e saque automático exigem permissão
 - `11-webhook-reenvio` (reenvio MANUAL do callback, pelo botão do painel/admin)
 - `12-integracao-envio` (envio da venda aos APPS que o lojista conectou)
 
-Constantes em `src/shared/queues.ts`. Bull Board `/admin/queues` com ADMINISTRADOR.
+Constantes em `src/shared/queues.ts`. Bull Board `/admin/queues` com ADMINISTRADOR /
+`admin.filas.ver`. Em produção painel e API são domínios distintos, então cookie plantado
+pelo painel nunca chega — a sessão do board é criada pela PRÓPRIA API: form POST
+top-level em `/admin/queues/sessao` com o JWT no corpo → `Set-Cookie` HttpOnly +
+`SameSite=Lax` (CSRF nos botões de retry/clean) escopado em `/admin/queues`, herdando a
+validade do JWT. Top-level POST porque Set-Cookie em XHR cross-site é third-party
+(Safari bloqueia). Tudo no `BullBoardAuthMiddleware`; spec em
+`src/queues/bull-board-sessao.spec.ts`.
 
 ⚠️ **jobId customizado NUNCA leva `:` (nem pode ser número puro).** O BullMQ 5
 valida no `add` e LANÇA (`Custom Id cannot contain :`) — com `saque:<id>` o

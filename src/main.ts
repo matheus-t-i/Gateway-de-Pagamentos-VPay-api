@@ -1,7 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
-import { json } from 'express';
+import { json, urlencoded } from 'express';
 import { AppModule } from './app.module';
 import { validarAmbiente } from './common/env.validation';
 import { API_GLOBAL_PREFIX } from './common/api-prefix';
@@ -35,6 +35,10 @@ async function bootstrap() {
       },
     }),
   );
+
+  // A sessão do Bull Board chega por form POST top-level (application/x-www-form-
+  // urlencoded) — parser escopado só nessa rota; o resto da API continua JSON.
+  app.use('/admin/queues/sessao', urlencoded({ extended: false, limit: '8kb' }));
 
   // Cabeçalhos de segurança (HSTS, nosniff, frame-options, etc.). A API é JSON,
   // mas também serve o Bull Board (/admin/queues) — um app React same-origin que

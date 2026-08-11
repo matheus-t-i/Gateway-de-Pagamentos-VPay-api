@@ -156,9 +156,32 @@ export class AdminUsuariosController {
       where: { padraoSistema: true },
     });
     if (!c) {
-      throw new NotFoundException('Configuração padrão do sistema não encontrada');
+      // Instalação nova, sem seed (produção não roda seed): a linha ainda não
+      // existe. 404 aqui travava a tela exatamente na primeira configuração —
+      // em vez disso, devolve os defaults do sistema com o flag de primeira
+      // vez; o PUT cria a linha na primeira gravação.
+      return {
+        primeiraConfiguracao: true,
+        taxaPixEntradaPercentual: '0',
+        taxaPixEntradaFixa: '0',
+        taxaPixSaidaPercentual: '0',
+        taxaPixSaidaFixa: '0',
+        ticketMinimoPixEntrada: '0',
+        ticketMaximoPixEntrada: '50000',
+        limiteDiarioPixSaida: '',
+        maxSaquesPorHora: '',
+        diasLiberacaoSaldo: 0,
+        percentualReserva: '0',
+        baseCalculoReserva: BASE_CALCULO_RESERVA.VALOR_LIQUIDO_EMPRESA,
+        diasRetencaoReserva: 0,
+        modoTratamentoMed: MODO_TRATAMENTO_MED.BLOQUEAR_SALDO,
+        permiteSaldoNegativo: false,
+        origemSaquePermitida: ORIGEM_SAQUE_PADRAO,
+        exigirChavePixCadastrada: true,
+      };
     }
     return {
+      primeiraConfiguracao: false,
       taxaPixEntradaPercentual: c.taxaPixEntradaPercentual.toString(),
       taxaPixEntradaFixa: c.taxaPixEntradaFixa.toString(),
       taxaPixSaidaPercentual: c.taxaPixSaidaPercentual.toString(),
@@ -188,13 +211,75 @@ export class AdminUsuariosController {
     @Req() req: { user: { id: string }; ip?: string },
   ) {
     await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
+    const regras = regrasComerciais(body);
     const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
       where: { padraoSistema: true },
     });
     if (!c) {
-      throw new NotFoundException('Configuração padrão do sistema não encontrada');
+      // Primeira gravação (instalação sem seed): cria a linha do padrão. As
+      // contas de liquidante são obrigatórias no modelo — usa a primeira conta
+      // apta de adquirente ATIVA em cada sentido; /admin/adquirentes troca
+      // depois. Sem adquirente cadastrada não há o que apontar: erro claro.
+      const [contaEntrada, contaSaida] = await Promise.all([
+        this.prisma.contaProvedor.findFirst({
+          where: {
+            situacao: SITUACAO_PROVEDOR.ATIVO,
+            pixEntradaHabilitado: true,
+            usuarioId: null,
+            provedor: {
+              situacao: SITUACAO_PROVEDOR.ATIVO,
+              permitePixEntrada: true,
+            },
+          },
+          orderBy: { id: 'asc' },
+        }),
+        this.prisma.contaProvedor.findFirst({
+          where: {
+            situacao: SITUACAO_PROVEDOR.ATIVO,
+            pixSaidaHabilitado: true,
+            usuarioId: null,
+            provedor: {
+              situacao: SITUACAO_PROVEDOR.ATIVO,
+              permitePixSaida: true,
+            },
+          },
+          orderBy: { id: 'asc' },
+        }),
+      ]);
+      if (!contaEntrada || !contaSaida) {
+        throw new BadRequestException(
+          'Cadastre uma adquirente ativa com conta de PIX in e PIX out antes de definir o padrão de novos clientes.',
+        );
+      }
+      // Upsert pelo nome: cobre o caso raro de a linha existir com
+      // `padraoSistema` desligado — ela volta a ser o padrão em vez de P2002.
+      const criada = await this.prisma.configuracaoPadraoPixUsuario.upsert({
+        where: { nome: 'Padrao Sistema' },
+        create: {
+          nome: 'Padrao Sistema',
+          descricao: 'Configuração padrão copiada na ativação do CLIENTE',
+          padraoSistema: true,
+          ativo: true,
+          contaProvedorPixEntradaId: contaEntrada.id,
+          contaProvedorPixSaidaId: contaSaida.id,
+          ...regras,
+        },
+        update: { padraoSistema: true, ativo: true, ...regras },
+      });
+      await this.prisma.registroAuditoria.create({
+        data: {
+          usuarioAtorId: BigInt(req.user.id),
+          origem: 'PAINEL',
+          operacao: 'ACAO_NEGOCIO',
+          acao: 'CONFIG_PADRAO_CLIENTE_CRIAR',
+          nomeTabela: 'configuracoes_padrao_pix_usuarios',
+          chaveRegistro: criada.id.toString(),
+          enderecoIp: req.ip,
+          dadosNovos: regras as never,
+        },
+      });
+      return { ok: true, criada: true };
     }
-    const regras = regrasComerciais(body);
     const antes = {
       taxaPixEntradaPercentual: c.taxaPixEntradaPercentual.toString(),
       taxaPixEntradaFixa: c.taxaPixEntradaFixa.toString(),
@@ -719,7 +804,9 @@ export class AdminUsuariosController {
       where: { padraoSistema: true, ativo: true },
     });
     if (!padrao) {
-      throw new BadRequestException('Configuração padrão PIX não encontrada');
+      throw new BadRequestException(
+        'Defina o "Padrão de novos clientes" em Usuários antes de ativar a primeira conta.',
+      );
     }
 
     await this.prisma.$transaction(async (tx) => {
@@ -1280,7 +1367,8 @@ export class AdminUsuariosController {
 
 /** Teto de prazo: 365 dias. Acima disso é erro de digitação, não regra. */
 const MAXIMO_DIAS = 365;
-const ORIGENS_SAQUE: string[] = ['PAINEL', 'API', 'AMBOS'];
+const ORIGEM_SAQUE_PADRAO = 'PAINEL';
+const ORIGENS_SAQUE: string[] = [ORIGEM_SAQUE_PADRAO, 'API', 'AMBOS'];
 
 /**
  * Saldo negativo permitido = o que está gravado OU o modo de MED exigir.
@@ -1459,7 +1547,7 @@ function regrasComerciais(body: Record<string, string>) {
     permiteSaldoNegativo:
       body.permiteSaldoNegativo === 'true' ||
       modoTratamentoMed === MODO_TRATAMENTO_MED.DEBITAR_IMEDIATAMENTE,
-    origemSaquePermitida: (body.origemSaquePermitida ?? 'PAINEL') as never,
+    origemSaquePermitida: (body.origemSaquePermitida ?? ORIGEM_SAQUE_PADRAO) as never,
     // `permitirPixSaidaViaApi` continua espelhando a origem para não deixar
     // dado antigo divergindo do que a tela mostra.
     permitirPixSaidaViaApi:
