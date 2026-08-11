@@ -28,6 +28,21 @@ export type ArquivoSalvo = {
 
 const S3_PREFIX = 's3://';
 
+/**
+ * Falha de ARMAZENAMENTO (credencial, permissão, bucket, rede) — distinta de
+ * arquivo inválido, que é 400 e culpa de quem enviou. Quem chama converte em
+ * resposta HTTP; o `causa` preserva o erro do SDK para o log.
+ */
+export class ErroStorage extends Error {
+  constructor(
+    message: string,
+    readonly causa?: unknown,
+  ) {
+    super(message);
+    this.name = 'ErroStorage';
+  }
+}
+
 /** Raiz de armazenamento local (só `STORAGE_DRIVER=local`). */
 export function uploadsRoot(): string {
   return resolve(process.env.UPLOADS_DIR ?? './uploads');
@@ -46,22 +61,58 @@ function driver(): 'local' | 's3' {
   return d === 's3' ? 's3' : 'local';
 }
 
+/**
+ * Credenciais aceitas nos DOIS nomes, de propósito: o `.env.example` documenta
+ * `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` e o `render.yaml` pede
+ * `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`. Quem seguiu o blueprint e caiu
+ * no par `AWS_*` dependia, sem saber, da cadeia padrão do SDK — e qualquer
+ * divergência de nome virava um 500 opaco no primeiro upload de documento, já
+ * em produção, porque o boot não confere credencial nenhuma.
+ */
+export function credenciaisS3():
+  | { accessKeyId: string; secretAccessKey: string }
+  | undefined {
+  const id = process.env.S3_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+  const secret =
+    process.env.S3_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+  return id && secret ? { accessKeyId: id, secretAccessKey: secret } : undefined;
+}
+
 function s3Client(): S3Client {
   const region = process.env.S3_REGION ?? process.env.AWS_REGION;
   if (!region) {
     throw new Error('S3_REGION (ou AWS_REGION) é obrigatória com STORAGE_DRIVER=s3');
   }
+  const endpoint = process.env.S3_ENDPOINT || undefined;
+
+  /**
+   * ⚠️ Checksum desligado quando há `S3_ENDPOINT` (Cloudflare R2, MinIO,
+   * Backblaze — qualquer coisa que não seja a S3 da AWS).
+   *
+   * Desde ~3.729 o SDK v3 assume `requestChecksumCalculation: 'WHEN_SUPPORTED'`
+   * e passa a mandar `x-amz-checksum-crc32` em TODO `PutObject`. Serviços
+   * compatíveis com S3 costumam recusar esse header ("not implemented"), e a
+   * falha aparece só na primeira gravação — nunca no boot. `WHEN_REQUIRED`
+   * volta ao comportamento anterior: só calcula checksum quando a operação
+   * exige.
+   *
+   * Na S3 de verdade (sem endpoint custom) o padrão é mantido: lá o checksum
+   * funciona e protege contra corrupção em trânsito.
+   */
+  const compativel = Boolean(endpoint);
+
   return new S3Client({
     region,
-    endpoint: process.env.S3_ENDPOINT || undefined,
+    endpoint,
     forcePathStyle: process.env.S3_FORCE_PATH_STYLE === '1',
-    credentials:
-      process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY
-        ? {
-            accessKeyId: process.env.S3_ACCESS_KEY_ID,
-            secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
-          }
-        : undefined,
+    // `undefined` deixa o SDK usar a cadeia padrão (perfil, role da instância).
+    credentials: credenciaisS3(),
+    ...(compativel
+      ? {
+          requestChecksumCalculation: 'WHEN_REQUIRED' as const,
+          responseChecksumValidation: 'WHEN_REQUIRED' as const,
+        }
+      : {}),
   });
 }
 
@@ -103,15 +154,31 @@ export async function salvarArquivo(
   if (driver() === 's3') {
     const bucket = s3Bucket();
     const key = `${escopo}/${id.toString()}/${nomeArmazenado}`;
-    await s3Client().send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: key,
-        Body: arquivo.buffer,
-        ContentType: arquivo.mimetype,
-        Metadata: { sha256: hashArquivo },
-      }),
-    );
+    try {
+      await s3Client().send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: arquivo.buffer,
+          ContentType: arquivo.mimetype,
+          Metadata: { sha256: hashArquivo },
+        }),
+      );
+    } catch (e) {
+      /**
+       * Sem isto o erro do SDK sobe cru e o Nest devolve
+       * `{"statusCode":500,"message":"Internal server error"}` — o admin fica
+       * sem saber se o problema é o arquivo, a permissão ou o bucket, e o
+       * motivo real só existe no log da plataforma. Falha de storage é do
+       * SERVIDOR (500 é o código certo), mas a mensagem tem que dizer o quê.
+       */
+      throw new ErroStorage(
+        `Falha ao gravar o documento no bucket "${bucket}" (chave ${key}): ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+        e,
+      );
+    }
     return { ...meta, caminhoArquivo: `${S3_PREFIX}${bucket}/${key}` };
   }
 

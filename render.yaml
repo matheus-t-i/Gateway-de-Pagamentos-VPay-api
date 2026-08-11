@@ -86,13 +86,23 @@ envVarGroups:
       - key: TURNSTILE_SECRET_KEY
         sync: false
       # ── Storage KYC ────────────────────────────────────────────────────
+      # Credencial aceita nos DOIS nomes (`S3_*` ou `AWS_*`); o boot exige que
+      # um par esteja preenchido — sem isso a app subia e só o primeiro upload
+      # de documento falhava, com 500.
+      #
+      # Storage COMPATÍVEL (Cloudflare R2, MinIO): preencha também S3_ENDPOINT
+      # e S3_FORCE_PATH_STYLE=1. Para R2, S3_REGION=auto.
       - key: S3_BUCKET
         sync: false
       - key: S3_REGION
         sync: false
-      - key: AWS_ACCESS_KEY_ID
+      - key: S3_ENDPOINT
+        sync: false # vazio = S3 da AWS
+      - key: S3_FORCE_PATH_STYLE
+        sync: false # "1" em R2/MinIO
+      - key: S3_ACCESS_KEY_ID
         sync: false
-      - key: AWS_SECRET_ACCESS_KEY
+      - key: S3_SECRET_ACCESS_KEY
         sync: false
       # ── Valorion (liquidante) ──────────────────────────────────────────
       - key: VALORION_WEBHOOK_TOKEN

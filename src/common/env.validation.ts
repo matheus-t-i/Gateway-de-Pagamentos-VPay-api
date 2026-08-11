@@ -67,6 +67,28 @@ export function validarAmbiente(env: Record<string, string | undefined>) {
       if (!env.S3_REGION && !env.AWS_REGION) {
         erros.push('S3_REGION (ou AWS_REGION) é obrigatória com STORAGE_DRIVER=s3.');
       }
+      /**
+       * Credencial ausente subia a app inteira e só estourava no PRIMEIRO
+       * upload de documento — 500 opaco, em produção, com o admin sem saber se
+       * a culpa era do arquivo. O boot conferia bucket e região e parava aí.
+       *
+       * Os dois nomes valem: `.env.example` documenta `S3_*` e o `render.yaml`
+       * pede `AWS_*`. Em plataforma com role de instância (ECS/EC2), onde a
+       * cadeia padrão do SDK resolve sozinha, use `S3_CREDENCIAL_IMPLICITA=1`
+       * para dispensar esta checagem — no Render não existe role, então o
+       * padrão é exigir.
+       */
+      const temCredencial =
+        (env.S3_ACCESS_KEY_ID && env.S3_SECRET_ACCESS_KEY) ||
+        (env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY);
+      if (!temCredencial && env.S3_CREDENCIAL_IMPLICITA !== '1') {
+        erros.push(
+          'Credencial de S3 ausente: defina S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY ' +
+            '(ou AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY). Sem ela o boot passa e o ' +
+            'upload de documento falha com 500. Em infra com role de instância, ' +
+            'defina S3_CREDENCIAL_IMPLICITA=1.',
+        );
+      }
     }
     if (!env.API_SECRET_PEPPER || env.API_SECRET_PEPPER.trim().length < 32) {
       erros.push(

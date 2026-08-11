@@ -3,6 +3,8 @@ import {
   Body,
   Controller,
   Get,
+  InternalServerErrorException,
+  Logger,
   NotFoundException,
   Param,
   Post,
@@ -25,7 +27,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
-import { abrirArquivo, salvarArquivo } from '../common/storage.util';
+import { ErroStorage, abrirArquivo, salvarArquivo } from '../common/storage.util';
 import { assertStepUpTotp } from '../common/step-up-totp';
 import { mapDocumentoAdmin, reavaliarSituacoes } from './onboarding.util';
 
@@ -34,6 +36,8 @@ type AdminReq = { user: { id: string } };
 @Controller('admin')
 @UseGuards(JwtAuthGuard)
 export class AdminDocumentosController {
+  private readonly log = new Logger(AdminDocumentosController.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   @Get('usuarios/:idPublico/documentos')
@@ -100,7 +104,20 @@ export class AdminDocumentosController {
     const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
     if (!usuario) throw new NotFoundException('Usuário não encontrado');
 
-    const salvo = await salvarArquivo('usuarios', usuario.id, arquivo);
+    let salvo: Awaited<ReturnType<typeof salvarArquivo>>;
+    try {
+      salvo = await salvarArquivo('usuarios', usuario.id, arquivo);
+    } catch (e) {
+      if (e instanceof ErroStorage) {
+        // O motivo real vai para o log da plataforma; o admin recebe uma
+        // mensagem que diz onde olhar, em vez de "Internal server error".
+        this.log.error(`upload de documento falhou: ${e.message}`, e.causa);
+        throw new InternalServerErrorException(
+          'Falha ao gravar o documento no armazenamento. Verifique a configuração do bucket (STORAGE_DRIVER/S3_*) e tente de novo.',
+        );
+      }
+      throw e;
+    }
     /**
      * `reavaliarSituacoes` no MESMO commit, como no `validar`: quando a VPay
      * sobe a documentação que faltava (o cliente mandou por e-mail, WhatsApp,
