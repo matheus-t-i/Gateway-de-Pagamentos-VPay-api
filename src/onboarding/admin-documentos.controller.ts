@@ -104,6 +104,24 @@ export class AdminDocumentosController {
     const usuario = await this.prisma.usuario.findUnique({ where: { idPublico } });
     if (!usuario) throw new NotFoundException('Usuário não encontrado');
 
+    // Mesma regra do painel: PENDENTE/VALIDO cobre o tipo — reenvio só após
+    // invalidar. Checa ANTES do PutObject para não orphanar arquivo no bucket.
+    const jaCoberto = await this.prisma.documentoUsuario.findFirst({
+      where: {
+        usuarioId: usuario.id,
+        tipoDocumento,
+        situacao: {
+          in: [SITUACAO_DOCUMENTO.PENDENTE, SITUACAO_DOCUMENTO.VALIDO],
+        },
+      },
+      select: { id: true },
+    });
+    if (jaCoberto) {
+      throw new BadRequestException(
+        'Já existe documento pendente ou válido deste tipo. Invalide o atual para reenviar.',
+      );
+    }
+
     let salvo: Awaited<ReturnType<typeof salvarArquivo>>;
     try {
       salvo = await salvarArquivo('usuarios', usuario.id, arquivo);
