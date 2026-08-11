@@ -231,7 +231,23 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         ...(input.pagador?.telefone
           ? { phone: input.pagador.telefone.replace(/\D/g, '') }
           : {}),
-        externaRef: input.referenciaExterna ?? input.idTransacaoPrivado,
+        // SEMPRE o id PÚBLICO — nunca a `referenciaExterna` do lojista, nunca o
+        // id privado. Duas razões, e as duas são de dinheiro:
+        //
+        // 1. UNICIDADE NA LIQUIDANTE. Com "cobrança nunca responde 409", a mesma
+        //    `referenciaExterna` acumula N cobranças vivas (carrinho mudou, QR
+        //    expirou, retry pós-FALHA). Mandá-la para cá criava DUAS cobranças na
+        //    Valorion com o mesmo `external_reference` — e é exatamente essa a
+        //    chave do refund (`createRefund`), que não tem idempotência. Devolução
+        //    com chave ambígua é caminho de estorno em duplicidade.
+        // 2. O ID PRIVADO NÃO SAI DAQUI. É interno (o callback e a API pública já
+        //    só expõem o público — ver `EntregaWebhookService.montarCorpo`); esta
+        //    linha era o único ponto em que ele cruzava a fronteira.
+        //
+        // O público serve para os dois papéis: é único por transação e já é o que
+        // vai em `customer.id`/`metadata`, então o eco do postback casa por
+        // `idTransacaoPublico` no `resolverTentativa` sem heurística nenhuma.
+        externaRef: input.idTransacaoPublico,
         ...(endereco
           ? {
               address: {

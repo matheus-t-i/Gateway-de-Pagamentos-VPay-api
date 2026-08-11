@@ -50,7 +50,14 @@ export type CreateChargeInput = {
   valor: Decimal;
   idTransacaoPrivado: string;
   idTransacaoPublico: string;
-  referenciaExterna?: string;
+  /**
+   * ⚠️ A `referenciaExterna` do lojista NÃO entra aqui, de propósito. Ela é o id
+   * do sistema DELE — etiqueta, opcional, repetível — e não pode virar chave de
+   * correlação com a liquidante: como cobrança nunca responde 409, a mesma
+   * referência acumula N cobranças, e mandá-la para a adquirente produzia duas
+   * cobranças com o mesmo `external_reference` (a chave do refund, que não tem
+   * idempotência). Adquirente nova correlaciona por `idTransacaoPublico`.
+   */
   pagador?: {
     nome?: string;
     documento?: string;

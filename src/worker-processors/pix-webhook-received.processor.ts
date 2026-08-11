@@ -199,8 +199,10 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
     ).trim();
     if (!ref) return null;
 
-    // Preferência: id privado (nosso) — é o que mandamos quando não há
-    // referenciaExterna do lojista.
+    // Id privado (nosso). Hoje o `externaRef` da cobrança sai como
+    // `idTransacaoPublico`, então este ramo só casa cobrança ANTIGA (criada
+    // antes da troca, ainda em voo) ou payload reprocessado à mão. Mantido de
+    // propósito: é o que recupera o que já está na liquidante com a chave velha.
     const porPrivado = await this.prisma.tentativaTransacao.findFirst({
       where: {
         transacao: {

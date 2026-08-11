@@ -475,7 +475,6 @@ export class PixService {
             valor,
             idTransacaoPrivado: tx.idTransacaoPrivado,
             idTransacaoPublico: tx.idTransacaoPublico,
-            referenciaExterna: params.input.referenciaExterna,
             pagador: params.input.pagador,
             itens: params.input.itens,
             expiracaoSegundos: params.input.expiracaoSegundos,

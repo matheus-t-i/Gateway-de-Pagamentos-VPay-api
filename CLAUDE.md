@@ -42,6 +42,27 @@ deles (OAuth, Basic, API key), TLS verificado e timeout explícito.
 - Crédito de saldo é recalculado de forma idempotente (chaves `cashin:*` no
   ledger) — webhook repetido não "soma de novo".
 
+⚠️ **A referência que vai para a liquidante é o `idTransacaoPublico` — nunca a
+`referenciaExterna` do lojista, nunca o `idTransacaoPrivado.`** A referência do
+lojista é etiqueta dele: opcional, repetível e, por causa do "cobrança nunca
+responde 409", a MESMA referência acumula N cobranças vivas (carrinho mudou, QR
+expirou, retry pós-`FALHA`). Enquanto ela ia no `externaRef` da cobrança, duas
+cobranças nasciam na Valorion com o mesmo `external_reference` — que é
+exatamente a chave do refund (`createRefund` manda `{ id, external_reference }`
+**sem** idempotência): devolução mirando chave ambígua é caminho de estorno em
+duplicidade. O id público resolve os dois lados porque é único por transação e
+já é o que vai em `customer.id`/`metadata`, então o eco do postback casa por
+`idTransacaoPublico` no `resolverTentativa`, sem heurística.
+
+Por isso `referenciaExterna` **não existe** em `CreateChargeInput`: a trava é
+estrutural, não comentário. Ela continua sendo do lojista — aparece no callback
+(`referencia_externa`) e nas telas —, só não atravessa a fronteira da VPay.
+O id privado segue interno (o callback e a API pública só expõem o público, ver
+`EntregaWebhookService.montarCorpo`); aquela linha era o único ponto em que ele
+saía. Cash-**out** é diferente e continua mandando `idTransacaoPrivado`: lá a
+chave sempre foi nossa, é única, e o matcher do webhook depende dela.
+Coberto por `src/providers/valorion/externa-ref-cobranca.spec.ts`.
+
 ### Controles de conta e saque
 Usuário aprovado e habilitado. No cash-out: validar documento, tipo de chave,
 ownership da chave, allowlist de IP da credencial e **revalidar elegibilidade no
@@ -306,6 +327,12 @@ novo. A integridade do ledger não depende disso: as chaves derivam do
 `idTransacaoPrivado` e o débito nasce no mesmo commit da transação (ver
 "Saque: transação e débito nascem no MESMO commit"). Nunca reintroduzir dado
 externo em chave de dinheiro.
+
+⚠️ **O "nunca 409" tem um preço do lado de fora, e ele já foi pago uma vez.**
+Gerar cobrança nova sob a mesma referência significa que a referência do lojista
+NÃO identifica uma cobrança — então ela também não pode virar a chave que mandamos
+para a liquidante (era o que acontecia até ago/2026 no `externaRef` da Valorion,
+com a devolução mirando chave ambígua). Ver "Idempotência e anti-duplicidade".
 
 ⚠️ **O pre-check sozinho NÃO resolve a corrida** (bot que dispara duas vezes no
 mesmo instante): é read-then-write, e as duas chamadas leem "não existe" antes
