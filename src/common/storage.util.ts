@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'crypto';
 import { createReadStream } from 'fs';
-import { mkdir, writeFile } from 'fs/promises';
+import { mkdir, unlink, writeFile } from 'fs/promises';
 import { join, resolve } from 'path';
 import { Readable } from 'stream';
 import { StreamableFile } from '@nestjs/common';
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -233,4 +234,17 @@ export async function abrirArquivo(
     return new StreamableFile(out.Body as Readable, meta);
   }
   return new StreamableFile(createReadStream(caminhoArquivo), opcoesStreamable(opts));
+}
+
+/**
+ * Remove o arquivo do disco/S3. Melhor esforço após substituir documento
+ * invalidado — falha aqui não desfaz o commit do banco (só deixa órfão).
+ */
+export async function removerArquivo(caminhoArquivo: string): Promise<void> {
+  if (caminhoArquivo.startsWith(S3_PREFIX)) {
+    const { bucket, key } = parseS3Uri(caminhoArquivo);
+    await s3Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+    return;
+  }
+  await unlink(caminhoArquivo);
 }

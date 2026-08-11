@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Logger,
   Post,
   UnauthorizedException,
   UploadedFile,
@@ -19,7 +20,7 @@ import {
   validarArquivoDocumento,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
-import { salvarArquivo } from '../common/storage.util';
+import { removerArquivo, salvarArquivo } from '../common/storage.util';
 import { montarStatusOnboarding, reavaliarSituacoes } from './onboarding.util';
 import { Throttle } from '../common/ip-throttle.guard';
 
@@ -39,6 +40,8 @@ const MAX_DOCUMENTOS_POR_CONTA = 30;
 @Throttle({ limit: 30, windowSec: 60 })
 @Controller('onboarding')
 export class OnboardingController {
+  private readonly log = new Logger(OnboardingController.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   private async autenticar(email: unknown, senha: unknown) {
@@ -146,11 +149,33 @@ export class OnboardingController {
         'Este documento é enviado pela equipe após a assinatura.',
       );
     }
-    // Cota anti-abuso do canal público.
+
+    const existentes = await this.prisma.documentoUsuario.findMany({
+      where: { usuarioId: usuario.id, tipoDocumento },
+      select: { id: true, situacao: true, caminhoArquivo: true },
+    });
+    // Já tem PENDENTE/VALIDO → não cria segunda via. INVALIDO → substitui.
+    if (
+      existentes.some(
+        (d) =>
+          d.situacao === SITUACAO_DOCUMENTO.PENDENTE ||
+          d.situacao === SITUACAO_DOCUMENTO.VALIDO,
+      )
+    ) {
+      throw new BadRequestException(
+        'Este documento já foi enviado. Aguarde a análise ou, se foi invalidado, use o reenvio.',
+      );
+    }
+    const invalidos = existentes.filter(
+      (d) => d.situacao === SITUACAO_DOCUMENTO.INVALIDO,
+    );
+
+    // Cota anti-abuso do canal público (reenvio de inválido não soma: apaga o antigo).
     const enviados = await this.prisma.documentoUsuario.count({
       where: { usuarioId: usuario.id },
     });
-    if (enviados >= MAX_DOCUMENTOS_POR_CONTA) {
+    const aposSubstituicao = enviados - invalidos.length + 1;
+    if (aposSubstituicao > MAX_DOCUMENTOS_POR_CONTA) {
       throw new BadRequestException(
         'Limite de documentos atingido. Fale com o suporte para reenviar.',
       );
@@ -158,6 +183,11 @@ export class OnboardingController {
 
     const salvo = await salvarArquivo('usuarios', usuario.id, arquivo);
     await this.prisma.$transaction(async (tx) => {
+      if (invalidos.length > 0) {
+        await tx.documentoUsuario.deleteMany({
+          where: { id: { in: invalidos.map((d) => d.id) } },
+        });
+      }
       await tx.documentoUsuario.create({
         data: {
           usuarioId: usuario.id,
@@ -172,6 +202,19 @@ export class OnboardingController {
       });
       await reavaliarSituacoes(tx, usuario.id);
     });
+
+    // Depois do commit: apaga o binário antigo. Falha aqui não desfaz o reenvio.
+    for (const antigo of invalidos) {
+      try {
+        await removerArquivo(antigo.caminhoArquivo);
+      } catch (e) {
+        this.log.warn(
+          `falha ao apagar arquivo antigo do documento ${antigo.id}: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    }
 
     return montarStatusOnboarding(this.prisma, usuario.id);
   }
