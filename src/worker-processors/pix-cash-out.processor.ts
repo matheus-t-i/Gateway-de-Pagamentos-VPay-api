@@ -43,7 +43,13 @@ type TxSaque = Prisma.TransacaoGetPayload<{
     contaProvedor: { include: { provedor: true } };
     usuario: { select: { situacao: true; contaBloqueada: true } };
     credencialApi: {
-      select: { ativo: true; revogadoEm: true; expiraEm: true; escopos: true };
+      select: {
+        ativo: true;
+        revogadoEm: true;
+        expiraEm: true;
+        escopos: true;
+        _count: { select: { ipsPermitidos: true } };
+      };
     };
   };
 }>;
@@ -100,7 +106,13 @@ export class PixCashOutProcessor extends WorkerHost {
         contaProvedor: { include: { provedor: true } },
         usuario: { select: { situacao: true, contaBloqueada: true } },
         credencialApi: {
-          select: { ativo: true, revogadoEm: true, expiraEm: true, escopos: true },
+          select: {
+            ativo: true,
+            revogadoEm: true,
+            expiraEm: true,
+            escopos: true,
+            _count: { select: { ipsPermitidos: true } },
+          },
         },
       },
     });
@@ -238,30 +250,24 @@ export class PixCashOutProcessor extends WorkerHost {
           'credencial sem escopo pix.saque.criar — saque não enviado',
         );
       }
-      // Chave cadastrada também vale para a API quando a conta exige — mesma
-      // regra da criação, reconferida aqui porque a aprovação pode ter caído.
-      if (cfg.exigirChavePixCadastrada) {
-        const chave = tx.pix?.chavePix;
-        const cadastrada = chave
-          ? await this.prisma.chavePixUsuario.findFirst({
-              where: { usuarioId: tx.usuarioId, chave },
-              select: { situacao: true },
-            })
-          : null;
-        if (cadastrada?.situacao !== SITUACAO_CHAVE_PIX.APROVADA) {
-          throw new SaqueBloqueadoError(
-            'conta exige chave PIX cadastrada e aprovada — saque não enviado',
-          );
-        }
+      // Saque via API exige IP allowlist na credencial (criação e revalidação).
+      if ((cred._count?.ipsPermitidos ?? 0) < 1) {
+        throw new SaqueBloqueadoError(
+          'credencial sem IP allowlist — saque via API não enviado',
+        );
       }
-    } else {
-      // Saque pedido pelo painel: só sai para chave cadastrada E aprovada pelo
-      // administrador, conferida agora — a aprovação pode ter sido revogada
-      // entre a criação e o (re)processamento.
-      const chave = tx.pix?.chavePix;
-      if (!chave) {
-        throw new SaqueBloqueadoError('saque sem chave PIX — não enviado');
-      }
+    }
+
+    // Chave de destino — mesma regra da criação:
+    // painel sempre APROVADA; API só quando exigirChavePixCadastrada.
+    // Reconferida aqui porque a aprovação pode ter sido revogada entre a
+    // criação e o envio (e o admin pode ter religado a exigência).
+    const chave = tx.pix?.chavePix;
+    if (!chave) {
+      throw new SaqueBloqueadoError('saque sem chave PIX — não enviado');
+    }
+    const exigeChaveCadastrada = !viaApi || cfg.exigirChavePixCadastrada;
+    if (exigeChaveCadastrada) {
       const cadastrada = await this.prisma.chavePixUsuario.findFirst({
         where: { usuarioId: tx.usuarioId, chave },
         select: { situacao: true },

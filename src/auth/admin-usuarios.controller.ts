@@ -1557,11 +1557,13 @@ function regrasComerciais(body: Record<string, string>) {
       body.permiteSaldoNegativo === 'true' ||
       modoTratamentoMed === MODO_TRATAMENTO_MED.DEBITAR_IMEDIATAMENTE,
     origemSaquePermitida: (body.origemSaquePermitida ?? ORIGEM_SAQUE_PADRAO) as never,
+    // Default seguro: exige chave cadastrada na API. false = BAAS (chave livre
+    // só via API + IP). Painel ignora e sempre exige APROVADA.
+    exigirChavePixCadastrada: body.exigirChavePixCadastrada !== 'false',
     // `permitirPixSaidaViaApi` continua espelhando a origem para não deixar
     // dado antigo divergindo do que a tela mostra.
     permitirPixSaidaViaApi:
       body.origemSaquePermitida === 'API' || body.origemSaquePermitida === 'AMBOS',
-    exigirChavePixCadastrada: body.exigirChavePixCadastrada !== 'false',
   };
 }
 

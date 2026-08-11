@@ -112,7 +112,6 @@ describe('config-padrao — primeira configuração', () => {
       const r = (await controller.configPadrao()) as Record<string, unknown>;
       expect(r.primeiraConfiguracao).toBe(true);
       expect(r.modoTratamentoMed).toBe('BLOQUEAR_SALDO');
-      expect(r.exigirChavePixCadastrada).toBe(true);
     });
   });
 

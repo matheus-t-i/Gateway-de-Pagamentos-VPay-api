@@ -4,7 +4,7 @@ import { encryptCredentials } from '../common/crypto.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfigPixService, LedgerService } from '../ledger/ledger.service';
 import { PixService } from './pix.service';
-import { money, SITUACAO_PROVEDOR } from '../shared';
+import { money, SITUACAO_CHAVE_PIX, SITUACAO_PROVEDOR } from '../shared';
 
 /**
  * Saques DISPARADOS NO MESMO INSTANTE (bot de saques).
@@ -128,7 +128,6 @@ describe('PixService.criarSaque — dois saques no mesmo instante', () => {
         taxaPixSaidaPercentual: '0',
         taxaPixSaidaFixa: '0',
         origemSaquePermitida: 'PAINEL',
-        exigirChavePixCadastrada: false,
       },
       update: {
         contaProvedorPixSaidaId: conta.id,
@@ -136,8 +135,22 @@ describe('PixService.criarSaque — dois saques no mesmo instante', () => {
         taxaPixSaidaPercentual: '0',
         taxaPixSaidaFixa: '0',
         origemSaquePermitida: 'PAINEL',
-        exigirChavePixCadastrada: false,
       },
+    });
+
+    await prisma.chavePixUsuario.upsert({
+      where: {
+        usuarioId_chave: { usuarioId, chave: entrada.chavePix },
+      },
+      create: {
+        usuarioId,
+        chave: entrada.chavePix,
+        tipoChave: 'EMAIL',
+        situacao: SITUACAO_CHAVE_PIX.APROVADA,
+        nomeTitular: 'Concorrencia Test',
+        documentoTitular: '11111111114',
+      },
+      update: { situacao: SITUACAO_CHAVE_PIX.APROVADA },
     });
   });
 

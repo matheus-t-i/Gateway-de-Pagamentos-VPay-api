@@ -686,6 +686,10 @@ model ConfiguracaoPadraoPixUsuario {
   maxSaquesPorHora            Int?                @map("max_saques_por_hora")
   permitirPixSaidaViaApi      Boolean             @default(false) @map("permitir_pix_saida_via_api")
   origemSaquePermitida        OrigemSaque         @default(PAINEL) @map("origem_saque_permitida")
+  /// true (padrão) = API também só saca para chave cadastrada/APROVADA.
+  /// false = BAAS: API aceita chave livre (destino do cliente final), desde que
+  /// a credencial tenha IP allowlist. O painel SEMPRE exige chave APROVADA —
+  /// esta flag não libera chave livre no painel.
   exigirChavePixCadastrada    Boolean             @default(true) @map("exigir_chave_pix_cadastrada")
   diasLiberacaoSaldo          Int                 @default(0) @map("dias_liberacao_saldo")
   percentualReserva           Decimal             @default(0) @map("percentual_reserva") @db.Decimal(7, 4)
@@ -729,8 +733,9 @@ model ConfiguracaoPixUsuario {
   /// Por onde o saque pode ser pedido. Substitui a leitura de
   /// `permitirPixSaidaViaApi` (mantido só para não quebrar dado antigo).
   origemSaquePermitida          OrigemSaque         @default(PAINEL) @map("origem_saque_permitida")
-  /// true = saque só para chave PIX cadastrada e APROVADA na conta; false = a
-  /// chave pode vir solta na requisição. Vale para API e painel.
+  /// true (padrão) = API também só saca para chave cadastrada/APROVADA.
+  /// false = BAAS: API aceita chave livre com IP allowlist na credencial.
+  /// Painel ignora esta flag e sempre exige chave APROVADA.
   exigirChavePixCadastrada      Boolean             @default(true) @map("exigir_chave_pix_cadastrada")
   /// Antifraude: muitas recusas em pouco tempo desligam o saque até o admin liberar.
   saqueBloqueadoPorAbuso        Boolean             @default(false) @map("saque_bloqueado_por_abuso")

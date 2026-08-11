@@ -712,21 +712,28 @@ export class PixService {
       throw new BadRequestException(msg);
     }
 
-    // Chave de destino: quando a conta exige chave cadastrada, o saque só sai
-    // para chave APROVADA do próprio titular — é o que impede desviar dinheiro
-    // para uma chave qualquer com a credencial vazada.
-    if (cfg.exigirChavePixCadastrada) {
-      const chave = await this.prisma.chavePixUsuario.findFirst({
+    // Chave de destino:
+    // - Painel: SEMPRE cadastrada e APROVADA (esta flag NÃO libera chave livre
+    //   no painel — o controller do painel já escolhe por idPublico aprovado).
+    // - API: se exigirChavePixCadastrada, mesma regra; se false (BAAS), aceita
+    //   a chave do payload. IP allowlist já foi exigida em
+    //   assertSaqueViaApiPermitido no controller da API.
+    const exigeChaveCadastrada = !viaApi || cfg.exigirChavePixCadastrada;
+    if (exigeChaveCadastrada) {
+      const chaveDestino = await this.prisma.chavePixUsuario.findFirst({
         where: {
           usuarioId: params.usuarioId,
           chave: params.input.chavePix,
           situacao: SITUACAO_CHAVE_PIX.APROVADA,
         },
       });
-      if (!chave) {
-        const msg =
-          'Esta conta só permite saque para chave PIX cadastrada e aprovada. ' +
-          'Cadastre a chave no painel e aguarde a aprovação.';
+      if (!chaveDestino) {
+        const msg = viaApi
+          ? 'Saque via API só é permitido para chave PIX cadastrada e aprovada nesta conta. ' +
+            'Cadastre a chave no painel e aguarde a aprovação, ou peça ao administrador ' +
+            'para liberar chave livre na API (BAAS).'
+          : 'Saque só é permitido para chave PIX cadastrada e aprovada. ' +
+            'Cadastre a chave no painel e aguarde a aprovação.';
         await this.saqueProtecao.registrarRecusaSaque({
           usuarioId: params.usuarioId,
           motivo: msg,

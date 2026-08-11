@@ -27,7 +27,11 @@ export type ConfigPixEfetiva = {
   permitirPixSaidaViaApi: boolean;
   /** Por onde o saque pode ser pedido (painel, API ou os dois). */
   origemSaquePermitida: 'PAINEL' | 'API' | 'AMBOS';
-  /** true = a chave de destino precisa estar cadastrada e APROVADA na conta. */
+  /**
+   * true = API também exige chave cadastrada/APROVADA.
+   * false = API (BAAS) aceita chave livre, com IP allowlist na credencial.
+   * Painel sempre exige cadastrada — esta flag não libera chave livre no painel.
+   */
   exigirChavePixCadastrada: boolean;
   diasLiberacaoSaldo: number;
   percentualReserva: Decimal;

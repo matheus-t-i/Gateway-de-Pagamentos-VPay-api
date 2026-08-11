@@ -177,7 +177,6 @@ describe('PixCashOutProcessor — bloqueio encerra com estorno', () => {
         taxaPixSaidaPercentual: '0',
         taxaPixSaidaFixa: '0',
         origemSaquePermitida: 'PAINEL',
-        exigirChavePixCadastrada: false,
       },
       update: {
         contaProvedorPixSaidaId: conta.id,
@@ -185,7 +184,6 @@ describe('PixCashOutProcessor — bloqueio encerra com estorno', () => {
         taxaPixSaidaPercentual: '0',
         taxaPixSaidaFixa: '0',
         origemSaquePermitida: 'PAINEL',
-        exigirChavePixCadastrada: false,
       },
     });
 

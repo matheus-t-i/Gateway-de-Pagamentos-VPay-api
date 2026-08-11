@@ -4,7 +4,7 @@ import { encryptCredentials } from '../common/crypto.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfigPixService, LedgerService } from '../ledger/ledger.service';
 import { PixService } from './pix.service';
-import { money, SITUACAO_PROVEDOR, SITUACAO_TRANSACAO } from '../shared';
+import { money, SITUACAO_CHAVE_PIX, SITUACAO_PROVEDOR, SITUACAO_TRANSACAO } from '../shared';
 
 /**
  * O saque tem que sair com o débito AMARRADO à transação.
@@ -113,8 +113,6 @@ describe('PixService.criarSaque — débito amarrado à transação', () => {
         taxaPixSaidaPercentual: '1',
         taxaPixSaidaFixa: '2',
         origemSaquePermitida: 'PAINEL',
-        // O foco aqui é o vínculo do débito; a trava de chave PIX tem teste próprio.
-        exigirChavePixCadastrada: false,
       },
       update: {
         contaProvedorPixSaidaId: conta.id,
@@ -122,8 +120,22 @@ describe('PixService.criarSaque — débito amarrado à transação', () => {
         taxaPixSaidaPercentual: '1',
         taxaPixSaidaFixa: '2',
         origemSaquePermitida: 'PAINEL',
-        exigirChavePixCadastrada: false,
       },
+    });
+
+    await prisma.chavePixUsuario.upsert({
+      where: {
+        usuarioId_chave: { usuarioId, chave: 'chave-teste@vpay.local' },
+      },
+      create: {
+        usuarioId,
+        chave: 'chave-teste@vpay.local',
+        tipoChave: 'EMAIL',
+        situacao: SITUACAO_CHAVE_PIX.APROVADA,
+        nomeTitular: 'Saque Debito Test',
+        documentoTitular: '11111111113',
+      },
+      update: { situacao: SITUACAO_CHAVE_PIX.APROVADA },
     });
 
     await prisma.saldoUsuario.upsert({
