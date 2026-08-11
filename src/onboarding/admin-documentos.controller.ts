@@ -101,19 +101,35 @@ export class AdminDocumentosController {
     if (!usuario) throw new NotFoundException('Usuário não encontrado');
 
     const salvo = await salvarArquivo('usuarios', usuario.id, arquivo);
-    const doc = await this.prisma.documentoUsuario.create({
-      data: {
-        usuarioId: usuario.id,
-        tipoDocumento,
-        nomeArquivo: salvo.nomeArquivo,
-        caminhoArquivo: salvo.caminhoArquivo,
-        tipoMime: salvo.tipoMime,
-        tamanhoBytes: BigInt(salvo.tamanhoBytes),
-        hashArquivo: salvo.hashArquivo,
-        situacao: SITUACAO_DOCUMENTO.VALIDO,
-        validadoPorUsuarioId: BigInt(req.user.id),
-        validadoEm: new Date(),
-      },
+    /**
+     * `reavaliarSituacoes` no MESMO commit, como no `validar`: quando a VPay
+     * sobe a documentação que faltava (o cliente mandou por e-mail, WhatsApp,
+     * presencial), a conta precisa sair de `PENDENTE` para `EM_ANALISE`. Sem
+     * isso ela ficava `PENDENTE` com a documentação completa — e como o botão
+     * de aprovação normal só aparece em `EM_ANALISE`, o admin era empurrado
+     * para a ativação por EXCEÇÃO tendo todos os documentos na mão.
+     *
+     * Conta já ATIVA não é afetada: nenhum dos ramos da reavaliação casa com
+     * ela (é o caso de quem foi ativado sem documentação e recebe os arquivos
+     * depois).
+     */
+    const doc = await this.prisma.$transaction(async (tx) => {
+      const criado = await tx.documentoUsuario.create({
+        data: {
+          usuarioId: usuario.id,
+          tipoDocumento,
+          nomeArquivo: salvo.nomeArquivo,
+          caminhoArquivo: salvo.caminhoArquivo,
+          tipoMime: salvo.tipoMime,
+          tamanhoBytes: BigInt(salvo.tamanhoBytes),
+          hashArquivo: salvo.hashArquivo,
+          situacao: SITUACAO_DOCUMENTO.VALIDO,
+          validadoPorUsuarioId: BigInt(req.user.id),
+          validadoEm: new Date(),
+        },
+      });
+      await reavaliarSituacoes(tx, usuario.id);
+      return criado;
     });
     return { ok: true, id: doc.id.toString(), tipoDocumento };
   }

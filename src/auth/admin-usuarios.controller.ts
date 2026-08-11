@@ -13,6 +13,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import * as argon2 from 'argon2';
+import { z } from 'zod';
 import { randomInt } from 'node:crypto';
 import {
   BASE_CALCULO_RESERVA,
@@ -42,6 +43,22 @@ import {
 } from '../common/step-up-totp';
 
 const stepUpSchema = stepUpBodySchema;
+
+/**
+ * Ativação de cadastro. `semDocumentacao` é a EXCEÇÃO de KYC: ativa a conta com
+ * documento obrigatório faltando ou reprovado.
+ *
+ * O padrão continua sendo o bloqueio — quem quiser a exceção precisa pedir por
+ * ela explicitamente e dizer por quê. A justificativa não é burocracia: uma
+ * conta ativa sem KYC é uma pergunta que alguém vai fazer meses depois (o
+ * próprio dono, um parceiro ou um regulador), e sem isto a resposta não existe
+ * em lugar nenhum — a ativação por exceção ficaria indistinguível da normal no
+ * histórico.
+ */
+const ativarUsuarioSchema = stepUpBodySchema.extend({
+  semDocumentacao: z.boolean().optional(),
+  justificativa: z.string().trim().min(10).max(500).optional(),
+});
 
 @Controller('admin/usuarios')
 @UseGuards(JwtAuthGuard)
@@ -630,11 +647,17 @@ export class AdminUsuariosController {
   async ativar(
     @Param('idPublico') idPublico: string,
     @Body() body: unknown,
-    @Req() req: { user: { id: string } },
+    @Req() req: { user: { id: string }; ip?: string },
   ) {
-    const step = stepUpSchema.safeParse(body ?? {});
+    const step = ativarUsuarioSchema.safeParse(body ?? {});
     if (!step.success) throw new BadRequestException(step.error.flatten());
     await assertStepUpTotp(this.prisma, req.user.id, step.data.codigoTotp);
+    const semDocumentacao = step.data.semDocumentacao === true;
+    if (semDocumentacao && !step.data.justificativa) {
+      throw new BadRequestException(
+        'Ativar sem documentação exige justificativa (mínimo 10 caracteres).',
+      );
+    }
 
     const usuario = await this.prisma.usuario.findUnique({
       where: { idPublico },
@@ -642,9 +665,20 @@ export class AdminUsuariosController {
     });
     if (!usuario) throw new BadRequestException('Usuário não encontrado');
 
-    // Gate de aprovação: só ativa cadastro que passou pelo envio de documentação
-    // (EM_ANALISE) e sem documento obrigatório reprovado.
-    if (usuario.situacao !== SITUACAO_USUARIO.EM_ANALISE) {
+    /**
+     * Gate de aprovação: só ativa cadastro que passou pelo envio de documentação
+     * (EM_ANALISE) e sem documento obrigatório reprovado.
+     *
+     * Com `semDocumentacao`, o admin assume a exceção: aceita também `PENDENTE`
+     * (o cliente nunca chegou a enviar nada) e ignora faltante/inválido. O que
+     * NÃO se afrouxa em hipótese nenhuma é ativar conta já encerrada, reprovada
+     * ou bloqueada — a exceção é sobre KYC, não sobre ressuscitar cadastro que
+     * saiu do fluxo por decisão anterior.
+     */
+    const situacoesAtivaveis: string[] = semDocumentacao
+      ? [SITUACAO_USUARIO.EM_ANALISE, SITUACAO_USUARIO.PENDENTE]
+      : [SITUACAO_USUARIO.EM_ANALISE];
+    if (!situacoesAtivaveis.includes(usuario.situacao)) {
       throw new BadRequestException(
         `Usuário não está em análise (situação atual: ${usuario.situacao}). ` +
           'A documentação precisa ser enviada antes da aprovação.',
@@ -663,20 +697,22 @@ export class AdminUsuariosController {
             d.situacao === SITUACAO_DOCUMENTO.PENDENTE),
       ),
     );
-    if (obrigatoriosInvalidos.length > 0) {
-      throw new BadRequestException(
-        `Documentos obrigatórios inválidos: ${obrigatoriosInvalidos.join(', ')}`,
-      );
-    }
-
     // Furo de KYC fechado: um PJ chega a EM_ANALISE só com os documentos
     // pessoais do responsável. Sem esta checagem o admin poderia ativar a conta
     // antes de qualquer documento societário ter sido enviado.
     const faltantes = documentosFaltantes(exigidos, usuario.documentos);
-    if (faltantes.length > 0) {
-      throw new BadRequestException(
-        `Documentação incompleta — ainda falta: ${faltantes.join(', ')}.`,
-      );
+
+    if (!semDocumentacao) {
+      if (obrigatoriosInvalidos.length > 0) {
+        throw new BadRequestException(
+          `Documentos obrigatórios inválidos: ${obrigatoriosInvalidos.join(', ')}`,
+        );
+      }
+      if (faltantes.length > 0) {
+        throw new BadRequestException(
+          `Documentação incompleta — ainda falta: ${faltantes.join(', ')}.`,
+        );
+      }
     }
 
     const padrao = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
@@ -701,10 +737,41 @@ export class AdminUsuariosController {
           usuarioId: usuario.id,
           situacaoAnterior: usuario.situacao,
           novaSituacao: SITUACAO_USUARIO.ATIVO,
-          motivo: 'Ativação administrativa',
+          // O motivo fica no histórico da CONTA, não só na auditoria: é a tela
+          // que o suporte abre primeiro quando pergunta "por que esta conta
+          // está ativa sem documento?".
+          motivo: semDocumentacao
+            ? `Ativação administrativa SEM DOCUMENTAÇÃO — ${step.data.justificativa}`
+            : 'Ativação administrativa',
           usuarioAtorId: BigInt(req.user.id),
         },
       });
+      // Exceção de KYC é registro de auditoria próprio, com AÇÃO própria: quem
+      // for procurar depois filtra por `USUARIO_ATIVAR_SEM_DOCUMENTACAO` em vez
+      // de ler ativação por ativação atrás de qual foi a exceção.
+      if (semDocumentacao) {
+        await tx.registroAuditoria.create({
+          data: {
+            usuarioAtorId: BigInt(req.user.id),
+            usuarioAfetadoId: usuario.id,
+            origem: 'PAINEL',
+            operacao: 'ACAO_NEGOCIO',
+            acao: 'USUARIO_ATIVAR_SEM_DOCUMENTACAO',
+            nomeTabela: 'usuarios',
+            chaveRegistro: usuario.idPublico,
+            enderecoIp: req.ip,
+            dadosAnteriores: {
+              situacao: usuario.situacao,
+              documentosFaltantes: faltantes,
+              documentosInvalidos: obrigatoriosInvalidos,
+            } as never,
+            dadosNovos: {
+              situacao: SITUACAO_USUARIO.ATIVO,
+              justificativa: step.data.justificativa,
+            } as never,
+          },
+        });
+      }
       await tx.configuracaoPixUsuario.upsert({
         where: { usuarioId: usuario.id },
         create: {
