@@ -189,21 +189,48 @@ export async function salvarArquivo(
   return { ...meta, caminhoArquivo: caminhoAbsoluto };
 }
 
-/** Abre um arquivo salvo para download (admin). */
-export async function abrirArquivo(caminhoArquivo: string): Promise<StreamableFile> {
+export type OpcoesAbrirArquivo = {
+  /** MIME gravado no banco (fonte da verdade para o browser). */
+  tipoMime?: string | null;
+  /** Nome original — Content-Disposition; sem isto o Chrome baixa UUID. */
+  nomeArquivo?: string | null;
+  /** `inline` = visualizar; `attachment` = forçar download. */
+  disposicao?: 'inline' | 'attachment';
+};
+
+function opcoesStreamable(
+  opts: OpcoesAbrirArquivo | undefined,
+  contentTypeS3?: string,
+): { type?: string; disposition?: string } {
+  const type = opts?.tipoMime || contentTypeS3 || undefined;
+  const nome = opts?.nomeArquivo?.trim();
+  if (!nome && !type) return {};
+  const disposicao = opts?.disposicao ?? 'inline';
+  // filename* UTF-8: acentos no nome original; filename ASCII de fallback.
+  const disposition = nome
+    ? `${disposicao}; filename="${nome.replace(/"/g, '')}"; filename*=UTF-8''${encodeURIComponent(nome)}`
+    : undefined;
+  return { type, disposition };
+}
+
+/** Abre um arquivo salvo para download/visualização (admin). */
+export async function abrirArquivo(
+  caminhoArquivo: string,
+  opts?: OpcoesAbrirArquivo,
+): Promise<StreamableFile> {
   if (caminhoArquivo.startsWith(S3_PREFIX)) {
     const { bucket, key } = parseS3Uri(caminhoArquivo);
     const out = await s3Client().send(
       new GetObjectCommand({ Bucket: bucket, Key: key }),
     );
     if (!out.Body) throw new Error(`Objeto S3 vazio: ${caminhoArquivo}`);
+    const meta = opcoesStreamable(opts, out.ContentType);
     const body = out.Body as { transformToByteArray?: () => Promise<Uint8Array> };
     if (typeof body.transformToByteArray === 'function') {
       const bytes = await body.transformToByteArray();
-      return new StreamableFile(Buffer.from(bytes));
+      return new StreamableFile(Buffer.from(bytes), meta);
     }
-    // Fallback stream Node
-    return new StreamableFile(out.Body as Readable);
+    return new StreamableFile(out.Body as Readable, meta);
   }
-  return new StreamableFile(createReadStream(caminhoArquivo));
+  return new StreamableFile(createReadStream(caminhoArquivo), opcoesStreamable(opts));
 }

@@ -158,7 +158,13 @@ export class AdminDocumentosController {
       where: { id: BigInt(id) },
     });
     if (!doc) throw new NotFoundException('Documento não encontrado');
-    return await abrirArquivo(doc.caminhoArquivo);
+    // Sem tipoMime/nomeArquivo o browser trata o blob como octet-stream e
+    // baixa um UUID sem extensão (parece arquivo corrompido).
+    return await abrirArquivo(doc.caminhoArquivo, {
+      tipoMime: doc.tipoMime,
+      nomeArquivo: doc.nomeArquivo,
+      disposicao: 'inline',
+    });
   }
 
   @Post('documentos/:id/validar')
