@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { RateLimitService } from '../api-credentials/rate-limit.service';
+import { extrairIpCliente } from './client-ip.util';
 
 type Limite = { limit: number; windowSec: number };
 
@@ -44,8 +45,8 @@ export class IpThrottleGuard implements CanActivate {
         context.getClass(),
       ]) ?? this.padrao;
 
-    // req.ip depende de trust proxy (validado no boot para produção).
-    const ip = (req.ip || 'desconhecido').replace('::ffff:', '');
+    // Atrás de Cloudflare+Render, req.ip sozinho pega o edge CF — ver extrairIpCliente.
+    const ip = extrairIpCliente(req) || 'desconhecido';
     // Identifica a rota pelo handler para não misturar contadores entre rotas.
     const rota = `${context.getClass().name}.${context.getHandler().name}`;
     const chave = `rl:ip:${ip}:${rota}`;

@@ -108,6 +108,61 @@ describe('Valorion — 5 adquirentes', () => {
     );
     expect(visto.apiKey).toBe('chave-da-02');
   });
+
+  it('API_PUBLIC_URL com /api no final NÃO duplica o prefixo no postback', async () => {
+    const visto = { postbackUrl: '' };
+    const config = {
+      get: (nome: string) =>
+        (
+          ({
+            VALORION_API_KEY: 'chave',
+            API_PUBLIC_URL: 'https://vpay-api.onrender.com/api',
+            VALORION_WEBHOOK_TOKEN: 'tok',
+          }) as Record<string, string>
+        )[nome],
+    } as unknown as ConfigService;
+    const provider = new ValorionPaymentProvider(
+      {} as unknown as PrismaService,
+      config,
+      'valorion',
+    );
+    const fetchOriginal = global.fetch;
+    global.fetch = (async (_url: string, init: { body: string }) => {
+      const corpo = JSON.parse(init.body) as { postbackUrl?: string };
+      visto.postbackUrl = String(corpo.postbackUrl ?? '');
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            status: 'success',
+            idTransaction: 'liq',
+            paymentCode: '00020126...',
+          }),
+      };
+    }) as unknown as typeof fetch;
+    try {
+      const { Decimal } = await import('decimal.js');
+      await provider.createCharge({
+        valor: new Decimal('5.00'),
+        idTransacaoPrivado: 'priv',
+        idTransacaoPublico: 'pub',
+        pagador: {
+          nome: 'A',
+          documento: '52998224725',
+          email: 'a@teste.local',
+          telefone: '11999998888',
+        },
+        credenciais: {},
+      } as never);
+    } finally {
+      global.fetch = fetchOriginal;
+    }
+    expect(visto.postbackUrl).toBe(
+      'https://vpay-api.onrender.com/api/webhooks/valorion/pix-in?token=tok',
+    );
+    expect(visto.postbackUrl).not.toContain('/api/api/');
+  });
 });
 
 describe('Valorion cash-out — recusa definitiva no auth', () => {

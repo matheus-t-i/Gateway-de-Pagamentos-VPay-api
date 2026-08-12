@@ -26,4 +26,12 @@ describe('ipAllowed', () => {
     expect(ipAllowed('179.51.222.199', ['179.51.222.199'])).toBe(true);
     expect(ipAllowed('1.2.3.4', ['179.51.222.199'])).toBe(false);
   });
+
+  it('casa CIDR /24 (Valorion Nuvende)', () => {
+    process.env.NODE_ENV = 'production';
+    const allow = ['74.220.48.0/24', '74.220.56.0/24'];
+    expect(ipAllowed('74.220.48.180', allow)).toBe(true);
+    expect(ipAllowed('74.220.56.1', allow)).toBe(true);
+    expect(ipAllowed('104.23.160.124', allow)).toBe(false);
+  });
 });

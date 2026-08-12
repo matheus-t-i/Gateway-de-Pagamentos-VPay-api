@@ -33,6 +33,15 @@ import { HealthController } from './health.controller';
             ? { target: 'pino-pretty', options: { singleLine: true } }
             : undefined,
         quietReqLogger: true,
+        // Em produção, polling do painel (dashboard/pendências) inundava o
+        // Render com access log 2xx+headers — erros sumiam. Sucesso fica
+        // silencioso; 4xx/5xx e falhas de negócio continuam visíveis.
+        customLogLevel: (_req, res, err) => {
+          if (err || res.statusCode >= 500) return 'error';
+          if (res.statusCode >= 400) return 'warn';
+          if (process.env.NODE_ENV === 'production') return 'silent';
+          return 'info';
+        },
         // O serializer padrão do pino copia req.headers inteiro: sem isto,
         // token JWT, segredo de API e x-key do provedor vão em texto claro
         // para o log de TODA requisição.

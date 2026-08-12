@@ -62,7 +62,9 @@ async function bootstrap() {
   );
 
   // Hardening: não anunciar o framework; atrás de proxy (Render) confiar no
-  // X-Forwarded-For para que req.ip (allowlists/auditoria) seja o IP real.
+  // X-Forwarded-For para que req.ip (auditoria) seja o IP do hop anterior.
+  // Com Cloudflare na frente, TRUST_PROXY=1 faz req.ip = edge CF (104.23.*),
+  // não o cliente — webhooks/throttle usam extrairIpCliente (cf-connecting-ip).
   const express = app.getHttpAdapter().getInstance();
   express.disable('x-powered-by');
   if (process.env.TRUST_PROXY === '1') {

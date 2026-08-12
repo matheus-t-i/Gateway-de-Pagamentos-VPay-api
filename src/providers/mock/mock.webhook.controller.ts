@@ -16,6 +16,7 @@ import { getRastreio } from '../../common/request-context';
 import { MockPaymentProvider } from './mock.client';
 import { MedService } from '../../med/med.service';
 import { Throttle } from '../../common/ip-throttle.guard';
+import { extrairIpCliente } from '../../common/client-ip.util';
 
 /**
  * Webhook da adquirente. O teto global de 300 req/min por IP é pensado para
@@ -42,18 +43,26 @@ export class MockWebhookController {
   async pixIn(
     @Body() body: Record<string, unknown>,
     @Headers() headers: Record<string, string>,
-    @Req() req: { ip?: string },
+    @Req()
+    req: {
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
   ) {
-    return this.handle(body, headers, req.ip ?? '127.0.0.1', 'cashin');
+    return this.handle(body, headers, extrairIpCliente(req), 'cashin');
   }
 
   @Post('pix-out')
   async pixOut(
     @Body() body: Record<string, unknown>,
     @Headers() headers: Record<string, string>,
-    @Req() req: { ip?: string },
+    @Req()
+    req: {
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
   ) {
-    return this.handle(body, headers, req.ip ?? '127.0.0.1', 'cashout');
+    return this.handle(body, headers, extrairIpCliente(req), 'cashout');
   }
 
   /**
@@ -64,11 +73,14 @@ export class MockWebhookController {
   async medWebhook(
     @Body() body: Record<string, unknown>,
     @Headers() headers: Record<string, string>,
-    @Req() req: { ip?: string },
+    @Req()
+    req: {
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
   ) {
-    return this.handle(body, headers, req.ip ?? '127.0.0.1', 'med');
+    return this.handle(body, headers, extrairIpCliente(req), 'med');
   }
-
   private async handle(
     body: Record<string, unknown>,
     headers: Record<string, string>,

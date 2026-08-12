@@ -20,6 +20,7 @@ import {
   VerifyTransportInput,
 } from '../payment-provider.port';
 import { chavePixParaLiquidante, money, normalizarDocumento } from '../../shared';
+import { origemApiPublica } from '../../common/api-prefix';
 import { extrairValorDePayload } from '../valor-remoto.util';
 
 /**
@@ -144,9 +145,9 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         'Valorion: API_PUBLIC_URL ausente — configure a URL pública da API para receber postbacks',
       );
     }
-    // `api` é o prefixo global do main.ts — API_PUBLIC_URL é só a origem
-    // (ex.: https://abc.ngrok-free.app), sem caminho.
-    const url = `${base.replace(/\/+$/, '')}/api/webhooks/${this.code}/${rota}`;
+    // Prefixo global `/api` entra AQUI. `origemApiPublica` remove `/api` se
+    // alguém colocou na env (Render com URL "da API"), senão vira /api/api/.
+    const url = `${origemApiPublica(base)}/api/webhooks/${this.code}/${rota}`;
     const token = this.env('VALORION_WEBHOOK_TOKEN');
     return token ? `${url}?token=${encodeURIComponent(token)}` : url;
   }
@@ -582,6 +583,11 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
    */
   async verifyTransport(input: VerifyTransportInput): Promise<boolean> {
     if (!ipAllowed(input.ip, input.allowedIps)) {
+      // Resposta HTTP continua genérica em produção; o IP vai só ao log do
+      // servidor — sem isto o 401 de allowlist é cego no Render.
+      this.logger.warn(
+        `Webhook IP fora da allowlist (recebido=${input.ip}; allowlist=${input.allowedIps.join(',') || '(vazia)'})`,
+      );
       throw new UnauthorizedException(mensagemIpNaoPermitido(input.ip));
     }
     if (input.exigeAssinatura) {

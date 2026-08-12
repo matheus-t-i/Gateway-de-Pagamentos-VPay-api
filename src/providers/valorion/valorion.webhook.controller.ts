@@ -26,6 +26,7 @@ import {
 import { decryptCredentials } from '../../common/crypto.util';
 import { extrairValorDePayload } from '../valor-remoto.util';
 import { rotaSemPrefixo } from '../../common/api-prefix';
+import { extrairIpCliente } from '../../common/client-ip.util';
 import { ProviderRegistry } from '../provider.registry';
 
 /**
@@ -82,13 +83,19 @@ export class ValorionWebhookController {
     @Body() body: Record<string, unknown>,
     @Headers() headers: Record<string, string>,
     @Query('token') token: string | undefined,
-    @Req() req: { ip?: string; path?: string; url?: string },
+    @Req()
+    req: {
+      ip?: string;
+      path?: string;
+      url?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
   ) {
     return this.handle(
       body,
       headers,
       token,
-      req.ip ?? '127.0.0.1',
+      extrairIpCliente(req),
       'cashin',
       this.codigoDaReq(req),
     );
@@ -99,13 +106,19 @@ export class ValorionWebhookController {
     @Body() body: Record<string, unknown>,
     @Headers() headers: Record<string, string>,
     @Query('token') token: string | undefined,
-    @Req() req: { ip?: string; path?: string; url?: string },
+    @Req()
+    req: {
+      ip?: string;
+      path?: string;
+      url?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
   ) {
     return this.handle(
       body,
       headers,
       token,
-      req.ip ?? '127.0.0.1',
+      extrairIpCliente(req),
       'cashout',
       this.codigoDaReq(req),
     );
