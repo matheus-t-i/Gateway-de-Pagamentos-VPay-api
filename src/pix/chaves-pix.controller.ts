@@ -6,20 +6,27 @@ import {
   Get,
   NotFoundException,
   Param,
+  Patch,
   Post,
   Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
 import {
+  chavePixValida,
   criarChavePixSchema,
   decidirChavePixSchema,
+  editarChavePixAdminSchema,
+  isCnpj,
+  isCpf,
+  normalizarChavePixCadastro,
   ORIGEM_HISTORICO_CHAVE_PIX,
   PERMISSOES,
   revogarChavePixSchema,
   SITUACAO_CHAVE_PIX,
   SITUACOES_CHAVE_PIX_RECADASTRAVEIS,
   SITUACAO_USUARIO,
+  TIPOS_CHAVE_PIX,
   TIPOS_EMAIL,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
@@ -33,12 +40,31 @@ import {
 
 type Req = { user: UsuarioAutenticado };
 
+/** Viva = ainda pode sacar ou está na fila. Inativa/revogada/reprovada não conta. */
+const SITUACOES_CHAVE_VIVA = [
+  SITUACAO_CHAVE_PIX.PENDENTE,
+  SITUACAO_CHAVE_PIX.APROVADA,
+] as const;
+
+function mapOutraConta(o: {
+  situacao: string;
+  usuario: { idPublico: string; nomeRazaoSocial: string; cpfCnpj: string };
+}) {
+  return {
+    idPublico: o.usuario.idPublico,
+    nome: o.usuario.nomeRazaoSocial,
+    cpfCnpj: o.usuario.cpfCnpj,
+    situacao: o.situacao,
+  };
+}
+
 function mapChave(c: {
   idPublico: string;
   apelido: string | null;
   chave: string;
   tipoChave: string;
   nomeTitular: string | null;
+  documentoTitular: string | null;
   situacao: string;
   motivoReprovacao: string | null;
   aprovadaEm: Date | null;
@@ -50,6 +76,7 @@ function mapChave(c: {
     chave: c.chave,
     tipoChave: c.tipoChave,
     nomeTitular: c.nomeTitular,
+    documentoTitular: c.documentoTitular,
     situacao: c.situacao,
     motivoReprovacao: c.motivoReprovacao,
     aprovadaEm: c.aprovadaEm,
@@ -74,13 +101,69 @@ export class ChavesPixController {
     return usuario;
   }
 
+  /**
+   * Outras contas que já têm esta chave viva. Só devolve as do MESMO titular
+   * (CPF/CNPJ ou responsável iguais) — nome de conta alheia não vaza para o
+   * lojista. O analista vê o cruzamento completo em `/admin/chaves-pix`.
+   */
+  @Get('ocorrencias')
+  @RequerPermissao(PERMISSOES.CHAVES_PIX_VER)
+  async ocorrencias(
+    @Req() req: Req,
+    @Query('chave') chaveBruta: string | undefined,
+    @Query('tipoChave') tipoChave: string | undefined,
+  ) {
+    if (!tipoChave || !TIPOS_CHAVE_PIX.includes(tipoChave as never)) {
+      throw new BadRequestException('tipoChave inválido');
+    }
+    const chave = normalizarChavePixCadastro(tipoChave, chaveBruta ?? '');
+    if (!chavePixValida(tipoChave, chave)) {
+      return { outrasContas: [] as ReturnType<typeof mapOutraConta>[] };
+    }
+    const eu = await this.conta(req.user);
+    const irmas = await this.prisma.chavePixUsuario.findMany({
+      where: {
+        chave,
+        usuarioId: { not: eu.id },
+        situacao: { in: [...SITUACOES_CHAVE_VIVA] as never[] },
+      },
+      include: {
+        usuario: {
+          select: {
+            idPublico: true,
+            nomeRazaoSocial: true,
+            cpfCnpj: true,
+            cpfResponsavel: true,
+          },
+        },
+      },
+    });
+    const meusDocs = [eu.cpfCnpj, eu.cpfResponsavel].filter(Boolean);
+    return {
+      outrasContas: irmas
+        .filter((o) => {
+          const docs = [o.usuario.cpfCnpj, o.usuario.cpfResponsavel].filter(
+            Boolean,
+          );
+          return docs.some((d) => meusDocs.includes(d));
+        })
+        .map(mapOutraConta),
+    };
+  }
+
   @Get()
   @RequerPermissao(PERMISSOES.CHAVES_PIX_VER)
   async listar(@Req() req: Req) {
     const rows = await this.prisma.chavePixUsuario.findMany({
       where: {
         usuarioId: BigInt(req.user.id),
-        situacao: { not: SITUACAO_CHAVE_PIX.INATIVA },
+        situacao: {
+          in: [
+            SITUACAO_CHAVE_PIX.PENDENTE,
+            SITUACAO_CHAVE_PIX.APROVADA,
+            SITUACAO_CHAVE_PIX.REPROVADA,
+          ] as never[],
+        },
       },
       orderBy: { criadoEm: 'desc' },
     });
@@ -111,7 +194,7 @@ export class ChavesPixController {
       apelido: parsed.data.apelido,
       tipoChave: parsed.data.tipoChave,
       nomeTitular: parsed.data.nomeTitular,
-      documentoTitular: parsed.data.documentoTitular?.replace(/\D/g, ''),
+      documentoTitular: parsed.data.documentoTitular,
     };
 
     const existente = await this.prisma.chavePixUsuario.findUnique({
@@ -177,7 +260,11 @@ export class ChavesPixController {
     return { ...mapChave(criada), recadastro: false };
   }
 
-  /** Remoção lógica — preserva o vínculo com saques já realizados. */
+  /**
+   * O cliente tira a própria chave de circulação. Vai para REVOGADA — a mesma
+   * fila do admin — com origem CLIENTE, para o analista ver quem cortou.
+   * Não desfaz saque já pago. Recadastro da mesma chave continua permitido.
+   */
   @Delete(':chaveIdPublico')
   @RequerPermissao(PERMISSOES.CHAVES_PIX_EXCLUIR)
   async remover(
@@ -190,7 +277,13 @@ export class ChavesPixController {
       where: {
         idPublico: chaveIdPublico,
         usuarioId: BigInt(req.user.id),
-        situacao: { not: SITUACAO_CHAVE_PIX.INATIVA },
+        situacao: {
+          in: [
+            SITUACAO_CHAVE_PIX.PENDENTE,
+            SITUACAO_CHAVE_PIX.APROVADA,
+            SITUACAO_CHAVE_PIX.REPROVADA,
+          ] as never[],
+        },
       },
     });
     if (!chave) throw new NotFoundException('Chave não encontrada');
@@ -198,13 +291,16 @@ export class ChavesPixController {
     await this.prisma.$transaction(async (tx) => {
       await tx.chavePixUsuario.update({
         where: { id: chave.id },
-        data: { situacao: SITUACAO_CHAVE_PIX.INATIVA },
+        data: {
+          situacao: SITUACAO_CHAVE_PIX.REVOGADA,
+          motivoReprovacao: 'Removida pelo próprio cliente',
+        },
       });
       await tx.historicoChavePix.create({
         data: {
           chavePixId: chave.id,
           situacaoAnterior: chave.situacao,
-          novaSituacao: SITUACAO_CHAVE_PIX.INATIVA,
+          novaSituacao: SITUACAO_CHAVE_PIX.REVOGADA,
           motivo: 'Removida pelo próprio cliente',
           usuarioAtorId: BigInt(req.user.id),
           origem: ORIGEM_HISTORICO_CHAVE_PIX.CLIENTE,
@@ -226,7 +322,10 @@ export class AdminChavesPixController {
 
   @Get()
   @RequerPermissao(PERMISSOES.ADMIN_CHAVES_PIX_VER)
-  async listar(@Query('situacao') situacao: string | undefined) {
+  async listar(
+    @Query('situacao') situacao: string | undefined,
+    @Query('compartilhada') compartilhada: string | undefined,
+  ) {
     const validas: string[] = Object.values(SITUACAO_CHAVE_PIX);
     // Lista separada por vírgula, mesma convenção de /admin/usuarios.
     const filtro = situacao
@@ -236,10 +335,12 @@ export class AdminChavesPixController {
     if (invalida) {
       throw new BadRequestException(`situacao inválida: ${invalida}`);
     }
+    const soCompartilhadas =
+      compartilhada === '1' || compartilhada === 'true';
 
     const rows = await this.prisma.chavePixUsuario.findMany({
       where: { situacao: { in: filtro as never[] } },
-      orderBy: { criadoEm: 'asc' },
+      orderBy: { criadoEm: 'desc' },
       take: 200,
       include: {
         usuario: {
@@ -272,12 +373,7 @@ export class AdminChavesPixController {
       ? await this.prisma.chavePixUsuario.findMany({
           where: {
             chave: { in: chaves },
-            situacao: {
-              in: [
-                SITUACAO_CHAVE_PIX.PENDENTE,
-                SITUACAO_CHAVE_PIX.APROVADA,
-              ] as never[],
-            },
+            situacao: { in: [...SITUACOES_CHAVE_VIVA] as never[] },
           },
           include: {
             usuario: {
@@ -287,7 +383,7 @@ export class AdminChavesPixController {
         })
       : [];
 
-    return rows.map((c) => ({
+    const lista = rows.map((c) => ({
       ...mapChave(c),
       cliente: {
         idPublico: c.usuario.idPublico,
@@ -295,9 +391,12 @@ export class AdminChavesPixController {
         cpfCnpj: c.usuario.cpfCnpj,
         situacao: c.usuario.situacao,
       },
-      // Já existiu uma decisão anterior sobre esta chave nesta conta: o cadastro
-      // que o analista está vendo é uma REENTRADA na fila, não um pedido novo.
-      recadastro: c.historicos.length > 0,
+      // Recadastro de verdade: a chave já saiu da fila (aprovada/reprovada/
+      // revogada/inativa) e o cliente mandou de novo — o histórico ganha um
+      // PENDENTE. Só ter APROVADA no histórico é o ciclo normal, não reentrada.
+      recadastro: c.historicos.some(
+        (h) => h.novaSituacao === SITUACAO_CHAVE_PIX.PENDENTE,
+      ),
       historico: c.historicos.map((h) => ({
         situacaoAnterior: h.situacaoAnterior,
         novaSituacao: h.novaSituacao,
@@ -306,14 +405,119 @@ export class AdminChavesPixController {
         origem: h.origem,
         criadoEm: h.criadoEm,
       })),
+      // Quem tirou de circulação: a situação é a mesma (REVOGADA); a origem
+      // é que separa admin de cliente. Histórico já vem do mais novo.
+      revogacao: (() => {
+        const h = c.historicos.find(
+          (x) =>
+            x.novaSituacao === SITUACAO_CHAVE_PIX.REVOGADA ||
+            x.novaSituacao === SITUACAO_CHAVE_PIX.INATIVA,
+        );
+        if (h) {
+          return {
+            origem: h.origem,
+            ator: h.usuarioAtor?.nomeRazaoSocial ?? null,
+            motivo: h.motivo,
+            em: h.criadoEm,
+          };
+        }
+        // Remoção antiga do cliente, antes de gravar origem no histórico.
+        if (c.situacao === SITUACAO_CHAVE_PIX.INATIVA) {
+          return {
+            origem: ORIGEM_HISTORICO_CHAVE_PIX.CLIENTE,
+            ator: null,
+            motivo: 'Removida pelo próprio cliente',
+            em: c.atualizadoEm,
+          };
+        }
+        return null;
+      })(),
       outrasContas: irmas
         .filter((o) => o.chave === c.chave && o.usuarioId !== c.usuario.id)
-        .map((o) => ({
-          nome: o.usuario.nomeRazaoSocial,
-          cpfCnpj: o.usuario.cpfCnpj,
-          situacao: o.situacao,
-        })),
+        .map(mapOutraConta),
     }));
+    return soCompartilhadas
+      ? lista.filter((c) => c.outrasContas.length > 0)
+      : lista;
+  }
+
+  /**
+   * Corrige titular/documento/apelido de uma chave viva (PENDENTE ou APROVADA).
+   * A chave em si não muda — isso seria outro destino. Situação também não:
+   * completar um cadastro incompleto não pode virar desativação.
+   */
+  @Patch(':chaveIdPublico')
+  @RequerPermissao(PERMISSOES.ADMIN_CHAVES_PIX_APROVAR)
+  async editar(
+    @Param('chaveIdPublico') chaveIdPublico: string,
+    @Body() body: unknown,
+    @Req() req: Req,
+  ) {
+    const parsed = editarChavePixAdminSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
+
+    const chave = await this.prisma.chavePixUsuario.findUnique({
+      where: { idPublico: chaveIdPublico },
+    });
+    if (!chave) throw new NotFoundException('Chave não encontrada');
+    if (
+      chave.situacao !== SITUACAO_CHAVE_PIX.PENDENTE &&
+      chave.situacao !== SITUACAO_CHAVE_PIX.APROVADA
+    ) {
+      throw new BadRequestException(
+        `Só é possível editar chave pendente ou aprovada (situação atual: ${chave.situacao}).`,
+      );
+    }
+
+    const doc = parsed.data.documentoTitular;
+    if (
+      (chave.tipoChave === 'CPF' || chave.tipoChave === 'CNPJ') &&
+      doc !== chave.chave
+    ) {
+      throw new BadRequestException(
+        'Quando a chave é CPF ou CNPJ, o documento do titular tem que ser o mesmo.',
+      );
+    }
+    if (!isCpf(doc) && !isCnpj(doc)) {
+      throw new BadRequestException(
+        'Documento do titular deve ser um CPF (11) ou CNPJ (14) válido.',
+      );
+    }
+
+    const anteriores = {
+      apelido: chave.apelido,
+      nomeTitular: chave.nomeTitular,
+      documentoTitular: chave.documentoTitular,
+    };
+    const novos = {
+      apelido: parsed.data.apelido,
+      nomeTitular: parsed.data.nomeTitular,
+      documentoTitular: doc,
+    };
+
+    const atualizada = await this.prisma.$transaction(async (tx) => {
+      const c = await tx.chavePixUsuario.update({
+        where: { id: chave.id },
+        data: novos,
+      });
+      await tx.registroAuditoria.create({
+        data: {
+          usuarioAfetadoId: chave.usuarioId,
+          usuarioAtorId: BigInt(req.user.id),
+          origem: 'PAINEL',
+          operacao: 'ACAO_NEGOCIO',
+          acao: 'CHAVE_PIX_EDITAR',
+          nomeTabela: 'chaves_pix_usuarios',
+          chaveRegistro: chave.id.toString(),
+          dadosAnteriores: anteriores as never,
+          dadosNovos: novos as never,
+        },
+      });
+      return c;
+    });
+
+    return mapChave(atualizada);
   }
 
   @Post(':chaveIdPublico/decidir')

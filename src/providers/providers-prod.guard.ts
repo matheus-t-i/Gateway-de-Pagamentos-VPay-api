@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { SITUACAO_PROVEDOR } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
+import { CODIGOS_VALORION } from './valorion/valorion.codigos';
 
 /**
  * Travas de produção no boot do módulo de adquirentes:
@@ -26,13 +27,18 @@ export class ProvidersProdGuard implements OnModuleInit {
       );
     }
 
-    const valorion = await this.prisma.provedorPagamento.findUnique({
-      where: { codigo: 'valorion' },
+    const valorions = await this.prisma.provedorPagamento.findMany({
+      where: {
+        codigo: { in: [...CODIGOS_VALORION] },
+        situacao: SITUACAO_PROVEDOR.ATIVO,
+      },
       include: { ipsWebhook: true },
     });
-    if (valorion && valorion.ipsWebhook.length === 0) {
+    const semIp = valorions.filter((p) => p.ipsWebhook.length === 0);
+    if (semIp.length > 0) {
       throw new Error(
-        'Produção: provedor valorion sem IPs de webhook cadastrados. ' +
+        `Produção: adquirente(s) Valorion ATIVA(s) sem IPs de webhook: ` +
+          `${semIp.map((p) => p.codigo).join(', ')}. ` +
           'Cadastre a allowlist no admin antes de subir — Camada 2 obrigatória.',
       );
     }

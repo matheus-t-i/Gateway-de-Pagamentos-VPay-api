@@ -292,6 +292,8 @@ export class PixService {
         (existente.pix?.documentoPagador ?? null) ===
           (params.input.pagador?.documento ?? null) &&
         (existente.pix?.emailPagador ?? null) === (params.input.pagador?.email ?? null) &&
+        (existente.pix?.telefonePagador ?? null) ===
+          (params.input.pagador?.telefone ?? null) &&
         existente.itens.length === itensEnviados.length &&
         existente.itens.every((gravado, i) => {
           const enviado = itensEnviados[i];
@@ -539,7 +541,8 @@ export class PixService {
           contaProvedorId: tentativa.conta.id,
           numero: tentativa.ordem + 1,
           situacao: SITUACAO_TENTATIVA.FALHA,
-          // Prefixo TIMEOUT: a conciliação usa isto para alertar OPS de fantasma.
+          // Prefixo TIMEOUT: a conciliação usa isto para alertar OPS se a
+          // cadeia inteira esgotar e a venda ficar FALHA (fantasma possível).
           mensagemErro:
             tipo === TIPO_FALHA_ADQUIRENTE.TIMEOUT
               ? `TIMEOUT: ${(erro as Error).message}`
@@ -547,17 +550,13 @@ export class PixService {
           latenciaMs,
         });
         /**
-         * TIMEOUT: o fetch foi abortado, mas a liquidante pode ter aceitado a
-         * cobrança antes. Seguir a cadeia geraria QR em B com A pagável e
-         * órfão. Para a cadeia e falha a venda — retry do lojista / suporte.
+         * TIMEOUT também segue a cadeia — o objetivo da contingência é não
+         * perder a venda. O fetch foi abortado; se a liquidante A mesmo assim
+         * aceitou, a cobrança órfã fica na conciliação / dinheiro-parado
+         * (prefixo TIMEOUT, sem id local). O pagador só recebe o QR de B.
+         * Pagamento no fantasma de A não credita B: Camada 1 casa pelo id
+         * gravado na tentativa vencedora (mismatch recusa).
          */
-        if (tipo === TIPO_FALHA_ADQUIRENTE.TIMEOUT) {
-          this.log.error(
-            `TIMEOUT na adquirente ${tentativa.conta.provedor.codigo} — ` +
-              'cadeia de contingência interrompida (risco de cobrança fantasma)',
-          );
-          break;
-        }
       }
     }
 

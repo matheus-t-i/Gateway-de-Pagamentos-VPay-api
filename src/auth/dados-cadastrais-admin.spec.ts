@@ -156,6 +156,7 @@ describe('editar dados cadastrais (admin)', () => {
         cpfCnpj: alvo.cpfCnpj,
         nomeRazaoSocial: 'Ainda o mesmo',
         email: 'nao-pode-trocar@ataque.local',
+        telefone: '11988887777',
         endereco,
         codigoTotp: totp(),
       },
@@ -177,6 +178,7 @@ describe('editar dados cadastrais (admin)', () => {
           tipoPessoa: 'PF',
           cpfCnpj: a.cpfCnpj,
           nomeRazaoSocial: b.nomeRazaoSocial,
+          telefone: '11988887777',
           endereco,
           codigoTotp: totp(),
         },
@@ -186,6 +188,39 @@ describe('editar dados cadastrais (admin)', () => {
 
     const depois = await prisma.usuario.findUniqueOrThrow({ where: { id: b.id } });
     expect(depois.cpfCnpj).toBe(b.cpfCnpj);
+  });
+
+  it('recusa telefone ausente ou inválido', async () => {
+    const alvo = await criarUsuario();
+
+    await expect(
+      controller.editarDadosCadastrais(
+        alvo.idPublico,
+        {
+          tipoPessoa: 'PF',
+          cpfCnpj: alvo.cpfCnpj,
+          nomeRazaoSocial: alvo.nomeRazaoSocial,
+          endereco,
+          codigoTotp: totp(),
+        },
+        { user: { id: adminId.toString() } },
+      ),
+    ).rejects.toThrow(BadRequestException);
+
+    await expect(
+      controller.editarDadosCadastrais(
+        alvo.idPublico,
+        {
+          tipoPessoa: 'PF',
+          cpfCnpj: alvo.cpfCnpj,
+          nomeRazaoSocial: alvo.nomeRazaoSocial,
+          telefone: '123',
+          endereco,
+          codigoTotp: totp(),
+        },
+        { user: { id: adminId.toString() } },
+      ),
+    ).rejects.toThrow(BadRequestException);
   });
 
   it('PJ sem responsável é recusado', async () => {
@@ -198,6 +233,7 @@ describe('editar dados cadastrais (admin)', () => {
           tipoPessoa: 'PJ',
           cpfCnpj: '12345678000199',
           nomeRazaoSocial: 'Empresa Sem Responsavel LTDA',
+          telefone: '11988887777',
           endereco,
           codigoTotp: totp(),
         },

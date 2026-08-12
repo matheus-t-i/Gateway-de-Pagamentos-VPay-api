@@ -33,6 +33,17 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 
 export const ALL_QUEUE_NAMES = Object.values(QUEUE_NAMES);
 
+/**
+ * Nome no Bull Board. O dashboard ordena por `localeCompare` no displayName
+ * (texto: "1", "10", "11", "2"…). Prefixo com 2 dígitos faz 1→12 aparecer
+ * na ordem que o número foi criado. O nome da fila no Redis NÃO muda.
+ */
+export function nomeExibicaoFila(name: string): string {
+  const m = /^(\d+)-(.*)$/.exec(name);
+  if (!m) return name;
+  return `${m[1].padStart(2, '0')}-${m[2]}`;
+}
+
 /** Payload mínimo dos jobs PIX */
 export type PixJobPayload = {
   provider: string;

@@ -89,8 +89,9 @@ export class ContingenciaService {
    *
    * `Promise.race` sozinho deixava o HTTP da adquirente A completar depois do
    * timeout — cobrança criada sem id local, enquanto a cadeia gerava QR em B.
-   * Com AbortSignal o pedido é cancelado; TIMEOUT ainda NÃO segue a cadeia
-   * (ver `PixService`), porque a liquidante pode ter aceitado antes do abort.
+   * Com AbortSignal o pedido é cancelado. TIMEOUT segue a cadeia (ver
+   * `PixService`): 10s sem resposta não pode perder a venda. Fantasma de A,
+   * se existir, fica na conciliação / dinheiro-parado.
    */
   async executarComTimeout<T>(
     fn: (signal: AbortSignal) => Promise<T>,

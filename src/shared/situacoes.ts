@@ -69,9 +69,13 @@ export const SITUACAO_CHAVE_PIX = {
   APROVADA: 'APROVADA',
   /** O analista recusou a chave ainda na análise. */
   REPROVADA: 'REPROVADA',
-  /** Estava APROVADA e o admin cortou o acesso (com justificativa). */
+  /**
+   * Saiu de circulação — admin desativou OU o cliente removeu. Quem foi
+   * fica em `historicos_chave_pix.origem` (ADMIN | CLIENTE), não num status
+   * paralelo: a fila "Revogadas" é uma só.
+   */
   REVOGADA: 'REVOGADA',
-  /** O próprio cliente removeu a chave do painel dele. */
+  /** Legado: remoção antiga do cliente. Novas remoções vão para REVOGADA. */
   INATIVA: 'INATIVA',
 } as const;
 

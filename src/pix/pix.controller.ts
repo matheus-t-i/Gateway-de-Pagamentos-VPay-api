@@ -187,6 +187,11 @@ export class PixPainelController {
     const parsed = depositoPainelSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
     const usuario = await this.contaAtiva(req.user);
+    if (!usuario.telefone) {
+      throw new BadRequestException(
+        'Cadastre um telefone na conta antes de gerar depósito.',
+      );
+    }
 
     const { idInterno, ...resposta } = await this.pix.criarCobranca({
       usuarioId: usuario.id,
@@ -200,7 +205,7 @@ export class PixPainelController {
           nome: usuario.nomeResponsavel ?? usuario.nomeRazaoSocial,
           documento: usuario.cpfResponsavel ?? usuario.cpfCnpj,
           email: usuario.email,
-          telefone: usuario.telefone ?? undefined,
+          telefone: usuario.telefone,
         },
       },
     });
@@ -235,14 +240,12 @@ export class PixPainelController {
           'Aguarde a aprovação do administrador.',
       );
     }
-    // A liquidante exige nome + documento do dono da chave. `nomeTitular` e
-    // `documentoTitular` são opcionais no cadastro, então uma chave antiga
-    // aprovada sem esses dados chegaria na adquirente incompleta — e só
-    // quebraria lá, com o saldo do lojista já debitado.
+    // Cadastro novo já exige os dois. Chave antiga aprovada sem titular
+    // ainda existe — recusar aqui evita debitar e só quebrar na liquidante.
     if (!chave.nomeTitular || !chave.documentoTitular) {
       throw new BadRequestException(
-        'A chave PIX está sem titular/documento cadastrados. Peça ao ' +
-          'administrador para completar o cadastro da chave antes do saque.',
+        'Esta chave PIX foi cadastrada sem titular/documento. Cadastre a ' +
+          'chave de novo (ou peça ao administrador para revogar e o cliente recadastrar).',
       );
     }
 

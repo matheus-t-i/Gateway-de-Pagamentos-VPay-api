@@ -11,6 +11,9 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  chavePixValida,
+  mensagemChavePixInvalida,
+  normalizarChavePixCadastro,
   PERMISSOES,
   SITUACAO_EXECUCAO_SAQUE,
   SITUACAO_PROVEDOR,
@@ -429,11 +432,17 @@ export class AdminTesourariaController {
     const nome = (body.nome ?? '').trim();
     if (!nome) throw new BadRequestException('Informe o nome do gatilho.');
 
-    const chavePix = (body.chavePix ?? '').trim();
-    if (!chavePix) throw new BadRequestException('Informe a chave PIX de destino.');
     const tipoChavePix = (body.tipoChavePix ?? '').trim().toUpperCase();
     if (!TIPOS_CHAVE_PIX.includes(tipoChavePix as never)) {
       throw new BadRequestException('Tipo de chave PIX inválido.');
+    }
+    const chavePix = normalizarChavePixCadastro(
+      tipoChavePix,
+      (body.chavePix ?? '').trim(),
+    );
+    if (!chavePix) throw new BadRequestException('Informe a chave PIX de destino.');
+    if (!chavePixValida(tipoChavePix, chavePix)) {
+      throw new BadRequestException(mensagemChavePixInvalida(tipoChavePix));
     }
 
     const dec = (v: unknown, campo: string) => {

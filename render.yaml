@@ -109,6 +109,14 @@ envVarGroups:
         sync: false
       - key: VALORION_API_KEY
         sync: false
+      - key: VALORION_02_API_KEY
+        sync: false
+      - key: VALORION_03_API_KEY
+        sync: false
+      - key: VALORION_04_API_KEY
+        sync: false
+      - key: VALORION_05_API_KEY
+        sync: false
       - key: VALORION_BASE_URL
         sync: false
       - key: VALORION_FILA_URL

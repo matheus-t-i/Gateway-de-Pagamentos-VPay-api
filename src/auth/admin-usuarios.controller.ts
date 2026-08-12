@@ -506,9 +506,7 @@ export class AdminUsuariosController {
       }
     }
 
-    const telefone = data.telefone
-      ? data.telefone.replace(/\D/g, '') || null
-      : null;
+    const telefone = data.telefone;
     const nomeFantasia = data.nomeFantasia?.trim() || null;
     const complemento = data.endereco.complemento?.trim() || null;
     const cpfResponsavel =

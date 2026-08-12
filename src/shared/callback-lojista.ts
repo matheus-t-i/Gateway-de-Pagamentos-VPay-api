@@ -165,7 +165,7 @@ export const STATUS_CALLBACK_DOC: Array<{
     status: SITUACAO_TRANSACAO.FALHA,
     operacoes: [OPERACAO_CALLBACK.CASH_IN, OPERACAO_CALLBACK.CASH_OUT],
     descricao:
-      'A operação não vai adiante. No cash-in, nenhuma liquidante conseguiu gerar a cobrança nem pela contingência. No cash-out, a liquidante recusou a ordem — o valor já debitado NÃO volta sozinho: fale com o suporte para o estorno.',
+      'A operação não vai adiante. No cash-in, nenhuma liquidante conseguiu gerar a cobrança nem pela contingência. No cash-out, a ordem não saiu (recusa da liquidante ou falha antes do envio) — valor e taxa voltam para a carteira.',
     terminal: true,
   },
   {

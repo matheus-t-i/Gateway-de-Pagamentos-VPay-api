@@ -1,7 +1,6 @@
 import { forwardRef, Module } from '@nestjs/common';
 import { MockPaymentProvider } from './mock/mock.client';
 import { MockWebhookController } from './mock/mock.webhook.controller';
-import { ValorionPaymentProvider } from './valorion/valorion.client';
 import { ValorionWebhookController } from './valorion/valorion.webhook.controller';
 import { ProviderRegistry } from './provider.registry';
 import { AdquirentesService } from './adquirentes.service';
@@ -25,7 +24,6 @@ import { ProvidersProdGuard } from './providers-prod.guard';
   ],
   providers: [
     MockPaymentProvider,
-    ValorionPaymentProvider,
     ProviderRegistry,
     AdquirentesService,
     ProvidersProdGuard,

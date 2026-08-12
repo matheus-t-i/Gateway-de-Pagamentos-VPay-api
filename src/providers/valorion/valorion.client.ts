@@ -1,7 +1,8 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../prisma/prisma.service';
+import { envApiKeyValorion } from './valorion.codigos';
 import { ipAllowed, mensagemIpNaoPermitido } from '../ip-allowlist.util';
 import {
   CreateCashOutInput,
@@ -18,8 +19,23 @@ import {
   RecusaAdquirenteError,
   VerifyTransportInput,
 } from '../payment-provider.port';
-import { money, normalizarDocumento } from '../../shared';
+import { chavePixParaLiquidante, money, normalizarDocumento } from '../../shared';
 import { extrairValorDePayload } from '../valor-remoto.util';
+
+/**
+ * 4xx no `/auth` que recusam ESTE saque — chave de destino recusada ou
+ * cash-out desligado na conta Valorion. Retry dá o mesmo não; o processor
+ * encerra em FALHA e devolve o saldo. Blip da nossa API key NÃO entra aqui.
+ */
+export function recusaDefinitivaNoAuth(erro: RecusaAdquirenteError): boolean {
+  const m = erro.message.toLowerCase();
+  return (
+    m.includes('cash-out desabilitado') ||
+    m.includes('x-pix-key inválida') ||
+    m.includes('x-pix-key invalida') ||
+    m.includes('acesso bloqueado')
+  );
+}
 
 /**
  * Valorion — liquidante real de PIX (https://app.valorion.com.br/documentacao/).
@@ -31,19 +47,25 @@ import { extrairValorDePayload } from '../valor-remoto.util';
  * sem chave pré-cadastrada na Valorion).
  *
  * Credenciais: `contas_provedor.credenciaisCriptografadas` com fallback
- * `VALORION_API_KEY` (e hosts). Basic do painel = base64 da apiKey; seller do
- * refund via getCompany. Destino do saque automático de tesouraria:
- * `TESOURARIA_CHAVE_PIX` = nome de outra env com a chave real; tipo/titular no banco.
+ * `VALORION_API_KEY` / `VALORION_02_API_KEY` … `VALORION_05_API_KEY` conforme
+ * o `code` desta instância. Hosts e token de webhook são compartilhados.
+ * Basic do painel = base64 da apiKey; seller do refund via getCompany.
+ * Destino do saque automático de tesouraria: `TESOURARIA_CHAVE_PIX` = nome
+ * de outra env com a chave real; tipo/titular no banco.
+ *
+ * Cinco adquirentes (`valorion` … `valorion_05`) = cinco instâncias no
+ * registry, cada uma com seu code. Sem fila própria — o payload leva `provider`.
  */
-@Injectable()
 export class ValorionPaymentProvider implements PaymentProviderPort {
-  readonly code = 'valorion';
-  private readonly logger = new Logger(ValorionPaymentProvider.name);
+  private readonly logger: Logger;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-  ) {}
+    readonly code: string = 'valorion',
+  ) {
+    this.logger = new Logger(`Valorion:${this.code}`);
+  }
 
   // ---------------------------------------------------------------- helpers
 
@@ -59,8 +81,13 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
   }
 
   private apiKey(c: Record<string, unknown>): string {
-    const v = this.cred(c, 'apiKey', 'VALORION_API_KEY');
-    if (!v) throw new Error('Valorion: VALORION_API_KEY/credencial apiKey ausente');
+    const envName = envApiKeyValorion(this.code);
+    const v = this.cred(c, 'apiKey', envName);
+    if (!v) {
+      throw new Error(
+        `Valorion (${this.code}): ${envName}/credencial apiKey ausente`,
+      );
+    }
     return v;
   }
 
@@ -72,12 +99,14 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
   /**
    * ID numérico da empresa na Valorion (`dados_seller.empresa.id`), exigido no
    * body do refund. Resolvido na hora via getCompany — não há VALORION_SELLER_ID.
-   * Cache por processo: devolução é rara e o id não muda.
+   * Cache por apiKey: cada uma das 5 contas é uma empresa diferente.
    */
-  private sellerIdCache: number | undefined;
+  private readonly sellerIdPorApiKey = new Map<string, number>();
 
   private async resolverSellerId(c: Record<string, unknown>): Promise<number> {
-    if (this.sellerIdCache !== undefined) return this.sellerIdCache;
+    const chave = this.apiKey(c);
+    const cached = this.sellerIdPorApiKey.get(chave);
+    if (cached !== undefined) return cached;
     const resp = await this.request({
       method: 'GET',
       url: `${this.baseUrl()}/api/s1/getCompany/`,
@@ -88,10 +117,10 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
     const id = Number(empresa?.id);
     if (!Number.isFinite(id) || id <= 0) {
       throw new ErroAntesDoEnvioError(
-        `Valorion: getCompany sem dados_seller.empresa.id — ${JSON.stringify(resp).slice(0, 300)}`,
+        `Valorion (${this.code}): getCompany sem dados_seller.empresa.id — ${JSON.stringify(resp).slice(0, 300)}`,
       );
     }
-    this.sellerIdCache = id;
+    this.sellerIdPorApiKey.set(chave, id);
     return id;
   }
 
@@ -117,7 +146,7 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
     }
     // `api` é o prefixo global do main.ts — API_PUBLIC_URL é só a origem
     // (ex.: https://abc.ngrok-free.app), sem caminho.
-    const url = `${base.replace(/\/+$/, '')}/api/webhooks/valorion/${rota}`;
+    const url = `${base.replace(/\/+$/, '')}/api/webhooks/${this.code}/${rota}`;
     const token = this.env('VALORION_WEBHOOK_TOKEN');
     return token ? `${url}?token=${encodeURIComponent(token)}` : url;
   }
@@ -206,6 +235,7 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
     // (API pública ou depósito do painel) — sem pagador padrão no .env.
     const nome = input.pagador?.nome;
     const email = input.pagador?.email;
+    const phone = (input.pagador?.telefone ?? '').replace(/\D/g, '');
     /**
      * `normalizarDocumento` e NÃO `replace(/\D/g, '')`: o segundo apaga letras,
      * e o CNPJ alfanumérico da Receita tem letras nas 12 primeiras posições —
@@ -218,9 +248,9 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
      * investigar antes de prometer PIX com pagador PJ nesta adquirente.
      */
     const cpf = normalizarDocumento(input.pagador?.documento ?? '');
-    if (!nome || !email || !cpf) {
+    if (!nome || !email || !cpf || phone.length < 10) {
       throw new Error(
-        'Valorion exige nome, e-mail e CPF do pagador — informe `pagador` na cobrança',
+        'Valorion exige nome, e-mail, CPF e telefone do pagador — informe `pagador` na cobrança',
       );
     }
 
@@ -240,9 +270,7 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         name: nome,
         email,
         cpf,
-        ...(input.pagador?.telefone
-          ? { phone: input.pagador.telefone.replace(/\D/g, '') }
-          : {}),
+        phone,
         // SEMPRE o id PÚBLICO — nunca a `referenciaExterna` do lojista, nunca o
         // id privado. Duas razões, e as duas são de dinheiro:
         //
@@ -330,19 +358,26 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         'Valorion cash-out: chave PIX de destino ausente',
       );
     }
+    // TELEFONE no cadastro é DDD+número; a Valorion espera E.164 (+55…).
+    // Idempotente se o caller já tiver montado o destino da liquidante.
+    const chaveDestino = chavePixParaLiquidante(
+      input.tipoChavePix,
+      input.chavePix,
+    );
     const authHeaders = {
       'X-API-Key': this.apiKey(c),
-      'X-Pix-Key': input.chavePix.trim(),
+      'X-Pix-Key': chaveDestino,
     };
 
     /**
      * Etapa 1 — token Bearer (expira em 180s, pedido a cada saque).
      *
-     * Tudo aqui é ANTES do envio da ordem: um 401/403 significa que a NOSSA
-     * credencial está errada, não que a liquidante recusou o saque. Sem esta
-     * conversão, o 4xx do auth viraria `RecusaAdquirenteError` e encerraria
-     * como FALHA definitiva TODOS os saques da fila — com o saldo debitado e o
-     * lojista recebendo "recusado" por um problema de configuração nosso.
+     * Auth 4xx NÃO é tudo a mesma coisa:
+     * - credencial NOSSA (API key rotacionada, 401 genérico) →
+     *   `ErroAntesDoEnvioError`: nada saiu, retry é seguro e necessário;
+     * - recusa DESTE saque/conta (`X-Pix-Key` inválida, cash-out desabilitado
+     *   na Valorion) → `RecusaAdquirenteError`: retentar 5 vezes dá o mesmo
+     *   não, e o saldo debitado ficaria preso em PROCESSANDO para sempre.
      */
     let auth: Record<string, unknown>;
     try {
@@ -352,6 +387,9 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         headers: authHeaders,
       });
     } catch (e) {
+      if (e instanceof RecusaAdquirenteError && recusaDefinitivaNoAuth(e)) {
+        throw e;
+      }
       throw new ErroAntesDoEnvioError(
         `Valorion cash-out: falha ao autenticar — ${e instanceof Error ? e.message : String(e)}`,
         e,
@@ -381,7 +419,7 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
       headers: { ...authHeaders, Authorization: `Bearer ${token}` },
       body: {
         amount: Number(input.valor.toFixed(2)),
-        pixKey: input.chavePix,
+        pixKey: chaveDestino,
         pixType: tipoMap[input.tipoChavePix.toUpperCase()] ?? 'RANDOM',
         beneficiaryName: input.nomeBeneficiario ?? '',
         // `normalizarDocumento` pelo mesmo motivo do cash-in: `replace(/\D/g,'')`

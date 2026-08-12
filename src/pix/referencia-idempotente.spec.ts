@@ -29,6 +29,7 @@ describe('PixService — idempotência por referenciaExterna', () => {
     nome: 'Fulano de Tal',
     documento: '12345678909',
     email: 'fulano@email.com',
+    telefone: '11999998888',
   };
 
   const cobrancaExistente = {
@@ -41,6 +42,7 @@ describe('PixService — idempotência por referenciaExterna', () => {
       nomePagador: pagador.nome,
       documentoPagador: pagador.documento,
       emailPagador: pagador.email,
+      telefonePagador: pagador.telefone,
       pixCopiaCola: '000201-copia-e-cola',
       urlCheckout: 'https://checkout/42',
       txid: 'txid-42',
@@ -149,6 +151,7 @@ describe('PixService — idempotência por referenciaExterna', () => {
     ['nome', { ...inputCobranca, pagador: { ...pagador, nome: 'Outro Nome' } }],
     ['documento', { ...inputCobranca, pagador: { ...pagador, documento: '98765432100' } }],
     ['email', { ...inputCobranca, pagador: { ...pagador, email: 'outro@email.com' } }],
+    ['telefone', { ...inputCobranca, pagador: { ...pagador, telefone: '11988887777' } }],
     [
       'item',
       {

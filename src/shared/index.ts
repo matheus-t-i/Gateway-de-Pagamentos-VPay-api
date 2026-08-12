@@ -6,6 +6,7 @@ export * from './situacoes';
 export * from './callback-lojista';
 export * from './integracoes';
 export * from './documento';
+export * from './chave-pix';
 export * from './senha';
 export * from './rede';
 export * from './produto';

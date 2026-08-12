@@ -12,6 +12,8 @@ import {
   SITUACAO_TENTATIVA,
   SITUACAO_TRANSACAO,
   SITUACAO_USUARIO,
+  chavePixParaLiquidante,
+  chavePixValida,
   money,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
@@ -151,7 +153,7 @@ export class PixCashOutProcessor extends WorkerHost {
       }
       throw e;
     }
-    return this.enviar(tx, valor);
+    return this.enviar(tx, valor, job);
   }
 
   /**
@@ -266,6 +268,14 @@ export class PixCashOutProcessor extends WorkerHost {
     if (!chave) {
       throw new SaqueBloqueadoError('saque sem chave PIX — não enviado');
     }
+    // Formato do valor GRAVADO (telefone sem +55). O E.164 entra só no payload
+    // da liquidante, em `chavePixParaLiquidante`.
+    const tipoChave = tx.pix?.tipoChavePix;
+    if (tipoChave && !chavePixValida(tipoChave, chave)) {
+      throw new SaqueBloqueadoError(
+        `chave PIX incompatível com o tipo ${tipoChave} — saque não enviado`,
+      );
+    }
     const exigeChaveCadastrada = !viaApi || cfg.exigirChavePixCadastrada;
     if (exigeChaveCadastrada) {
       const cadastrada = await this.prisma.chavePixUsuario.findFirst({
@@ -288,7 +298,11 @@ export class PixCashOutProcessor extends WorkerHost {
   }
 
   /** Claim ENVIANDO + POST na liquidante + os três desfechos do envio. */
-  private async enviar(tx: TxSaque, valor: ReturnType<typeof money>) {
+  private async enviar(
+    tx: TxSaque,
+    valor: ReturnType<typeof money>,
+    job: Job<PixJobPayload>,
+  ) {
     // ── Envio ─────────────────────────────────────────────────────────────
     const provider = this.providers.get(tx.contaProvedor!.provedor.codigo);
     const credenciais = decryptCredentials(
@@ -376,7 +390,10 @@ export class PixCashOutProcessor extends WorkerHost {
       result = await provider.createCashOut({
         valor,
         idTransacaoPrivado: tx.idTransacaoPrivado,
-        chavePix: tx.pix?.chavePix ?? '',
+        chavePix: chavePixParaLiquidante(
+          tx.pix?.tipoChavePix ?? 'ALEATORIA',
+          tx.pix?.chavePix ?? '',
+        ),
         tipoChavePix: tx.pix?.tipoChavePix ?? 'ALEATORIA',
         nomeBeneficiario: tx.pix?.nomeBeneficiario ?? undefined,
         documentoBeneficiario: tx.pix?.documentoBeneficiario ?? undefined,
@@ -400,6 +417,22 @@ export class PixCashOutProcessor extends WorkerHost {
         this.logger.warn(
           `saque tx=${tx.id} não chegou a ser enviado: ${erro.message.slice(0, 300)}`,
         );
+        // Retry enquanto a fila ainda tem tentativas — um 401 de API key
+        // rotacionada se resolve no minuto seguinte. Esgotou → nada saiu e
+        // não vai sair: FALHA + estorno, senão o saldo fica em PROCESSANDO
+        // e a conciliação reenfileira o mesmo erro para sempre.
+        const max = job.opts?.attempts;
+        const ultima =
+          typeof max === 'number' && Number(job.attemptsMade ?? 0) >= max;
+        if (ultima) {
+          const desfecho = await this.encerrarPorBloqueio(tx, erro.message);
+          return {
+            ok: false,
+            preEnvioEsgotado: true,
+            desfecho,
+            motivo: erro.message,
+          };
+        }
         throw erro;
       }
 

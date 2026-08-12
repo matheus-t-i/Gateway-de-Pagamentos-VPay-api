@@ -107,8 +107,8 @@ Validadas no boot por `src/common/env.validation.ts` (fail-fast). Em produção,
 | `MOCK_PROVIDER_WEBHOOK_KEY` | Header `x-key` esperado no webhook do provedor mock |
 | `CONTINGENCIA_TIMEOUT_SEGUNDOS` | Timeout por adquirente na criação da cobrança antes de cair na contingência (default 10) |
 | `API_PUBLIC_URL` | URL pública desta API — monta o `postbackUrl` enviado à Valorion |
-| `VALORION_API_KEY` | Credencial Valorion (fallback quando a `conta_provedor` não tem); cash-in só usa `x-api-key` |
-| `VALORION_WEBHOOK_TOKEN` | Token do `?token=` no postback, conferido com `timingSafeEqual` |
+| `VALORION_API_KEY` … `VALORION_05_API_KEY` | Uma chave por adquirente (`valorion` … `valorion_05`); fallback quando a `conta_provedor` não tem; cash-in só usa `x-api-key` |
+| `VALORION_WEBHOOK_TOKEN` | Token do `?token=` no postback (o mesmo nas cinco rotas), conferido com `timingSafeEqual` |
 | `VALORION_BASE_URL` / `VALORION_FILA_URL` | Overrides dos hosts Valorion |
 | `TESOURARIA_CHAVE_PIX` | Nome da env que guarda a chave PIX do saque automático (ex.: `CHAVE_PIX_BB_VPAY`); tipo/titular no gatilho |
 
@@ -193,7 +193,7 @@ Um controller por adquirente (`src/providers/{codigo}/`), throttle 6000/min:
 | Rota | Proteção |
 |---|---|
 | `POST /webhooks/mock/pix-in` · `/pix-out` · `/med` | Allowlist de IP + header `x-key` (hash argon2) |
-| `POST /webhooks/valorion/pix-in` · `/pix-out` (`?token=`) | Token via `timingSafeEqual` + allowlist de IP; traduz o vocabulário Valorion (`idtransaction`→`transactionId`, `PAID_OUT`→`PAID`); `status=MED` abre caso MED |
+| `POST /webhooks/valorion/pix-in` · `/pix-out` (`?token=`) e `valorion_02` … `valorion_05` | Token único via `timingSafeEqual` + allowlist de IP daquela adquirente; traduz `idtransaction`→`transactionId`, `PAID_OUT`→`PAID`; `status=MED` abre caso MED |
 
 **Segurança de webhook em 2 camadas (inegociável):**
 
@@ -278,7 +278,7 @@ Driver local (`src/common/storage.util.ts`): arquivos em `{UPLOADS_DIR}/usuarios
 
 ## Seed
 
-`prisma/seed.ts` cria: perfis (`CLIENTE`, `FUNCIONARIO`, `ADMINISTRADOR`, `FINANCEIRO`, `ANALISTA_MED`) com seus conjuntos de permissões; espelho do catálogo de permissões (removendo obsoletas); provedor `mock` (ATIVO em dev, INATIVO em produção) com conta e custos; provedor `valorion` (nasce INATIVO; credenciais vazias caem no fallback dos envs `VALORION_*`); configuração padrão de taxas ("Padrao Sistema"); usuário admin; políticas de rate limit. Em `NODE_ENV=production` exige `ADMIN_PASSWORD` e não cria recursos de desenvolvimento.
+`prisma/seed.ts` cria: perfis (`CLIENTE`, `FUNCIONARIO`, `ADMINISTRADOR`, `FINANCEIRO`, `ANALISTA_MED`) com seus conjuntos de permissões; espelho do catálogo de permissões (removendo obsoletas); provedor `mock` (ATIVO em dev, INATIVO em produção) com conta e custos; cinco adquirentes Valorion (`valorion` … `valorion_05`, nascem INATIVAS; credenciais vazias caem no fallback `VALORION_API_KEY` / `VALORION_02_API_KEY` …); configuração padrão de taxas ("Padrao Sistema"); usuário admin; políticas de rate limit. Em `NODE_ENV=production` exige `ADMIN_PASSWORD` e não cria recursos de desenvolvimento.
 
 ## Observabilidade e segurança transversal
 

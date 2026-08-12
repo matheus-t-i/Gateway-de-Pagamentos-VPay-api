@@ -52,7 +52,6 @@ export class PainelAdquirentesController {
   ) {
     const parsed = escolherAdquirentePixEntradaSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
-    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const usuarioId = BigInt(req.user.id);
 
     const conta = await this.adquirentes.resolverContaPixEntrada(

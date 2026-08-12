@@ -76,6 +76,7 @@ describe('Valorion createCharge — externaRef', () => {
           nome: 'Fulano de Tal',
           documento: '52998224725',
           email: 'fulano@teste.local',
+          telefone: '11999998888',
         },
         credenciais: {},
       } as never);

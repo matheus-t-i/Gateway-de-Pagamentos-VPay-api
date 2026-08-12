@@ -42,7 +42,7 @@ export function decryptText(payload: string): string {
 /**
  * AES-256-GCM (iv 12 + tag 16 + ciphertext). Blob vazio/curto = `{}`:
  * as contas da Valorion/mock nascem sem credencial de propósito e o client
- * cai no fallback de env (`VALORION_API_KEY`). Sem isto, `''` ou `'{}'` em
+ * cai no fallback de env (`VALORION_API_KEY` / `VALORION_02_API_KEY` …). Sem isto, `''` ou `'{}'` em
  * claro viram "Invalid initialization vector" e a cobrança morre em 503
  * ANTES de qualquer chamada à liquidante.
  */

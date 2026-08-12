@@ -1,7 +1,7 @@
 ---
 description: Camada 2 Valorion — token no postbackUrl (?token=), não em header
 alwaysApply: true
-globs: "**/providers/valorion/**,**/webhooks/valorion/**"
+globs: "**/providers/valorion/**,**/webhooks/valorion*/**"
 ---
 
 # Valorion — webhook / postback
@@ -9,24 +9,37 @@ globs: "**/providers/valorion/**,**/webhooks/valorion/**"
 A Valorion **não assina** o postback e **não envia** token no header.
 O token entra na **URL de callback no create do PIX** (`postbackUrl`), como query.
 
+Cinco adquirentes, mesma integração, saldo individual:
+
+| Código | Env da API key |
+|---|---|
+| `valorion` | `VALORION_API_KEY` |
+| `valorion_02` | `VALORION_02_API_KEY` |
+| `valorion_03` | `VALORION_03_API_KEY` |
+| `valorion_04` | `VALORION_04_API_KEY` |
+| `valorion_05` | `VALORION_05_API_KEY` |
+
+Token de webhook é **o mesmo** nas cinco (`VALORION_WEBHOOK_TOKEN`). Filas
+continuam genéricas — o payload leva `provider` com o código daquela conta.
+
 Conta com **chave livre**: sem `VALORION_PIX_KEY`. Cash-in autenticado só com
-`VALORION_API_KEY`. No cash-out, `X-Pix-Key` = chave de **destino** daquele
-saque. Destino do saque automático: `TESOURARIA_CHAVE_PIX` = nome de outra env
-(ex. `CHAVE_PIX_BB_VPAY`); tipo/titular no gatilho (banco).
+a API key daquela adquirente. No cash-out, `X-Pix-Key` = chave de **destino**
+daquele saque. Destino do saque automático: `TESOURARIA_CHAVE_PIX` = nome de
+outra env (ex. `CHAVE_PIX_BB_VPAY`); tipo/titular no gatilho (banco).
 
 ## Obrigatório no create (cash-in e cash-out)
 
 ```
-{API_PUBLIC_URL}/api/webhooks/valorion/pix-in?token={VALORION_WEBHOOK_TOKEN}
-{API_PUBLIC_URL}/api/webhooks/valorion/pix-out?token={VALORION_WEBHOOK_TOKEN}
+{API_PUBLIC_URL}/api/webhooks/{codigo}/pix-in?token={VALORION_WEBHOOK_TOKEN}
+{API_PUBLIC_URL}/api/webhooks/{codigo}/pix-out?token={VALORION_WEBHOOK_TOKEN}
 ```
 
-`API_PUBLIC_URL` = só a origem (sem path).
+`codigo` ∈ `valorion` … `valorion_05`. `API_PUBLIC_URL` = só a origem (sem path).
 
 ## Camada 2 na recepção
 
 1. Conferir `@Query('token')` com `VALORION_WEBHOOK_TOKEN` via `timingSafeEqual`.
-2. Allowlist de IP.
-3. Camada 1 (`getStatus`) antes de creditar.
+2. Allowlist de IP **daquela** adquirente.
+3. Camada 1 (`getStatus`) antes de creditar, com a API key daquela conta.
 
-Envs da integração: `VALORION_API_KEY`, `VALORION_WEBHOOK_TOKEN`, `API_PUBLIC_URL`.
+Envs: `VALORION_API_KEY` … `VALORION_05_API_KEY`, `VALORION_WEBHOOK_TOKEN`, `API_PUBLIC_URL`.

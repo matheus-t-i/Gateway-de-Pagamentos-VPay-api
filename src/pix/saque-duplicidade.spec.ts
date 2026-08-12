@@ -31,6 +31,7 @@ import {
  *  - ambíguo  → tentativa fica ENVIANDO, job NÃO retenta, reprocessar é no-op
  *  - recusa   → tentativa FALHA, transação FALHA, callback ao lojista
  *  - pré-envio→ tentativa some, retry é permitido (nada saiu)
+ *  - pré-envio no teto → FALHA + estorno (nada saiu e não vai sair)
  */
 describe('PixCashOutProcessor — nunca paga duas vezes', () => {
   let prisma: PrismaService;
@@ -82,7 +83,10 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
     return BigInt(r.idInterno);
   }
 
-  const job = (transacaoId: bigint) =>
+  const job = (
+    transacaoId: bigint,
+    extra?: { attemptsMade?: number; attempts?: number },
+  ) =>
     ({
       data: {
         provider: 'teste_dup',
@@ -91,6 +95,8 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
           idTransacaoPrivado: 'x',
         },
       },
+      attemptsMade: extra?.attemptsMade,
+      opts: extra?.attempts != null ? { attempts: extra.attempts } : {},
     }) as never;
 
   beforeAll(async () => {
@@ -511,5 +517,42 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
     });
     expect(tentativa.situacao).toBe(SITUACAO_TENTATIVA.SUCESSO);
     expect(tentativa.idTransacaoLiquidante).toBe('LIQ-OK');
+  });
+
+  it('pré-envio no TETO: FALHA e DEVOLVE o saldo — senão fica preso para sempre', async () => {
+    const saldoAntes = await prisma.saldoUsuario.findUniqueOrThrow({
+      where: { usuarioId },
+    });
+    const transacaoId = await criarSaque(`dup-preenvio-teto-${sufixo}`);
+    const processor = processorCom();
+
+    comportamento = () =>
+      Promise.reject(
+        new ErroAntesDoEnvioError(
+          'Valorion cash-out: falha ao autenticar — HTTP 401',
+        ),
+      );
+
+    const r = (await processor.process(
+      job(transacaoId, { attemptsMade: 5, attempts: 5 }),
+    )) as { preEnvioEsgotado?: boolean };
+    expect(r.preEnvioEsgotado).toBe(true);
+
+    const tx = await prisma.transacao.findUniqueOrThrow({
+      where: { id: transacaoId },
+    });
+    expect(tx.situacao).toBe(SITUACAO_TRANSACAO.FALHA);
+
+    const tentativas = await prisma.tentativaTransacao.count({
+      where: { transacaoId },
+    });
+    expect(tentativas).toBe(0);
+
+    const saldoDepois = await prisma.saldoUsuario.findUniqueOrThrow({
+      where: { usuarioId },
+    });
+    expect(Number(saldoDepois.saldoDisponivel)).toBe(
+      Number(saldoAntes.saldoDisponivel),
+    );
   });
 });

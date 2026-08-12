@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Decimal } from 'decimal.js';
 import {
+  chavePixParaLiquidante,
   money,
   ORIGEM_EXECUCAO_SAQUE,
   SITUACAO_EXECUCAO_SAQUE,
@@ -365,7 +366,7 @@ export class TesourariaService {
       const resultado = await provider.createCashOut({
         valor: money(execucao.valorSolicitado.toString()),
         idTransacaoPrivado: execucao.idPublico,
-        chavePix: destino.chavePix,
+        chavePix: chavePixParaLiquidante(destino.tipoChavePix, destino.chavePix),
         tipoChavePix: destino.tipoChavePix,
         nomeBeneficiario: destino.nomeBeneficiario,
         documentoBeneficiario: destino.documentoBeneficiario,

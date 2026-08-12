@@ -3,6 +3,10 @@ import * as argon2 from 'argon2';
 import { createCipheriv, randomBytes } from 'node:crypto';
 import { DISPONIBILIDADE_ADQUIRENTE } from '../src/shared/situacoes';
 import {
+  CODIGOS_VALORION,
+  nomeExibicaoValorion,
+} from '../src/providers/valorion/valorion.codigos';
+import {
   CATALOGO_PERMISSOES,
   descricaoPermissao,
   PERMISSOES_PADRAO_ANALISTA_MED,
@@ -232,61 +236,61 @@ async function main() {
   });
 
   /**
-   * Valorion — liquidante REAL. Nasce INATIVA e fechada (ESPECIFICOS): quem
-   * liga é o administrador, depois de preencher as chaves `VALORION_*` no
-   * `.env` (as credenciais da conta ficam vazias de propósito — o client cai
-   * no fallback de env). Cadastrar os IPs de postback da Valorion no admin
-   * fecha a Camada 2.
+   * Cinco contas Valorion = cinco adquirentes. Nasce INATIVA e fechada
+   * (ESPECIFICOS): quem liga é o admin, depois de preencher `VALORION_API_KEY`
+   * / `VALORION_02_API_KEY` … no `.env` (credenciais da conta vazias de
+   * propósito — o client cai no fallback da env daquela adquirente). Token de
+   * webhook é o mesmo (`VALORION_WEBHOOK_TOKEN`). IPs no admin fecham a Camada 2.
    */
-  const valorion = await prisma.provedorPagamento.upsert({
-    where: { codigo: 'valorion' },
-    create: {
-      codigo: 'valorion',
-      nome: 'Valorion',
-      nomeFantasia: 'Valorion',
-      temMed: true,
-      situacao: 'INATIVO',
-      disponibilidadePixEntrada: DISPONIBILIDADE_ADQUIRENTE.ESPECIFICOS,
-      permitePixEntrada: true,
-      permitePixSaida: true,
-      // A Valorion não manda header de assinatura — Camada 2 é allowlist de
-      // IP + token secreto na query do postback (VALORION_WEBHOOK_TOKEN).
-      exigeAssinaturaWebhook: false,
-    },
-    update: {},
-  });
+  for (const codigo of CODIGOS_VALORION) {
+    const nome = nomeExibicaoValorion(codigo);
+    const provedor = await prisma.provedorPagamento.upsert({
+      where: { codigo },
+      create: {
+        codigo,
+        nome,
+        nomeFantasia: nome,
+        temMed: true,
+        situacao: 'INATIVO',
+        disponibilidadePixEntrada: DISPONIBILIDADE_ADQUIRENTE.ESPECIFICOS,
+        permitePixEntrada: true,
+        permitePixSaida: true,
+        exigeAssinaturaWebhook: false,
+      },
+      update: { nome, nomeFantasia: nome },
+    });
 
-  const contaValorion = await prisma.contaProvedor.upsert({
-    where: { chaveUnicaConta: 'valorion:GATEWAY:default' },
-    create: {
-      provedorPagamentoId: valorion.id,
-      nome: 'Valorion Gateway Default',
-      chaveUnicaConta: 'valorion:GATEWAY:default',
-      identificadorContaExterna: 'valorion-default',
-      // Vazio de propósito: o client usa os envs VALORION_* como fallback.
-      credenciaisCriptografadas: encryptCredentialsSeed({}),
-      pixEntradaHabilitado: true,
-      pixSaidaHabilitado: true,
-      ticketMaximoPixEntrada: '100000.00',
-      ticketMaximoPixSaida: '100000.00',
-      situacao: 'ATIVO',
-    },
-    update: {
-      credenciaisCriptografadas: encryptCredentialsSeed({}),
-    },
-  });
+    const contaValorion = await prisma.contaProvedor.upsert({
+      where: { chaveUnicaConta: `${codigo}:GATEWAY:default` },
+      create: {
+        provedorPagamentoId: provedor.id,
+        nome: `${nome} Gateway Default`,
+        chaveUnicaConta: `${codigo}:GATEWAY:default`,
+        identificadorContaExterna: `${codigo}-default`,
+        credenciaisCriptografadas: encryptCredentialsSeed({}),
+        pixEntradaHabilitado: true,
+        pixSaidaHabilitado: true,
+        ticketMaximoPixEntrada: '100000.00',
+        ticketMaximoPixSaida: '100000.00',
+        situacao: 'ATIVO',
+      },
+      update: {
+        credenciaisCriptografadas: encryptCredentialsSeed({}),
+      },
+    });
 
-  await prisma.custoPixContaProvedor.upsert({
-    where: { contaProvedorId: contaValorion.id },
-    create: {
-      contaProvedorId: contaValorion.id,
-      custoPixEntradaPercentual: '0',
-      custoPixEntradaFixo: '0',
-      custoPixSaidaPercentual: '0',
-      custoPixSaidaFixo: '0',
-    },
-    update: {},
-  });
+    await prisma.custoPixContaProvedor.upsert({
+      where: { contaProvedorId: contaValorion.id },
+      create: {
+        contaProvedorId: contaValorion.id,
+        custoPixEntradaPercentual: '0',
+        custoPixEntradaFixo: '0',
+        custoPixSaidaPercentual: '0',
+        custoPixSaidaFixo: '0',
+      },
+      update: {},
+    });
+  }
 
   await prisma.configuracaoPadraoPixUsuario.upsert({
     where: { nome: 'Padrao Sistema' },

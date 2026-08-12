@@ -18,8 +18,15 @@ import { getRastreio } from '../../common/request-context';
 import { MedService } from '../../med/med.service';
 import { Throttle } from '../../common/ip-throttle.guard';
 import { ValorionPaymentProvider } from './valorion.client';
+import {
+  ROTAS_WEBHOOK_VALORION,
+  codigoValorionDaRota,
+  type CodigoValorion,
+} from './valorion.codigos';
 import { decryptCredentials } from '../../common/crypto.util';
 import { extrairValorDePayload } from '../valor-remoto.util';
+import { rotaSemPrefixo } from '../../common/api-prefix';
+import { ProviderRegistry } from '../provider.registry';
 
 /**
  * Postback da Valorion. Mesmo racional do controller mock: o teto global de
@@ -59,13 +66,13 @@ function extrairExternaRef(body: Record<string, unknown>): unknown {
     undefined
   );
 }
-@Controller('webhooks/valorion')
+@Controller(ROTAS_WEBHOOK_VALORION)
 @Throttle({ limit: 6000, windowSec: 60 })
 export class ValorionWebhookController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly queues: QueuesService,
-    private readonly valorion: ValorionPaymentProvider,
+    private readonly providers: ProviderRegistry,
     private readonly config: ConfigService,
     private readonly med: MedService,
   ) {}
@@ -75,9 +82,16 @@ export class ValorionWebhookController {
     @Body() body: Record<string, unknown>,
     @Headers() headers: Record<string, string>,
     @Query('token') token: string | undefined,
-    @Req() req: { ip?: string },
+    @Req() req: { ip?: string; path?: string; url?: string },
   ) {
-    return this.handle(body, headers, token, req.ip ?? '127.0.0.1', 'cashin');
+    return this.handle(
+      body,
+      headers,
+      token,
+      req.ip ?? '127.0.0.1',
+      'cashin',
+      this.codigoDaReq(req),
+    );
   }
 
   @Post('pix-out')
@@ -85,9 +99,24 @@ export class ValorionWebhookController {
     @Body() body: Record<string, unknown>,
     @Headers() headers: Record<string, string>,
     @Query('token') token: string | undefined,
-    @Req() req: { ip?: string },
+    @Req() req: { ip?: string; path?: string; url?: string },
   ) {
-    return this.handle(body, headers, token, req.ip ?? '127.0.0.1', 'cashout');
+    return this.handle(
+      body,
+      headers,
+      token,
+      req.ip ?? '127.0.0.1',
+      'cashout',
+      this.codigoDaReq(req),
+    );
+  }
+
+  private codigoDaReq(req: { path?: string; url?: string }): CodigoValorion {
+    const codigo = codigoValorionDaRota(rotaSemPrefixo(req));
+    if (!codigo) {
+      throw new BadRequestException('Rota Valorion desconhecida');
+    }
+    return codigo;
   }
 
   private conferirToken(token: string | undefined) {
@@ -136,13 +165,17 @@ export class ValorionWebhookController {
     liquidanteId: string,
     chave: string,
     webhookId: bigint,
+    codigo: CodigoValorion,
   ): Promise<{ casoMed?: unknown; descartado?: string }> {
     if (!liquidanteId) {
       throw new BadRequestException('Payload MED sem idtransaction.');
     }
     try {
       const tentativa = await this.prisma.tentativaTransacao.findFirst({
-        where: { idTransacaoLiquidante: liquidanteId },
+        where: {
+          idTransacaoLiquidante: liquidanteId,
+          transacao: { contaProvedor: { provedor: { codigo } } },
+        },
         include: {
           transacao: { include: { contaProvedor: true } },
         },
@@ -163,6 +196,7 @@ export class ValorionWebhookController {
         throw new BadRequestException('Payload MED sem valor utilizável.');
       }
       await this.confirmarMedNaLiquidante({
+        codigo,
         liquidanteId,
         idTransacaoPrivado: tentativa.transacao.idTransacaoPrivado,
         credenciaisCriptografadas:
@@ -203,12 +237,13 @@ export class ValorionWebhookController {
   }
 
   private async confirmarMedNaLiquidante(params: {
+    codigo: CodigoValorion;
     liquidanteId: string;
     idTransacaoPrivado: string;
     credenciaisCriptografadas: string;
   }) {
     const credenciais = decryptCredentials(params.credenciaisCriptografadas);
-    const remote = await this.valorion.getStatus({
+    const remote = await this.providers.get(params.codigo).getStatus({
       idTransacaoLiquidante: params.liquidanteId,
       idTransacaoPrivado: params.idTransacaoPrivado,
       credenciais,
@@ -232,17 +267,20 @@ export class ValorionWebhookController {
     token: string | undefined,
     ip: string,
     kind: 'cashin' | 'cashout',
+    codigo: CodigoValorion,
   ) {
     this.conferirToken(token);
 
     const provedor = await this.prisma.provedorPagamento.findUnique({
-      where: { codigo: 'valorion' },
+      where: { codigo },
       include: { ipsWebhook: true },
     });
-    if (!provedor) throw new UnauthorizedException('Provedor valorion ausente');
+    if (!provedor) {
+      throw new UnauthorizedException(`Provedor ${codigo} ausente`);
+    }
 
-    // Camada 2
-    await this.valorion.verifyTransport({
+    // Camada 2 — IP daquela adquirente; token é o mesmo nas cinco.
+    await this.providers.get(codigo).verifyTransport({
       ip: ip.replace('::ffff:', ''),
       headers,
       body,
@@ -262,7 +300,7 @@ export class ValorionWebhookController {
         .join(':') ||
       createHash('sha256').update(JSON.stringify(body)).digest('hex');
 
-    const chave = `valorion:${eventId}`;
+    const chave = `${codigo}:${eventId}`;
     const existing = await this.prisma.webhookRecebidoProvedor.findUnique({
       where: { chaveIdempotencia: chave },
     });
@@ -276,6 +314,7 @@ export class ValorionWebhookController {
             liquidanteId,
             chave,
             existing.id,
+            codigo,
           );
           return {
             ok: true,
@@ -290,6 +329,7 @@ export class ValorionWebhookController {
           body,
           liquidanteId,
           statusOriginal,
+          codigo,
         );
       }
       return { ok: true, duplicated: true, id: existing.id.toString() };
@@ -310,7 +350,13 @@ export class ValorionWebhookController {
 
     // Contestação: a Valorion avisa MED pelo mesmo postback de cash-in.
     if (kind === 'cashin' && statusOriginal === 'MED') {
-      const r = await this.processarMedCashin(body, liquidanteId, chave, webhook.id);
+      const r = await this.processarMedCashin(
+        body,
+        liquidanteId,
+        chave,
+        webhook.id,
+        codigo,
+      );
       return { ok: true, id: webhook.id.toString(), ...r };
     }
 
@@ -327,14 +373,14 @@ export class ValorionWebhookController {
 
     if (kind === 'cashin') {
       await this.queues.enqueuePixWebhookReceived({
-        provider: 'valorion',
+        provider: codigo,
         payload,
         webhookRecebidoId: webhook.id.toString(),
         identificadorRastreio: rastreio,
       });
     } else {
       await this.queues.enqueuePixWebhookCashout({
-        provider: 'valorion',
+        provider: codigo,
         payload,
         webhookRecebidoId: webhook.id.toString(),
         identificadorRastreio: rastreio,
@@ -350,6 +396,7 @@ export class ValorionWebhookController {
     body: Record<string, unknown>,
     liquidanteId: string,
     statusOriginal: string,
+    codigo: CodigoValorion,
   ) {
     const payload = {
       ...body,
@@ -363,14 +410,14 @@ export class ValorionWebhookController {
     const rastreio = getRastreio();
     if (kind === 'cashin') {
       await this.queues.enqueuePixWebhookReceived({
-        provider: 'valorion',
+        provider: codigo,
         payload,
         webhookRecebidoId: webhookId.toString(),
         identificadorRastreio: rastreio,
       });
     } else {
       await this.queues.enqueuePixWebhookCashout({
-        provider: 'valorion',
+        provider: codigo,
         payload,
         webhookRecebidoId: webhookId.toString(),
         identificadorRastreio: rastreio,

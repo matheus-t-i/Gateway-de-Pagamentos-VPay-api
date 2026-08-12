@@ -8,6 +8,12 @@ import {
   isCpf,
   normalizarDocumento,
 } from './documento';
+import {
+  chavePixValida,
+  mensagemChavePixInvalida,
+  normalizarChavePixCadastro,
+  TIPOS_CHAVE_PIX,
+} from './chave-pix';
 import { violacoesSenha } from './senha';
 
 export const loginSchema = z.object({
@@ -32,6 +38,19 @@ export const enderecoSchema = z.object({
   uf: z.string().length(2),
 });
 
+/**
+ * Telefone BR com DDD. Aceita máscara; grava só dígitos.
+ * 10 = fixo, 11 = celular; 12–13 cobrem +55.
+ */
+export const telefoneObrigatorioSchema = z
+  .string({ required_error: 'Informe o telefone' })
+  .min(1, 'Informe o telefone')
+  .max(20)
+  .transform((s) => s.replace(/\D/g, ''))
+  .refine((d) => d.length >= 10 && d.length <= 13, {
+    message: 'Telefone deve ter DDD e número (10 ou 11 dígitos).',
+  });
+
 export const cadastroUsuarioSchema = z
   .object({
     tipoPessoa: z.enum(['PF', 'PJ']),
@@ -40,7 +59,7 @@ export const cadastroUsuarioSchema = z
     nomeRazaoSocial: z.string().min(2).max(255),
     nomeFantasia: z.string().max(255).optional(),
     email: z.string().email(),
-    telefone: z.string().max(20).optional(),
+    telefone: telefoneObrigatorioSchema,
     senha: z
       .string()
       .min(8)
@@ -122,7 +141,7 @@ export const editarDadosCadastraisAdminSchema = z
     cpfCnpj: z.string().transform(normalizarDocumento),
     nomeRazaoSocial: z.string().trim().min(2).max(255),
     nomeFantasia: z.string().trim().max(255).optional().nullable(),
-    telefone: z.string().max(20).optional().nullable(),
+    telefone: telefoneObrigatorioSchema,
     endereco: z.object({
       cep: z
         .string()
@@ -197,23 +216,85 @@ export const reprovarCadastroSchema = z.object({
   codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
-export const TIPOS_CHAVE_PIX = ['CPF', 'CNPJ', 'EMAIL', 'TELEFONE', 'ALEATORIA'] as const;
-
 /** Cadastro de chave PIX de saque (precisa de aprovação do administrador). */
-export const criarChavePixSchema = z.object({
-  apelido: z.string().max(100).optional(),
-  chave: z.string().min(1).max(255),
-  tipoChave: z.enum(TIPOS_CHAVE_PIX),
-  nomeTitular: z.string().max(255).optional(),
-  documentoTitular: z.string().max(20).optional(),
-  codigoTotp: z.string().regex(/^\d{6}$/),
-});
+export const criarChavePixSchema = z
+  .object({
+    apelido: z.string().max(100).optional(),
+    chave: z.string().min(1).max(255),
+    tipoChave: z.enum(TIPOS_CHAVE_PIX),
+    /** Liquidante confere nome+documento no DICT — sem isso o saque quebra depois do débito. */
+    nomeTitular: z.string().trim().min(2, 'Informe o nome do titular').max(255),
+    documentoTitular: z.string().min(1, 'Informe o CPF ou CNPJ do titular').max(20),
+    codigoTotp: z.string().regex(/^\d{6}$/),
+  })
+  .superRefine((v, ctx) => {
+    const chave = normalizarChavePixCadastro(v.tipoChave, v.chave);
+    if (!chavePixValida(v.tipoChave, chave)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['chave'],
+        message: mensagemChavePixInvalida(v.tipoChave),
+      });
+    }
+    const doc = normalizarDocumento(v.documentoTitular);
+    if (!isCpf(doc) && !isCnpj(doc)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['documentoTitular'],
+        message: 'Documento do titular deve ser um CPF (11) ou CNPJ (14) válido.',
+      });
+      return;
+    }
+    if (v.tipoChave === 'CPF' || v.tipoChave === 'CNPJ') {
+      if (chave !== doc) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['documentoTitular'],
+          message:
+            'Quando a chave é CPF ou CNPJ, o documento do titular tem que ser o mesmo.',
+        });
+      }
+    }
+  })
+  .transform((v) => ({
+    ...v,
+    chave: normalizarChavePixCadastro(v.tipoChave, v.chave),
+    documentoTitular: normalizarDocumento(v.documentoTitular),
+  }));
 
 export const decidirChavePixSchema = z.object({
   situacao: z.enum(['APROVADA', 'REPROVADA']),
   motivo: z.string().max(500).optional(),
   codigoTotp: z.string().regex(/^\d{6}$/),
 });
+
+/**
+ * Correção cadastral da chave pelo admin (titular/documento/apelido).
+ * Não muda a chave nem o tipo — isso seria outra chave. Situação também não
+ * muda: para cortar o saque, use revogar.
+ */
+export const editarChavePixAdminSchema = z
+  .object({
+    apelido: z.string().trim().max(100).optional().nullable(),
+    nomeTitular: z.string().trim().min(2, 'Informe o nome do titular').max(255),
+    documentoTitular: z.string().min(1, 'Informe o CPF ou CNPJ do titular').max(20),
+    codigoTotp: z.string().regex(/^\d{6}$/),
+  })
+  .superRefine((v, ctx) => {
+    const doc = normalizarDocumento(v.documentoTitular);
+    if (!isCpf(doc) && !isCnpj(doc)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['documentoTitular'],
+        message: 'Documento do titular deve ser um CPF (11) ou CNPJ (14) válido.',
+      });
+    }
+  })
+  .transform((v) => ({
+    ...v,
+    apelido: v.apelido?.trim() || null,
+    documentoTitular: normalizarDocumento(v.documentoTitular),
+  }));
 
 /**
  * Revogação de chave já APROVADA. A justificativa é OBRIGATÓRIA e mínima de 5
@@ -247,10 +328,14 @@ export const atualizarPerfilSchema = z.object({
   codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
-/** Escolha da adquirente de PIX in pelo próprio lojista, no painel. */
+/**
+ * Escolha da adquirente de PIX in pelo próprio lojista, no painel.
+ * Sem step-up 2FA: só troca a liquidante das próximas cobranças, dentro do
+ * que o admin já liberou. Mutações de admin (ativar/inativar/remanejar)
+ * continuam exigindo codigoTotp.
+ */
 export const escolherAdquirentePixEntradaSchema = z.object({
   adquirenteCodigo: z.string().min(2).max(50),
-  codigoTotp: z.string().regex(/^\d{6}$/),
 });
 
 /** Endereço de entrega do pagador. Mesmo formato do endereço do cadastro. */
@@ -313,19 +398,18 @@ const documentoPagadorSchema = z
   });
 
 /**
- * Pagador da cobrança — OBRIGATÓRIO, e com nome, documento e e-mail exigidos.
+ * Pagador da cobrança — OBRIGATÓRIO, com nome, documento, e-mail e telefone.
  *
- * Não é preciosismo nosso: as liquidantes recusam a cobrança sem esses três
- * (ver `ValorionPaymentProvider.createCharge`). Enquanto eram opcionais aqui, a
+ * Não é preciosismo nosso: as liquidantes recusam a cobrança sem identificação
+ * (ver `ValorionPaymentProvider.createCharge`). Enquanto faltava campo aqui, a
  * cobrança era ACEITA com 201 e só quebrava lá dentro — o lojista recebia 503
- * genérico, sem saber qual campo faltava, e a venda ia para FALHA sem código
- * PIX. É o mesmo erro que o cash-out já tinha cometido com `nomeBeneficiario`.
+ * genérico, sem saber o que faltava, e a venda ia para FALHA sem código PIX.
  */
 export const pagadorCobrancaSchema = z.object({
   nome: z.string().min(2).max(255),
   documento: documentoPagadorSchema,
   email: z.string().email().max(255),
-  telefone: z.string().max(20).optional(),
+  telefone: telefoneObrigatorioSchema,
   endereco: enderecoPagadorSchema.optional(),
 });
 
@@ -345,7 +429,7 @@ export const criarCobrancaPixSchema = z
      * Se for igual à URL de um webhook cadastrado, a entrega sai uma vez só.
      */
     urlCallback: z.string().url().max(500).optional(),
-    /** Obrigatório: a liquidante recusa a cobrança sem nome, documento e e-mail. */
+    /** Obrigatório: a liquidante recusa a cobrança sem nome, documento, e-mail e telefone. */
     pagador: pagadorCobrancaSchema,
     /**
      * Origem da venda (utm_*). Não muda nada no PIX: é repassado aos apps que o
@@ -389,7 +473,7 @@ export const criarSaquePixSchema = z
   .object({
     valor: z.string().regex(/^\d+(\.\d{1,2})?$/),
     chavePix: z.string().min(1).max(255),
-    tipoChavePix: z.enum(['CPF', 'CNPJ', 'EMAIL', 'TELEFONE', 'ALEATORIA']),
+    tipoChavePix: z.enum(TIPOS_CHAVE_PIX),
     referenciaExterna: z.string().max(255).optional(),
     /** Mesma regra do cash-in: callback específico desta operação. */
     urlCallback: z.string().url().max(500).optional(),
@@ -403,6 +487,14 @@ export const criarSaquePixSchema = z
     documentoBeneficiario: z.string().min(11).max(20),
   })
   .superRefine((v, ctx) => {
+    const chave = normalizarChavePixCadastro(v.tipoChavePix, v.chavePix);
+    if (!chavePixValida(v.tipoChavePix, chave)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['chavePix'],
+        message: mensagemChavePixInvalida(v.tipoChavePix),
+      });
+    }
     const doc = normalizarDocumento(v.documentoBeneficiario);
     if (!isCpf(doc) && !isCnpj(doc)) {
       ctx.addIssue({
@@ -426,7 +518,12 @@ export const criarSaquePixSchema = z
         });
       }
     }
-  });
+  })
+  .transform((v) => ({
+    ...v,
+    chavePix: normalizarChavePixCadastro(v.tipoChavePix, v.chavePix),
+    documentoBeneficiario: normalizarDocumento(v.documentoBeneficiario),
+  }));
 
 /**
  * Allowlist de IP da credencial. Cada entrada é normalizada e recusada se não

@@ -4,7 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullBoardModule } from '@bull-board/nestjs';
 import { ExpressAdapter } from '@bull-board/express';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
-import { ALL_QUEUE_NAMES, QUEUE_NAMES } from '../shared';
+import { ALL_QUEUE_NAMES, nomeExibicaoFila, QUEUE_NAMES } from '../shared';
 import { AuthModule } from '../auth/auth.module';
 import { QueuesService } from './queues.service';
 import { ReenvioWebhookService } from './reenvio-webhook.service';
@@ -16,7 +16,11 @@ const queueRegistrations = ALL_QUEUE_NAMES.map((name) =>
 );
 
 const boardQueues = ALL_QUEUE_NAMES.map((name) =>
-  BullBoardModule.forFeature({ name, adapter: BullMQAdapter }),
+  BullBoardModule.forFeature({
+    name,
+    adapter: BullMQAdapter,
+    options: { displayName: nomeExibicaoFila(name) },
+  }),
 );
 
 @Global()
