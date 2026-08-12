@@ -6,7 +6,9 @@ dist
 !.env.example
 uploads
 docs
-scripts
+# Mantém só o start collocated na imagem; o resto de scripts/ fica de fora.
+scripts/*
+!scripts/start-api-com-worker.sh
 *.log
 .git
 .idea
