@@ -18,6 +18,9 @@ services:
     # `migrate deploy` ANTES de trocar a versão no ar, com a CLI pinada da
     # imagem (não `npx` avulso). Falhou a migração → o deploy não promove.
     preDeployCommand: node node_modules/prisma/build/index.js migrate deploy
+    # Padrão: só API. Sem vpay-worker (economia de 1 Starter), use no painel:
+    #   sh scripts/start-api-com-worker.sh
+    # (exige imagem com o script; senão: sh -c "node dist/worker.js & exec node dist/main.js")
     dockerCommand: node dist/main.js
     envVars:
       - fromGroup: vpay-backend

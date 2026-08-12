@@ -39,6 +39,8 @@ COPY --from=build /app/node_modules/prisma ./node_modules/prisma
 COPY --from=build /app/node_modules/.bin ./node_modules/.bin
 COPY --from=build /app/dist ./dist
 COPY prisma ./prisma
+# Script opcional: API+Worker no mesmo container (Docker Command no Render).
+COPY scripts/start-api-com-worker.sh ./scripts/start-api-com-worker.sh
 USER node
 EXPOSE 3001
 CMD ["node", "dist/main.js"]
