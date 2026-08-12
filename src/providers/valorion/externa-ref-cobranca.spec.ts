@@ -26,7 +26,6 @@ describe('Valorion createCharge — externaRef', () => {
       (
         ({
           VALORION_API_KEY: 'chave-de-teste',
-          VALORION_PIX_KEY: 'pix-de-teste',
           API_PUBLIC_URL: 'https://api.teste.local',
           VALORION_WEBHOOK_TOKEN: 'token-de-teste',
         }) as Record<string, string>

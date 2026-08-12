@@ -153,6 +153,22 @@ export class LedgerService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
+   * Abre a carteira zerada se ainda não existir. A ativação já faz isso; aqui
+   * cobre conta antiga/admin/seed sem linha — um PIX pago não pode morrer em
+   * "carteira não encontrada" depois da Camada 1 ter confirmado.
+   */
+  async garantirCarteira(
+    usuarioId: bigint,
+    db: Prisma.TransactionClient | PrismaService = this.prisma,
+  ) {
+    await db.saldoUsuario.upsert({
+      where: { usuarioId },
+      create: { usuarioId },
+      update: {},
+    });
+  }
+
+  /**
    * Único ponto de escrita de saldo.
    * SELECT FOR UPDATE em saldos_usuarios + movimentações + outbox no mesmo commit.
    *
@@ -175,6 +191,7 @@ export class LedgerService {
     db?: Prisma.TransactionClient,
   ) {
     const executar = async (tx: Prisma.TransactionClient) => {
+      await this.garantirCarteira(params.usuarioId, tx);
       const saldos = await tx.$queryRaw<
         Array<{
           usuario_id: bigint;

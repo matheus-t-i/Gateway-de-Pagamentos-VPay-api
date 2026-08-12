@@ -25,7 +25,7 @@ import { decryptCredentials } from '../common/crypto.util';
  * O ledger já foi liquidado na decisão do caso — este passo é só a
  * transferência externa. Mas "só a transferência" é dinheiro saindo, e o refund
  * da Valorion NÃO tem chave de idempotência (`createRefund` manda apenas
- * `{ id, external_reference }`) — então os desfechos seguem a MESMA doutrina do
+ * `{ id: sellerViaGetCompany, external_reference: idTransacaoPublico }`) — então os desfechos seguem a MESMA doutrina do
  * `PixCashOutProcessor`:
  *
  *  - pré-envio  → volta a PENDENTE (retentável; teto de 8 vira FALHA)
@@ -132,6 +132,7 @@ export class DevolucaoPixProcessor extends WorkerHost {
         valor: money(devolucao.valor.toString()),
         idTransacaoLiquidante: liquidanteId,
         idTransacaoPrivado: devolucao.transacao.idTransacaoPrivado,
+        idTransacaoPublico: devolucao.transacao.idTransacaoPublico,
         idDevolucaoPublico: devolucao.idDevolucaoPublico,
         motivo: devolucao.motivo ?? undefined,
         credenciais,

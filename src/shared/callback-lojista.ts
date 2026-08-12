@@ -104,6 +104,32 @@ export function operacaoCallback(direcao: 'ENTRADA' | 'SAIDA'): OperacaoCallback
 }
 
 /**
+ * Reenvio manual só onde EXISTE evento de outbox (`EVENTOS_LOJISTA`):
+ * - cash-in: `CONCLUIDA` (`pix.cashin.pago`) e `MED` (`pix.devolucao.concluida`)
+ * - cash-out: `CONCLUIDA` (`pix.cashout.concluido`) e `FALHA` (`pix.cashout.falhou`)
+ *
+ * `AGUARDANDO_PAGAMENTO` / `PROCESSANDO` não são finais e não geram callback.
+ * `FALHA` de cash-in também não: a cobrança morreu na geração, sem outbox.
+ */
+export function podeReenviarCallback(
+  situacao: string,
+  direcao: 'ENTRADA' | 'SAIDA',
+): boolean {
+  if (direcao === 'ENTRADA') {
+    return (
+      situacao === SITUACAO_TRANSACAO.CONCLUIDA ||
+      situacao === SITUACAO_TRANSACAO.LIQUIDADA ||
+      situacao === SITUACAO_TRANSACAO.MED
+    );
+  }
+  return (
+    situacao === SITUACAO_TRANSACAO.CONCLUIDA ||
+    situacao === SITUACAO_TRANSACAO.LIQUIDADA ||
+    situacao === SITUACAO_TRANSACAO.FALHA
+  );
+}
+
+/**
  * Documentação viva: o que a tela de documentação lista para o lojista tratar.
  * Mesma informação dos mapas acima — sair de sincronia faz o cliente tratar um
  * status que nunca chega (ou deixar de tratar um que chega).

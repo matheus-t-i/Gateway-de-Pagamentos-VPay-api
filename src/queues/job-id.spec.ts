@@ -10,10 +10,15 @@ import { QueuesService } from './queues.service';
  */
 describe('QueuesService — jobId estável compatível com BullMQ 5', () => {
   function filaStub() {
-    const adds: Array<{ name: string; opts?: { jobId?: string } }> = [];
+    const adds: Array<{ name: string; opts?: { jobId?: string; delay?: number } }> =
+      [];
     return {
       adds,
-      add: async (name: string, _data: unknown, opts?: { jobId?: string }) => {
+      add: async (
+        name: string,
+        _data: unknown,
+        opts?: { jobId?: string; delay?: number },
+      ) => {
         if (opts?.jobId?.includes(':')) {
           throw new Error('Custom Id cannot contain :');
         }
@@ -60,5 +65,19 @@ describe('QueuesService — jobId estável compatível com BullMQ 5', () => {
       expect(a.opts?.jobId).not.toContain(':');
       expect(a.opts?.jobId).not.toMatch(/^\d+$/);
     }
+  });
+
+  it('cash-in webhook entra sem delay — backoff só depois de falha transitória', async () => {
+    const filas = Array.from({ length: 12 }, filaStub);
+    const svc = new QueuesService(
+      ...(filas as [never, never, never, never, never, never, never, never, never, never, never, never]),
+    );
+    await svc.enqueuePixWebhookReceived({
+      provider: 'teste',
+      payload: {},
+      webhookRecebidoId: '9',
+      identificadorRastreio: 'r',
+    } as never);
+    expect(filas[0].adds[0].opts?.delay).toBe(0);
   });
 });

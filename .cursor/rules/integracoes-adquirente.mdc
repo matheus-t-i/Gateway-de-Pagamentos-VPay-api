@@ -22,6 +22,9 @@ Toda liquidação (pago, estorno, saque, devolução) passa por duas camadas:
 2. **Camada 2 (transporte):** quando a adquirente oferece — allowlist de IP,
    assinatura HMAC e/ou token. Preferência: IP + consulta → HMAC/token +
    consulta → só consulta (mínimo aceitável).
+   - Se a liquidante **não assina header** (caso Valorion): o segredo vai na
+     query do `postbackUrl` no create do PIX (`?token=`), não no header do
+     callback. Ver rule `valorion-webhook`.
 
 Responder **200 mesmo ao descartar** a entrega (duplicada/ignorada) para não
 gerar tempestade de retries. 401/400 só para transporte inválido.

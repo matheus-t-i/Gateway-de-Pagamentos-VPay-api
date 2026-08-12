@@ -127,9 +127,19 @@ export type EmailJobPayload = {
   identificadorRastreio?: string;
 };
 
+/**
+ * Opções padrão das filas. `backoff.delay` NÃO é atraso na criação do job —
+ * só entra depois de uma falha (2s, 4s, 8s, 16s). A 1ª execução é imediata.
+ *
+ * Cash-in (criação da cobrança e recebimento do webhook) não pode esperar:
+ * `delay: 0` explícito nas filas de webhook in/out. Recusa 4xx da liquidante
+ * vira `UnrecoverableError` no processor — retry exponencial num 404
+ * determinístico só empurrava o job ~20s sem mudar o resultado.
+ */
 export const DEFAULT_WEBHOOK_JOB_OPTIONS = {
   attempts: 5,
   backoff: { type: 'exponential' as const, delay: 2000 },
   removeOnComplete: 1000,
   removeOnFail: 5000,
+  delay: 0,
 };

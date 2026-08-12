@@ -109,24 +109,12 @@ envVarGroups:
         sync: false
       - key: VALORION_API_KEY
         sync: false
-      - key: VALORION_PIX_KEY
-        sync: false
-      - key: VALORION_BASIC_KEY
-        sync: false
-      - key: VALORION_SELLER_ID
-        sync: false
       - key: VALORION_BASE_URL
         sync: false
       - key: VALORION_FILA_URL
         sync: false
-      # Pagador padrão usado quando a cobrança chega sem dados completos.
-      - key: VALORION_PAGADOR_PADRAO_NOME
-        sync: false
-      - key: VALORION_PAGADOR_PADRAO_EMAIL
-        sync: false
-      - key: VALORION_PAGADOR_PADRAO_CPF
-        sync: false
-      - key: VALORION_PAGADOR_PADRAO_IP
+      # Destino do saque automático: nome da env que guarda a chave PIX
+      - key: TESOURARIA_CHAVE_PIX
         sync: false
       # ── E-mail (SMTP) ──────────────────────────────────────────────────
       - key: SMTP_HOST

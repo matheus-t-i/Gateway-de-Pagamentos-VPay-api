@@ -1,0 +1,26 @@
+---
+description: Identificação de transação — sempre idTransacaoPublico e idTransacaoPrivado
+alwaysApply: true
+---
+
+# Identidade da transação
+
+A operação é identificada **sempre** pelos IDs nossos:
+
+| Campo | Papel |
+|---|---|
+| `idTransacaoPublico` | Exposto ao lojista, callback, API pública, painel; eco com liquidante no cash-in (`externaRef` / postback) |
+| `idTransacaoPrivado` | Interno; ledger, cash-out na liquidante, chaves de idempotência de dinheiro |
+
+## Regras
+
+1. Correlacionar webhook, tentativa, MED, devolução, callback e ledger por esses
+   dois IDs (ou pelo id liquidante **já amarrado** à tentativa) — nunca por
+   `referenciaExterna` do lojista ou heurística de valor.
+2. `referenciaExterna` é **etiqueta do lojista** (idempotência da API pública /
+   callback). Não identifica a transação na VPay nem na liquidante.
+3. Não inventar outro “id de negócio” paralelo (pedido externo, etc.) como chave
+   de correlação nossa. Parâmetros internos da adquirente (ex. seller no body
+   do refund Valorion) resolvem-se na API deles (`getCompany`) — não viram env
+   nem substituem `idTransacaoPublico`/`Privado`.
+4. Callback e API pública expõem só o **público**; o privado não vaza.

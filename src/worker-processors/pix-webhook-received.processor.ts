@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Job } from 'bullmq';
+import { Job, UnrecoverableError } from 'bullmq';
 import {
   money,
   PixJobPayload,
@@ -12,6 +12,7 @@ import {
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProviderRegistry } from '../providers/provider.registry';
+import { RecusaAdquirenteError } from '../providers/payment-provider.port';
 import { decryptCredentials } from '../common/crypto.util';
 import { CashInCreditoService } from '../retencao/cashin-credito.service';
 import { RetencaoMetodoService } from '../retencao/retencao-metodo.service';
@@ -68,13 +69,30 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
       throw new Error('Mismatch conta_provedor');
     }
 
-    // Recovery: gravamos o id liquidante que faltava (crash/TIMEOUT fantasma).
-    const idLiquidanteEfetivo =
-      liquidanteId || tentativa.idTransacaoLiquidante || '';
+    /**
+     * `idtransaction` do postback é o id da LIQUIDANTE (gravado em
+     * `tentativas_transacoes.id_transacao_liquidante` no create). Mandar o
+     * nosso `id_transacao_privado` aqui é mismatch — a Valorion responde 404
+     * e, sem UnrecoverableError, o BullMQ retentava 5 vezes com backoff
+     * exponencial (~16s na 4ª), que parecia "delay padrão de 20s".
+     */
     if (
-      idLiquidanteEfetivo &&
-      !tentativa.idTransacaoLiquidante
+      liquidanteId &&
+      tentativa.idTransacaoLiquidante &&
+      liquidanteId !== tentativa.idTransacaoLiquidante
     ) {
+      throw new UnrecoverableError(
+        `Mismatch id liquidante: webhook=${liquidanteId} ` +
+          `tentativa=${tentativa.idTransacaoLiquidante} — idtransaction é o ` +
+          `id da adquirente, não id_transacao_privado/publico`,
+      );
+    }
+
+    // Recovery: gravamos o id liquidante que faltava (crash/TIMEOUT fantasma).
+    // Fonte da verdade quando já existe: o id gravado no create, não o do body.
+    const idLiquidanteEfetivo =
+      tentativa.idTransacaoLiquidante || liquidanteId || '';
+    if (idLiquidanteEfetivo && !tentativa.idTransacaoLiquidante) {
       await this.prisma.tentativaTransacao.update({
         where: { id: tentativa.id },
         data: { idTransacaoLiquidante: idLiquidanteEfetivo },
@@ -104,11 +122,23 @@ export class PixWebhookReceivedProcessor extends WorkerHost {
     const credenciais = decryptCredentials(
       tx.contaProvedor!.credenciaisCriptografadas,
     );
-    const remote = await this.providers.get(provider).getStatus({
-      idTransacaoLiquidante: idLiquidanteEfetivo,
-      idTransacaoPrivado: tx.idTransacaoPrivado,
-      credenciais,
-    });
+    let remote;
+    try {
+      remote = await this.providers.get(provider).getStatus({
+        idTransacaoLiquidante: idLiquidanteEfetivo,
+        idTransacaoPrivado: tx.idTransacaoPrivado,
+        credenciais,
+      });
+    } catch (e) {
+      // 4xx da consulta (404 transação inexistente, 401/403) não muda no retry.
+      // Timeout/5xx continuam Error comum e o backoff reagenda.
+      if (e instanceof RecusaAdquirenteError) {
+        throw new UnrecoverableError(
+          `Camada1 recusada pela liquidante: ${e.message.slice(0, 300)}`,
+        );
+      }
+      throw e;
+    }
     if (!['PAID', 'COMPLETED'].includes(remote.status)) {
       throw new Error(`Camada1 não confirmou pagamento: ${remote.status}`);
     }

@@ -1,6 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import * as argon2 from 'argon2';
-import { ipAllowed } from '../ip-allowlist.util';
+import { ipAllowed, mensagemIpNaoPermitido } from '../ip-allowlist.util';
 import {
   money,
   SITUACAO_EXECUCAO_SAQUE,
@@ -204,7 +204,7 @@ export class MockPaymentProvider implements PaymentProviderPort {
 
   async verifyTransport(input: VerifyTransportInput): Promise<boolean> {
     if (!ipAllowed(input.ip, input.allowedIps)) {
-      throw new UnauthorizedException('IP não permitido para webhook do provedor');
+      throw new UnauthorizedException(mensagemIpNaoPermitido(input.ip));
     }
     if (input.exigeAssinatura) {
       const key = (input.headers['x-key'] || input.headers['x-api-key']) as

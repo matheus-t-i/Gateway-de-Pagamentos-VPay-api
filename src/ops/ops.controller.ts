@@ -1742,32 +1742,9 @@ export class PainelDashboardController {
       ),
     };
 
-    if (!usuario.saldo) {
-      return {
-        conta,
-        range: janela.range,
-        periodo,
-        saldoDisponivel,
-        volumeBruto: '0',
-        qtdTransacoes: 0,
-        totais: { gerados: '0', pagos: '0', meds: bloqueadoMed },
-        ticketMedio: '0',
-        conversao: 0,
-        geradasQtd: 0,
-        aprovadasQtd: 0,
-        anterior: {
-          gerados: '0',
-          pagos: '0',
-          geradasQtd: 0,
-          aprovadasQtd: 0,
-          ticketMedio: '0',
-          conversao: 0,
-        },
-        serie: [],
-        recentes: [],
-      };
-    }
-
+    // Sem linha de saldo (conta nova, ainda sem crédito) o snapshot é zero —
+    // mas as cobranças JÁ existem. Cortar aqui zerava Gerados/recentes mesmo
+    // com PIX aguardando pagamento no extrato.
     const whereEntrada = {
       usuarioId,
       direcao: 'ENTRADA' as const,
@@ -1802,7 +1779,7 @@ export class PainelDashboardController {
       this.prisma.transacao.findMany({
         where: { usuarioId, direcao: 'ENTRADA' },
         orderBy: { criadoEm: 'desc' },
-        take: 12,
+        take: 10,
         include: { pix: true, itens: { orderBy: { id: 'asc' } } },
       }),
       this.prisma.transacao.findMany({

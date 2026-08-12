@@ -107,10 +107,10 @@ Validadas no boot por `src/common/env.validation.ts` (fail-fast). Em produção,
 | `MOCK_PROVIDER_WEBHOOK_KEY` | Header `x-key` esperado no webhook do provedor mock |
 | `CONTINGENCIA_TIMEOUT_SEGUNDOS` | Timeout por adquirente na criação da cobrança antes de cair na contingência (default 10) |
 | `API_PUBLIC_URL` | URL pública desta API — monta o `postbackUrl` enviado à Valorion |
-| `VALORION_API_KEY` / `VALORION_PIX_KEY` / `VALORION_BASIC_KEY` / `VALORION_SELLER_ID` | Credenciais Valorion (fallback quando a `conta_provedor` não tem credencial própria) |
+| `VALORION_API_KEY` | Credencial Valorion (fallback quando a `conta_provedor` não tem); cash-in só usa `x-api-key` |
 | `VALORION_WEBHOOK_TOKEN` | Token do `?token=` no postback, conferido com `timingSafeEqual` |
 | `VALORION_BASE_URL` / `VALORION_FILA_URL` | Overrides dos hosts Valorion |
-| `VALORION_PAGADOR_PADRAO_NOME` / `_EMAIL` / `_CPF` / `_IP` | Pagador padrão quando a cobrança não traz os dados do pagador |
+| `TESOURARIA_CHAVE_PIX` | Nome da env que guarda a chave PIX do saque automático (ex.: `CHAVE_PIX_BB_VPAY`); tipo/titular no gatilho |
 
 ## Estrutura de `src/`
 

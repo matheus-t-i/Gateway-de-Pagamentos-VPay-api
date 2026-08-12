@@ -115,9 +115,22 @@ export class IntegracoesService {
   ): Promise<bigint[]> {
     const venda = await tx.transacao.findUnique({
       where: { id: params.transacaoId },
-      select: { id: true, direcao: true, _count: { select: { itens: true } } },
+      select: {
+        id: true,
+        direcao: true,
+        credencialApiId: true,
+        _count: { select: { itens: true } },
+      },
     });
-    if (!venda || venda.direcao !== 'ENTRADA' || venda._count.itens === 0) return [];
+    // Sem credencial = depósito do painel (item sintético na Valorion, não é venda).
+    if (
+      !venda ||
+      venda.direcao !== 'ENTRADA' ||
+      !venda.credencialApiId ||
+      venda._count.itens === 0
+    ) {
+      return [];
+    }
 
     const integracoes = await tx.integracaoUsuario.findMany({
       where: { usuarioId: params.usuarioId, ativo: true },
@@ -159,15 +172,17 @@ export class IntegracoesService {
         id: true,
         usuarioId: true,
         direcao: true,
+        credencialApiId: true,
         _count: { select: { itens: true } },
       },
     });
     if (!tx) return;
 
-    // Só VENDA vai para app de rastreio: cash-out não é pedido, e o depósito
-    // pelo painel (o lojista pondo saldo na própria conta) não tem itens nem
-    // comprador — entraria no relatório de campanha dele como faturamento falso.
-    if (tx.direcao !== 'ENTRADA' || tx._count.itens === 0) return;
+    // Só VENDA (API pública) vai para app de rastreio. Depósito do painel tem
+    // item sintético para a liquidante, mas não é pedido — sem credencial.
+    if (tx.direcao !== 'ENTRADA' || !tx.credencialApiId || tx._count.itens === 0) {
+      return;
+    }
 
     const integracoes = await this.prisma.integracaoUsuario.findMany({
       where: { usuarioId: tx.usuarioId, ativo: true },

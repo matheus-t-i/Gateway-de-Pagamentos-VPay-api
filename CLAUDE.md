@@ -5,7 +5,9 @@ Dois repositórios: `Gateway-de-Pagamentos-VPay-api` (Nest API + Worker + Prisma
 ## Webhook security (inegociável)
 
 1. **Camada 1:** antes de creditar/terminal, consultar status na liquidante; se não confirmar → throw (job failed).
-2. **Camada 2:** IP allowlist e/ou `x-key` do provedor.
+2. **Camada 2:** IP allowlist e/ou `x-key`/token conforme a adquirente.
+   **Valorion:** não manda token no header — embute `VALORION_WEBHOOK_TOKEN` no
+   `postbackUrl` do create (`?token=`) e confere na query (rule `valorion-webhook`).
 3. Provedor inativo/suspenso → não atualiza tx nem saldo.
 4. Match id externo + conta/provedor com a tx local; mismatch → rejeitar.
 5. Um controller HTTP por adquirente em `src/providers/{codigo}/`.
@@ -23,6 +25,8 @@ especialmente no saque. Implementar `PaymentProviderPort` completo
 Toda liquidação (pago, estorno, saque, devolução) passa pelas **duas camadas**
 acima. Preferência de Camada 2, na ordem do que a adquirente oferecer:
 IP + consulta → HMAC/token + consulta → só consulta (mínimo aceitável).
+Se a liquidante **não assina header** (Valorion): o segredo vai na query do
+`postbackUrl` no create do PIX (`?token=`), não no header do callback.
 Responder **200 mesmo ao descartar** a entrega (idempotência/evento ignorado) —
 4xx/5xx gera tempestade de retries da liquidante. 401/400 só para transporte
 inválido (IP fora da allowlist, token errado, payload sem id).
@@ -41,6 +45,10 @@ deles (OAuth, Basic, API key), TLS verificado e timeout explícito.
   retry automático que possa pagar duas vezes; vai para reconciliação manual.
 - Crédito de saldo é recalculado de forma idempotente (chaves `cashin:*` no
   ledger) — webhook repetido não "soma de novo".
+
+⚠️ **Identificação nossa é sempre `idTransacaoPublico` + `idTransacaoPrivado`**
+(rule `identidade-transacao`). Webhook, MED, devolução, callback e ledger
+correm por esses IDs — nunca por `referenciaExterna` ou heurística de valor.
 
 ⚠️ **A referência que vai para a liquidante é o `idTransacaoPublico` — nunca a
 `referenciaExterna` do lojista, nunca o `idTransacaoPrivado.`** A referência do

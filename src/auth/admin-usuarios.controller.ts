@@ -19,6 +19,7 @@ import {
   BASE_CALCULO_RESERVA,
   DISPONIBILIDADE_ADQUIRENTE,
   documentosObrigatorios,
+  editarDadosCadastraisAdminSchema,
   MODO_TRATAMENTO_MED,
   normalizarIpOuCidr,
   PAPEIS,
@@ -471,6 +472,116 @@ export class AdminUsuariosController {
         aceitoEm: a.aceitoEm.toISOString(),
       })),
     };
+  }
+
+  /**
+   * Corrige dados pessoais e endereço declarados no cadastro (typo, documento
+   * errado, PF/PJ invertido). E-mail não se altera: é o identificador único
+   * da conta. 2FA do admin + auditoria com antes/depois.
+   */
+  @Put(':idPublico/dados-cadastrais')
+  @RequerPermissao(PERMISSOES.ADMIN_USUARIOS_EDITAR)
+  async editarDadosCadastrais(
+    @Param('idPublico') idPublico: string,
+    @Body() body: unknown,
+    @Req() req: { user: { id: string }; ip?: string },
+  ) {
+    const parsed = editarDadosCadastraisAdminSchema.safeParse(body ?? {});
+    if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    const data = parsed.data;
+    await assertStepUpTotp(this.prisma, req.user.id, data.codigoTotp);
+
+    const u = await this.prisma.usuario.findUnique({ where: { idPublico } });
+    if (!u) throw new NotFoundException('Usuário não encontrado');
+
+    if (data.cpfCnpj !== u.cpfCnpj) {
+      const outro = await this.prisma.usuario.findFirst({
+        where: { cpfCnpj: data.cpfCnpj, NOT: { id: u.id } },
+        select: { id: true },
+      });
+      if (outro) {
+        throw new BadRequestException(
+          'CPF/CNPJ já cadastrado em outra conta.',
+        );
+      }
+    }
+
+    const telefone = data.telefone
+      ? data.telefone.replace(/\D/g, '') || null
+      : null;
+    const nomeFantasia = data.nomeFantasia?.trim() || null;
+    const complemento = data.endereco.complemento?.trim() || null;
+    const cpfResponsavel =
+      data.tipoPessoa === 'PJ'
+        ? data.responsavel!.cpf
+        : data.cpfCnpj;
+    const nomeResponsavel =
+      data.tipoPessoa === 'PJ'
+        ? data.responsavel!.nome
+        : data.nomeRazaoSocial;
+
+    const anteriores = {
+      tipoPessoa: u.tipoPessoa,
+      cpfCnpj: u.cpfCnpj,
+      nomeRazaoSocial: u.nomeRazaoSocial,
+      nomeFantasia: u.nomeFantasia,
+      telefone: u.telefone,
+      endereco: u.endereco,
+      faturamentoMensalMedio: u.faturamentoMensalMedio?.toString() ?? null,
+      nomeResponsavel: u.nomeResponsavel,
+      cpfResponsavel: u.cpfResponsavel,
+    };
+    const novos = {
+      tipoPessoa: data.tipoPessoa,
+      cpfCnpj: data.cpfCnpj,
+      nomeRazaoSocial: data.nomeRazaoSocial,
+      nomeFantasia,
+      telefone,
+      endereco: {
+        cep: data.endereco.cep,
+        logradouro: data.endereco.logradouro,
+        numero: data.endereco.numero,
+        ...(complemento ? { complemento } : {}),
+        bairro: data.endereco.bairro,
+        cidade: data.endereco.cidade,
+        uf: data.endereco.uf,
+      },
+      faturamentoMensalMedio: data.faturamentoMensalMedio ?? null,
+      nomeResponsavel,
+      cpfResponsavel,
+    };
+
+    await this.prisma.usuario.update({
+      where: { id: u.id },
+      data: {
+        tipoPessoa: data.tipoPessoa,
+        cpfCnpj: data.cpfCnpj,
+        nomeRazaoSocial: data.nomeRazaoSocial,
+        nomeFantasia,
+        telefone,
+        endereco: novos.endereco,
+        faturamentoMensalMedio: data.faturamentoMensalMedio ?? null,
+        nomeResponsavel,
+        cpfResponsavel,
+      },
+    });
+
+    await this.prisma.registroAuditoria.create({
+      data: {
+        usuarioAtorId: BigInt(req.user.id),
+        usuarioAfetadoId: u.id,
+        origem: 'PAINEL',
+        operacao: 'ACAO_NEGOCIO',
+        acao: 'USUARIO_DADOS_CADASTRAIS_EDITAR',
+        nomeTabela: 'usuarios',
+        chaveRegistro: u.id.toString(),
+        enderecoIp: req.ip,
+        dadosAnteriores: anteriores as never,
+        dadosNovos: novos as never,
+      },
+    });
+
+    return { ok: true, idPublico, email: u.email };
   }
 
   /** Muda o status de um usuário já processado (ATIVO/SUSPENSO/BLOQUEADO/ENCERRADO). */

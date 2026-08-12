@@ -27,6 +27,7 @@ import {
   criarCobrancaPixSchema,
   criarSaquePixSchema,
   depositoPainelSchema,
+  itemDepositoInterno,
   ESCOPOS_API,
   PERMISSOES,
   saquePainelSchema,
@@ -170,8 +171,12 @@ export class PixPainelController {
    * direto pelo painel. Reaproveita a mesma lógica de cobrança da API pública
    * (ledger, tarifas e liberação idênticos).
    *
-   * Usa schema PRÓPRIO: não é uma venda, então não exige itens nem dados do
-   * pagador — quem deposita é o próprio lojista.
+   * Usa schema PRÓPRIO: não é uma venda. O item "Depósito interno" (não
+   * tangível, qtd 1, valor informado) é montado aqui — a Valorion exige
+   * `items ≥ 1` no create. Pagador = o próprio lojista.
+   *
+   * Sem step-up 2FA de propósito: só gera cobrança; o dinheiro só entra quando
+   * o PIX for pago. Saque e demais mutações críticas continuam pedindo TOTP.
    */
   @Post('cobrancas')
   @RequerPermissao(PERMISSOES.TRANSACOES_CRIAR)
@@ -181,14 +186,13 @@ export class PixPainelController {
   ) {
     const parsed = depositoPainelSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
-    await assertStepUpTotp(this.prisma, req.user.id, parsed.data.codigoTotp);
     const usuario = await this.contaAtiva(req.user);
-    const { codigoTotp: _c, ...dados } = parsed.data;
 
     const { idInterno, ...resposta } = await this.pix.criarCobranca({
       usuarioId: usuario.id,
       input: {
-        ...dados,
+        ...parsed.data,
+        itens: [itemDepositoInterno(parsed.data.valor)],
         // Quem deposita é o próprio titular — liquidantes reais (ex.:
         // Valorion) exigem nome/e-mail/CPF do pagador; para PJ vai o CPF do
         // responsável, já que CNPJ não é aceito como documento do pagador.

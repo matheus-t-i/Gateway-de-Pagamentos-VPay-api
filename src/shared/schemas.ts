@@ -111,6 +111,75 @@ export const cadastroUsuarioSchema = z
     }
   });
 
+/**
+ * Correção cadastral pelo admin. E-mail NÃO entra: é o identificador único da
+ * conta (login, JWT, callbacks) e não se troca por esta rota — se vier no
+ * body, o Zod descarta.
+ */
+export const editarDadosCadastraisAdminSchema = z
+  .object({
+    tipoPessoa: z.enum(['PF', 'PJ']),
+    cpfCnpj: z.string().transform(normalizarDocumento),
+    nomeRazaoSocial: z.string().trim().min(2).max(255),
+    nomeFantasia: z.string().trim().max(255).optional().nullable(),
+    telefone: z.string().max(20).optional().nullable(),
+    endereco: z.object({
+      cep: z
+        .string()
+        .transform((s) => s.replace(/\D/g, ''))
+        .pipe(z.string().length(8, 'CEP deve ter 8 dígitos')),
+      logradouro: z.string().trim().min(2).max(255),
+      numero: z.string().trim().min(1).max(20),
+      complemento: z.string().trim().max(100).optional().nullable(),
+      bairro: z.string().trim().min(2).max(100),
+      cidade: z.string().trim().min(2).max(100),
+      uf: z
+        .string()
+        .trim()
+        .transform((s) => s.toUpperCase())
+        .pipe(z.string().length(2, 'UF deve ter 2 letras')),
+    }),
+    faturamentoMensalMedio: z
+      .string()
+      .regex(/^\d+(\.\d{1,2})?$/, 'Faturamento inválido (ex.: 15000.00)')
+      .nullable()
+      .optional(),
+    responsavel: z
+      .object({
+        cpf: z.string().transform(normalizarDocumento),
+        nome: z.string().trim().min(2).max(255),
+      })
+      .optional(),
+    codigoTotp: z.string().regex(/^\d{6}$/),
+  })
+  .superRefine((data, ctx) => {
+    if (!documentoValidoPara(data.tipoPessoa, data.cpfCnpj)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['cpfCnpj'],
+        message:
+          data.tipoPessoa === 'PF'
+            ? 'CPF inválido (11 dígitos).'
+            : 'CNPJ inválido (14 caracteres; o novo padrão aceita letras nas 12 primeiras posições).',
+      });
+    }
+    if (data.tipoPessoa === 'PJ') {
+      if (!data.responsavel) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['responsavel'],
+          message: 'Informe o CPF e o nome do responsável pela empresa.',
+        });
+      } else if (!isCpf(data.responsavel.cpf)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['responsavel', 'cpf'],
+          message: 'CPF do responsável inválido (11 dígitos).',
+        });
+      }
+    }
+  });
+
 /** Reverificação de credenciais no onboarding público (sem JWT). */
 export const onboardingCredenciaisSchema = z.object({
   email: z.string().email(),
@@ -304,14 +373,16 @@ export const criarCobrancaPixSchema = z
 
 /**
  * Depósito pelo PAINEL: o lojista gerando um PIX para adicionar saldo à
- * própria conta. Não é uma venda, então não exige itens nem dados do pagador.
+ * própria conta. O schema não pede itens — o controller monta um item
+ * sintético (`itemDepositoInterno`) porque a Valorion exige `items ≥ 1`.
  */
 export const depositoPainelSchema = z.object({
   valor: z.string().regex(/^\d+(\.\d{1,2})?$/),
   referenciaExterna: z.string().max(255).optional(),
   urlCallback: z.string().url().max(500).optional(),
   expiracaoSegundos: z.number().int().positive().max(86400).optional(),
-  codigoTotp: z.string().regex(/^\d{6}$/),
+  // Sem step-up 2FA: depósito interno só gera cobrança PIX para a própria
+  // conta; saque e demais mutações críticas continuam exigindo codigoTotp.
 });
 
 export const criarSaquePixSchema = z
@@ -526,8 +597,23 @@ export const editarIntegracaoSchema = baseIntegracaoSchema;
 
 export type LoginInput = z.infer<typeof loginSchema>;
 export type CadastroUsuarioInput = z.infer<typeof cadastroUsuarioSchema>;
+export type EditarDadosCadastraisAdminInput = z.infer<
+  typeof editarDadosCadastraisAdminSchema
+>;
 export type CriarCobrancaPixInput = z.infer<typeof criarCobrancaPixSchema>;
 export type DepositoPainelInput = z.infer<typeof depositoPainelSchema>;
 export type ItemCobrancaInput = z.infer<typeof itemCobrancaSchema>;
+
+/** Item sintético do depósito interno — não tangível, qtd 1, valor da cobrança. */
+export const TITULO_ITEM_DEPOSITO_INTERNO = 'Depósito interno';
+
+export function itemDepositoInterno(valor: string): ItemCobrancaInput {
+  return {
+    titulo: TITULO_ITEM_DEPOSITO_INTERNO,
+    quantidade: 1,
+    valorUnitario: Number(valor),
+    tangivel: false,
+  };
+}
 export type EnderecoPagadorInput = z.infer<typeof enderecoPagadorSchema>;
 export type CriarSaquePixInput = z.infer<typeof criarSaquePixSchema>;

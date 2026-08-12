@@ -72,7 +72,7 @@ export class PixService {
     private readonly saqueProtecao: SaqueProtecaoService,
   ) {}
 
-  /** Credenciais da conta — só AES-GCM; JSON em claro não é mais aceito. */
+  /** Credenciais da conta. Blob vazio/`{}` em claro → `{}` (fallback de env). */
   private credenciaisDa(conta: { credenciaisCriptografadas: string }) {
     return decryptCredentials(conta.credenciaisCriptografadas);
   }
@@ -341,6 +341,7 @@ export class PixService {
     }
 
     const cfg = await this.configPix.resolverEfetiva(params.usuarioId);
+    await this.ledger.garantirCarteira(params.usuarioId);
 
     if (valor.lt(cfg.ticketMinimoPixEntrada) || valor.gt(cfg.ticketMaximoPixEntrada)) {
       throw new BadRequestException('Valor fora do ticket permitido');
@@ -693,6 +694,7 @@ export class PixService {
     if (existente) return await this.replayDoSaque(existente, valor, params.input);
 
     const cfg = await this.configPix.resolverEfetiva(params.usuarioId);
+    await this.ledger.garantirCarteira(params.usuarioId);
 
     // Origem permitida: quem tem credencial de API veio pela API; sem ela, veio
     // do painel. O padrão do sistema é PAINEL — API é liberação explícita.

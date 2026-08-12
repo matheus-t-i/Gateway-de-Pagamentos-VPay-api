@@ -348,6 +348,14 @@ async function main() {
     update: {},
   });
 
+  // Admin de dev também gera cobrança/depósito; sem carteira o webhook
+  // confirmado pela liquidante morre no ledger ("carteira não encontrada").
+  await prisma.saldoUsuario.upsert({
+    where: { usuarioId: admin.id },
+    create: { usuarioId: admin.id },
+    update: {},
+  });
+
   await prisma.politicaLimiteRequisicoes.createMany({
     data: [
       {

@@ -1,0 +1,29 @@
+{
+  "info": {
+    "name": "VPay — Valorion PIX in (local)",
+    "description": "Postback de cash-in no formato real da Valorion.\n\nidTransacaoPublico = transacoes.id_transacao_publico (externalreference).\nidTransaction = tentativas_transacoes.id_transacao_liquidante (idtransaction) — o id que a Valorion devolveu no create, NÃO id_transacao_privado.\n\nA Camada 1 consulta getTransactionStatus com esse id. Privado/UUID nosso → 404. Mesmo com o id certo, a Valorion só confirma PAID se o PIX foi pago de verdade."
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3001" },
+    { "key": "token", "value": "123321" },
+    { "key": "idTransacaoPublico", "value": "cole-o-id-transacao-publico" },
+    { "key": "idTransaction", "value": "cole-o-id-transaction-da-valorion" }
+  ],
+  "item": [
+    {
+      "name": "Webhook PIX in (pago)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/api/webhooks/valorion/pix-in?token={{token}}",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": \"90001\",\n  \"user_id\": \"vpay\",\n  \"externalreference\": \"{{idTransacaoPublico}}\",\n  \"amount\": 25.50,\n  \"beneficiary_name\": \"VPay Gateway\",\n  \"beneficiary_document\": \"00000000000191\",\n  \"data_registro\": \"2026-08-11 22:00:00\",\n  \"status\": \"PAID_OUT\",\n  \"idtransaction\": \"{{idTransaction}}\",\n  \"endToEnd\": \"E00000000202608112200AAAAAAAAAAA\",\n  \"deposito_liquido\": \"25.00\",\n  \"urlcallback\": \"http://localhost:3001/api/webhooks/valorion/pix-in\",\n  \"provider\": \"valorion\",\n  \"kind\": \"cash_in\"\n}"
+        }
+      }
+    }
+  ]
+}

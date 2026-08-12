@@ -243,10 +243,10 @@ describe('DevolucaoPixProcessor — desfechos separados', () => {
   it('pré-envio do CLIENT (ErroAntesDoEnvioError): também volta a PENDENTE', async () => {
     const dev = await criarDevolucao();
     comportamento = async () => {
-      throw new ErroAntesDoEnvioError('sellerId ausente para devolução');
+      throw new ErroAntesDoEnvioError('getCompany sem seller para devolução');
     };
 
-    await expect(processor().process(job(dev.id))).rejects.toThrow('sellerId');
+    await expect(processor().process(job(dev.id))).rejects.toThrow('getCompany');
     expect(chamadas).toBe(1);
 
     const atual = await prisma.devolucaoPix.findUniqueOrThrow({ where: { id: dev.id } });

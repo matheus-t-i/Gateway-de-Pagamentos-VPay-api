@@ -2,7 +2,7 @@ import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../prisma/prisma.service';
-import { ipAllowed } from '../ip-allowlist.util';
+import { ipAllowed, mensagemIpNaoPermitido } from '../ip-allowlist.util';
 import {
   CreateCashOutInput,
   CreateCashOutResult,
@@ -26,13 +26,14 @@ import { extrairValorDePayload } from '../valor-remoto.util';
  *
  * Dois hosts: o painel (`app.valorion.com.br`, autenticação Basic) responde
  * consulta de status, saldo e devolução; a fila de cash-in/out
- * (`api-fila-cash-in-out.onrender.com`, autenticação `x-api-key` + `X-Pix-Key`)
- * cria cobrança e saque. O saque é em duas etapas: auth (token Bearer com
- * validade de 180s) e create — o token é pedido a cada saque, sem cache.
+ * (`api-fila-cash-in-out.onrender.com`) cria cobrança (`x-api-key`) e saque
+ * (`x-api-key` + `X-Pix-Key` = chave de **destino** — conta com chave livre,
+ * sem chave pré-cadastrada na Valorion).
  *
- * Credenciais: lidas de `contas_provedor.credenciaisCriptografadas` com
- * fallback nos envs `VALORION_*` — é o fallback que permite testar preenchendo
- * só o `.env`, sem recadastrar a conta no admin.
+ * Credenciais: `contas_provedor.credenciaisCriptografadas` com fallback
+ * `VALORION_API_KEY` (e hosts). Basic do painel = base64 da apiKey; seller do
+ * refund via getCompany. Destino do saque automático de tesouraria:
+ * `TESOURARIA_CHAVE_PIX` = nome de outra env com a chave real; tipo/titular no banco.
  */
 @Injectable()
 export class ValorionPaymentProvider implements PaymentProviderPort {
@@ -63,18 +64,35 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
     return v;
   }
 
-  private pixKey(c: Record<string, unknown>): string {
-    const v = this.cred(c, 'pixKey', 'VALORION_PIX_KEY');
-    if (!v) throw new Error('Valorion: VALORION_PIX_KEY/credencial pixKey ausente');
-    return v;
+  /** Basic do painel Valorion = API key em base64 (doc oficial). Sem env aparte. */
+  private basicKey(c: Record<string, unknown>): string {
+    return Buffer.from(this.apiKey(c), 'utf8').toString('base64');
   }
 
-  /** Basic dos endpoints do painel; sem valor próprio, é o base64 da apiKey. */
-  private basicKey(c: Record<string, unknown>): string {
-    return (
-      this.cred(c, 'basicKey', 'VALORION_BASIC_KEY') ??
-      Buffer.from(this.apiKey(c), 'utf8').toString('base64')
-    );
+  /**
+   * ID numérico da empresa na Valorion (`dados_seller.empresa.id`), exigido no
+   * body do refund. Resolvido na hora via getCompany — não há VALORION_SELLER_ID.
+   * Cache por processo: devolução é rara e o id não muda.
+   */
+  private sellerIdCache: number | undefined;
+
+  private async resolverSellerId(c: Record<string, unknown>): Promise<number> {
+    if (this.sellerIdCache !== undefined) return this.sellerIdCache;
+    const resp = await this.request({
+      method: 'GET',
+      url: `${this.baseUrl()}/api/s1/getCompany/`,
+      headers: { Authorization: `Basic ${this.basicKey(c)}` },
+    });
+    const empresa = (resp.dados_seller as Record<string, unknown> | undefined)
+      ?.empresa as Record<string, unknown> | undefined;
+    const id = Number(empresa?.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      throw new ErroAntesDoEnvioError(
+        `Valorion: getCompany sem dados_seller.empresa.id — ${JSON.stringify(resp).slice(0, 300)}`,
+      );
+    }
+    this.sellerIdCache = id;
+    return id;
   }
 
   private baseUrl(): string {
@@ -184,13 +202,10 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
   async createCharge(input: CreateChargeInput): Promise<CreateChargeResult> {
     const c = input.credenciais;
 
-    // A Valorion exige nome/e-mail/documento do pagador. Venda pela API pública
-    // e depósito de painel sempre trazem os três (o schema agora obriga); o
-    // fallback do .env cobre chamada interna/teste manual.
-    const nome =
-      input.pagador?.nome ?? this.env('VALORION_PAGADOR_PADRAO_NOME');
-    const email =
-      input.pagador?.email ?? this.env('VALORION_PAGADOR_PADRAO_EMAIL');
+    // A Valorion exige nome/e-mail/documento do pagador. Vêm da cobrança
+    // (API pública ou depósito do painel) — sem pagador padrão no .env.
+    const nome = input.pagador?.nome;
+    const email = input.pagador?.email;
     /**
      * `normalizarDocumento` e NÃO `replace(/\D/g, '')`: o segundo apaga letras,
      * e o CNPJ alfanumérico da Receita tem letras nas 12 primeiras posições —
@@ -202,13 +217,10 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
      * comportamento dela com 14 posições não está confirmado — é o que
      * investigar antes de prometer PIX com pagador PJ nesta adquirente.
      */
-    const cpf = normalizarDocumento(
-      input.pagador?.documento ?? this.env('VALORION_PAGADOR_PADRAO_CPF') ?? '',
-    );
+    const cpf = normalizarDocumento(input.pagador?.documento ?? '');
     if (!nome || !email || !cpf) {
       throw new Error(
-        'Valorion exige nome, e-mail e CPF do pagador — informe `pagador` na cobrança ' +
-          'ou configure VALORION_PAGADOR_PADRAO_* no .env',
+        'Valorion exige nome, e-mail e CPF do pagador — informe `pagador` na cobrança',
       );
     }
 
@@ -274,9 +286,9 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         : {}),
       pix: { expiresInDays },
       postbackUrl: this.postbackUrl('pix-in'),
-      // Antifraude da Valorion pede o IP do pagador; a API pública não o
-      // repassa hoje, então vai o placeholder configurável.
-      ip: this.env('VALORION_PAGADOR_PADRAO_IP') ?? '127.0.0.1',
+      // Antifraude da Valorion pede IP; a API pública ainda não repassa o do
+      // pagador — placeholder local até o contrato expor o campo.
+      ip: '127.0.0.1',
       metadata: input.idTransacaoPublico,
       traceable: false,
     };
@@ -286,7 +298,6 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
       url: `${this.filaUrl()}/v2/pix/charge`,
       headers: {
         'x-api-key': this.apiKey(c),
-        'X-Pix-Key': this.pixKey(c),
       },
       body,
       signal: input.signal,
@@ -312,9 +323,16 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
 
   async createCashOut(input: CreateCashOutInput): Promise<CreateCashOutResult> {
     const c = input.credenciais;
+    // Conta com chave livre: não há chave pré-cadastrada na Valorion. O header
+    // `X-Pix-Key` leva a chave de DESTINO deste saque (body `pixKey` = mesma).
+    if (!input.chavePix?.trim()) {
+      throw new ErroAntesDoEnvioError(
+        'Valorion cash-out: chave PIX de destino ausente',
+      );
+    }
     const authHeaders = {
       'X-API-Key': this.apiKey(c),
-      'X-Pix-Key': this.pixKey(c),
+      'X-Pix-Key': input.chavePix.trim(),
     };
 
     /**
@@ -444,9 +462,11 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
    * request). Reenviar pode devolver DUAS vezes; por isso o processor congela
    * qualquer desfecho ambíguo em vez de retentar (mesma doutrina do cash-out).
    *
+   * - `id` = seller na Valorion, resolvido via getCompany (não env).
+   * - `external_reference` = `idTransacaoPublico` (o mesmo `externaRef` do create).
+   *
    * A classificação dos erros segue o contrato do port:
-   * - pré-envio (sellerId ausente, lookup do webhook) → `ErroAntesDoEnvioError`
-   *   (nada saiu; retry é seguro);
+   * - pré-envio (getCompany falhou) → `ErroAntesDoEnvioError` (nada saiu; retry OK);
    * - HTTP 4xx exceto 408/429 → `RecusaAdquirenteError` (via `request`);
    * - 200 com `status !== success` → `RecusaAdquirenteError` (resposta
    *   explícita deles: retry dá o mesmo não);
@@ -454,43 +474,28 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
    */
   async createRefund(input: CreateRefundInput): Promise<CreateRefundResult> {
     const c = input.credenciais;
-    const sellerId = this.cred(c, 'sellerId', 'VALORION_SELLER_ID');
-    if (!sellerId) {
-      throw new ErroAntesDoEnvioError(
-        'Valorion: VALORION_SELLER_ID/credencial sellerId ausente para devolução',
-      );
-    }
 
-    // A devolução referencia a `externalreference` DELES, que só chega no
-    // webhook de pagamento — buscar lá; sem webhook, tentar com o próprio id.
-    let externalReference: string;
+    let sellerId: number;
     try {
-      const wh = await this.prisma.webhookRecebidoProvedor.findFirst({
-        where: {
-          provedor: { codigo: this.code },
-          conteudo: { path: ['idtransaction'], equals: input.idTransacaoLiquidante },
-        },
-        orderBy: { id: 'desc' },
-      });
-      const conteudo = wh?.conteudo as Record<string, unknown> | undefined;
-      externalReference = String(
-        conteudo?.externalreference ?? input.idTransacaoLiquidante,
-      );
+      sellerId = await this.resolverSellerId(c);
     } catch (e) {
-      // Banco local falhou ANTES de qualquer chamada externa — retentável.
+      if (e instanceof ErroAntesDoEnvioError) throw e;
       throw new ErroAntesDoEnvioError(
-        `Valorion refund: falha ao resolver external_reference — ${
+        `Valorion refund: falha ao resolver seller — ${
           e instanceof Error ? e.message : String(e)
         }`,
         e,
       );
     }
 
+    // Mesma chave que mandamos no create (`customer.externaRef` / metadata).
+    const externalReference = input.idTransacaoPublico;
+
     const resp = await this.request({
       method: 'POST',
       url: `${this.baseUrl()}/api/v1/gateway/api/refund/`,
       headers: { Authorization: `Basic ${this.basicKey(c)}` },
-      body: { id: Number(sellerId), external_reference: externalReference },
+      body: { id: sellerId, external_reference: externalReference },
     });
 
     if (String(resp.status ?? '') !== 'success') {
@@ -539,7 +544,7 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
    */
   async verifyTransport(input: VerifyTransportInput): Promise<boolean> {
     if (!ipAllowed(input.ip, input.allowedIps)) {
-      throw new UnauthorizedException('IP não permitido para webhook do provedor');
+      throw new UnauthorizedException(mensagemIpNaoPermitido(input.ip));
     }
     if (input.exigeAssinatura) {
       const key = (input.headers['x-key'] || input.headers['x-api-key']) as

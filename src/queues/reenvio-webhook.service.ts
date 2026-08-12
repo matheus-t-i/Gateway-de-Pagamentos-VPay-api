@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { PrismaService } from '../prisma/prisma.service';
 import { getRastreio } from '../common/request-context';
 import { QueuesService } from './queues.service';
+import { podeReenviarCallback } from '../shared/callback-lojista';
 
 /**
  * Reenvio manual do callback de uma transação (botão do painel e do admin).
@@ -29,7 +30,14 @@ export class ReenvioWebhookService {
   }) {
     const tx = await this.prisma.transacao.findUnique({
       where: { idTransacaoPublico: params.idTransacaoPublico },
-      select: { id: true, usuarioId: true, idTransacaoPublico: true, urlCallback: true },
+      select: {
+        id: true,
+        usuarioId: true,
+        idTransacaoPublico: true,
+        urlCallback: true,
+        situacao: true,
+        direcao: true,
+      },
     });
     if (!tx) throw new NotFoundException('Transação não encontrada');
     if (
@@ -37,6 +45,14 @@ export class ReenvioWebhookService {
       tx.usuarioId !== params.usuarioIdRestricao
     ) {
       throw new NotFoundException('Transação não encontrada');
+    }
+
+    if (!podeReenviarCallback(tx.situacao, tx.direcao as 'ENTRADA' | 'SAIDA')) {
+      throw new BadRequestException(
+        'Reenvio só vale em status finais com callback: cobrança paga ou MED, ' +
+          'saque concluído ou recusado. Aguardando pagamento / falha na geração ' +
+          'não geram webhook.',
+      );
     }
 
     // O evento mais recente da transação é o estado que o lojista precisa

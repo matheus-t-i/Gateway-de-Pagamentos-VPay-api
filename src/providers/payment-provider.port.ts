@@ -128,6 +128,8 @@ export type CreateRefundInput = {
   valor: Decimal;
   idTransacaoLiquidante: string;
   idTransacaoPrivado: string;
+  /** Chave de correlação com a liquidante (externaRef do create) — nunca referenciaExterna. */
+  idTransacaoPublico: string;
   idDevolucaoPublico: string;
   motivo?: string;
   credenciais: Record<string, unknown>;

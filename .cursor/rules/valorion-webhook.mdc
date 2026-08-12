@@ -1,0 +1,32 @@
+---
+description: Camada 2 Valorion — token no postbackUrl (?token=), não em header
+alwaysApply: true
+globs: "**/providers/valorion/**,**/webhooks/valorion/**"
+---
+
+# Valorion — webhook / postback
+
+A Valorion **não assina** o postback e **não envia** token no header.
+O token entra na **URL de callback no create do PIX** (`postbackUrl`), como query.
+
+Conta com **chave livre**: sem `VALORION_PIX_KEY`. Cash-in autenticado só com
+`VALORION_API_KEY`. No cash-out, `X-Pix-Key` = chave de **destino** daquele
+saque. Destino do saque automático: `TESOURARIA_CHAVE_PIX` = nome de outra env
+(ex. `CHAVE_PIX_BB_VPAY`); tipo/titular no gatilho (banco).
+
+## Obrigatório no create (cash-in e cash-out)
+
+```
+{API_PUBLIC_URL}/api/webhooks/valorion/pix-in?token={VALORION_WEBHOOK_TOKEN}
+{API_PUBLIC_URL}/api/webhooks/valorion/pix-out?token={VALORION_WEBHOOK_TOKEN}
+```
+
+`API_PUBLIC_URL` = só a origem (sem path).
+
+## Camada 2 na recepção
+
+1. Conferir `@Query('token')` com `VALORION_WEBHOOK_TOKEN` via `timingSafeEqual`.
+2. Allowlist de IP.
+3. Camada 1 (`getStatus`) antes de creditar.
+
+Envs da integração: `VALORION_API_KEY`, `VALORION_WEBHOOK_TOKEN`, `API_PUBLIC_URL`.

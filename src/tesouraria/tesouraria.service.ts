@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Decimal } from 'decimal.js';
 import {
   money,
@@ -19,6 +20,10 @@ function ehConflitoUnico(e: unknown): boolean {
  * Tesouraria: saldo da NOSSA conta em cada adquirente e o saque automático
  * desse saldo para uma chave PIX nossa.
  *
+ * Destino da chave: `TESOURARIA_CHAVE_PIX` guarda o **nome** de outra env
+ * (ex.: `CHAVE_PIX_BB_VPAY`) onde está a chave real. Tipo, nome e documento
+ * do titular vêm do gatilho no banco. Sem o ponteiro, usa `gatilho.chavePix`.
+ *
  * Nada aqui toca o ledger do lojista (`saldos_usuarios`/`movimentacoes_saldo`):
  * é dinheiro do gateway parado na adquirente, não saldo de cliente. Por isso o
  * disparo grava `ExecucaoGatilhoSaque` e NÃO uma `Transacao`, que é sempre
@@ -31,10 +36,46 @@ export class TesourariaService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly providers: ProviderRegistry,
+    private readonly config: ConfigService,
   ) {}
 
   private credenciaisDaConta(criptografadas: string): Record<string, unknown> {
     return decryptCredentials(criptografadas);
+  }
+
+  /**
+   * Resolve a chave de destino. `TESOURARIA_CHAVE_PIX=CHAVE_PIX_BB_VPAY` → lê
+   * o valor de `CHAVE_PIX_BB_VPAY`. Demais dados (tipo/titular) só do banco.
+   */
+  private destinoSaque(gatilho: {
+    chavePix: string;
+    tipoChavePix: string;
+    nomeTitular: string | null;
+    documentoTitular: string | null;
+  }) {
+    const ponteiro = this.config.get<string>('TESOURARIA_CHAVE_PIX')?.trim();
+    let chavePix = gatilho.chavePix;
+    if (ponteiro) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(ponteiro)) {
+        throw new Error(
+          `TESOURARIA_CHAVE_PIX deve ser o nome de uma variável de ambiente ` +
+            `(ex.: CHAVE_PIX_BB_VPAY), recebido: ${ponteiro.slice(0, 40)}`,
+        );
+      }
+      const resolvida = this.config.get<string>(ponteiro)?.trim();
+      if (!resolvida) {
+        throw new Error(
+          `TESOURARIA_CHAVE_PIX aponta para ${ponteiro}, mas essa variável está vazia/ausente`,
+        );
+      }
+      chavePix = resolvida;
+    }
+    return {
+      chavePix,
+      tipoChavePix: gatilho.tipoChavePix,
+      nomeBeneficiario: gatilho.nomeTitular || undefined,
+      documentoBeneficiario: gatilho.documentoTitular || undefined,
+    };
   }
 
   /**
@@ -315,13 +356,19 @@ export class TesourariaService {
 
     try {
       const provider = this.providers.get(conta.provedor.codigo);
+      const destino = this.destinoSaque(execucao.gatilho);
+      if (!destino.chavePix?.trim()) {
+        throw new Error(
+          'Chave PIX de destino do saque automático ausente — configure TESOURARIA_CHAVE_PIX=NOME_DA_ENV (e a env apontada) ou a chave no gatilho',
+        );
+      }
       const resultado = await provider.createCashOut({
         valor: money(execucao.valorSolicitado.toString()),
         idTransacaoPrivado: execucao.idPublico,
-        chavePix: execucao.gatilho.chavePix,
-        tipoChavePix: execucao.gatilho.tipoChavePix,
-        nomeBeneficiario: execucao.gatilho.nomeTitular ?? undefined,
-        documentoBeneficiario: execucao.gatilho.documentoTitular ?? undefined,
+        chavePix: destino.chavePix,
+        tipoChavePix: destino.tipoChavePix,
+        nomeBeneficiario: destino.nomeBeneficiario,
+        documentoBeneficiario: destino.documentoBeneficiario,
         credenciais: this.credenciaisDaConta(conta.credenciaisCriptografadas),
       });
 

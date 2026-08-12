@@ -39,8 +39,18 @@ export function decryptText(payload: string): string {
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
 
+/**
+ * AES-256-GCM (iv 12 + tag 16 + ciphertext). Blob vazio/curto = `{}`:
+ * as contas da Valorion/mock nascem sem credencial de propósito e o client
+ * cai no fallback de env (`VALORION_API_KEY`). Sem isto, `''` ou `'{}'` em
+ * claro viram "Invalid initialization vector" e a cobrança morre em 503
+ * ANTES de qualquer chamada à liquidante.
+ */
 export function decryptCredentials(payload: string): Record<string, unknown> {
+  if (!payload || payload.trim() === '') return {};
   const buf = Buffer.from(payload, 'base64');
+  // Mínimo GCM: 12 (IV) + 16 (tag). Abaixo disso nunca foi AES nosso.
+  if (buf.length < 28) return {};
   const iv = buf.subarray(0, 12);
   const tag = buf.subarray(12, 28);
   const data = buf.subarray(28);
