@@ -5,6 +5,7 @@ import {
   nomeExibicaoValorion,
 } from './valorion.codigos';
 import {
+  chavePixParaValorion,
   recusaDefinitivaNoAuth,
   ValorionPaymentProvider,
 } from './valorion.client';
@@ -196,5 +197,92 @@ describe('Valorion cash-out — recusa definitiva no auth', () => {
         new RecusaAdquirenteError('Valorion HTTP 401: Unauthorized'),
       ),
     ).toBe(false);
+  });
+
+  it('chave não autorizada na conta também é recusa definitiva', () => {
+    expect(
+      recusaDefinitivaNoAuth(
+        new RecusaAdquirenteError(
+          'Valorion HTTP 401: {"message":"X-Pix-Key não pertence a este usuário"}',
+        ),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('Valorion cash-out — formato da chave de destino', () => {
+  // Confirmado contra a API real (ago/2026): `+5562…` e `5562…` tomam 401
+  // "X-Pix-Key inválida"; só DDD+número passa. A doc deles pede "apenas
+  // números para CPF/CNPJ/PHONE".
+  it('TELEFONE sai como DDD+número, aceitando o E.164 que os callers montam', () => {
+    expect(chavePixParaValorion('TELEFONE', '+5562981809423')).toBe('62981809423');
+    expect(chavePixParaValorion('TELEFONE', '5562981809423')).toBe('62981809423');
+    expect(chavePixParaValorion('TELEFONE', '62981809423')).toBe('62981809423');
+    expect(chavePixParaValorion('TELEFONE', '(62) 98180-9423')).toBe('62981809423');
+  });
+
+  it('demais tipos seguem o valor recebido', () => {
+    expect(chavePixParaValorion('EMAIL', 'loja@destino.com')).toBe('loja@destino.com');
+    expect(chavePixParaValorion('CPF', '52998224725')).toBe('52998224725');
+    expect(
+      chavePixParaValorion('ALEATORIA', '7376c5e6-265f-4a3b-9669-5ecbc689dc69'),
+    ).toBe('7376c5e6-265f-4a3b-9669-5ecbc689dc69');
+  });
+
+  it('createCashOut manda a chave sem +55 no header X-Pix-Key E no body pixKey', async () => {
+    const chamadas: {
+      url: string;
+      headers: Record<string, string>;
+      body?: Record<string, unknown>;
+    }[] = [];
+    const config = {
+      get: (nome: string) =>
+        (
+          ({
+            VALORION_API_KEY: 'chave',
+            API_PUBLIC_URL: 'https://api.teste.local',
+            VALORION_WEBHOOK_TOKEN: 'tok',
+          }) as Record<string, string>
+        )[nome],
+    } as unknown as ConfigService;
+    const provider = new ValorionPaymentProvider(
+      {} as unknown as PrismaService,
+      config,
+      'valorion',
+    );
+    const fetchOriginal = global.fetch;
+    global.fetch = (async (url: string, init: { headers: Record<string, string>; body?: string }) => {
+      chamadas.push({
+        url: String(url),
+        headers: init.headers,
+        body: init.body ? (JSON.parse(init.body) as Record<string, unknown>) : undefined,
+      });
+      const corpo = String(url).includes('/auth')
+        ? { access_token: 'bearer-teste' }
+        : { status: 'success', idTransaction: 'liq-out' };
+      return { ok: true, status: 200, text: async () => JSON.stringify(corpo) };
+    }) as unknown as typeof fetch;
+    try {
+      const { Decimal } = await import('decimal.js');
+      await provider.createCashOut({
+        valor: new Decimal('20.00'),
+        idTransacaoPrivado: 'priv-saque',
+        chavePix: '+5562981809423',
+        tipoChavePix: 'TELEFONE',
+        nomeBeneficiario: 'Fulano',
+        documentoBeneficiario: '52998224725',
+        credenciais: {},
+      } as never);
+    } finally {
+      global.fetch = fetchOriginal;
+    }
+    expect(chamadas).toHaveLength(2);
+    const [auth, create] = chamadas;
+    expect(auth.url).toContain('/v2/pix/transaction/auth');
+    expect(auth.headers['X-Pix-Key']).toBe('62981809423');
+    expect(create.url).toContain('/v2/pix/transaction/create');
+    expect(create.headers['X-Pix-Key']).toBe('62981809423');
+    expect(create.body?.pixKey).toBe('62981809423');
+    expect(create.body?.pixType).toBe('PHONE');
   });
 });

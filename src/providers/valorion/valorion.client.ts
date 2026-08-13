@@ -19,7 +19,7 @@ import {
   RecusaAdquirenteError,
   VerifyTransportInput,
 } from '../payment-provider.port';
-import { chavePixParaLiquidante, money, normalizarDocumento } from '../../shared';
+import { digitosTelefoneChavePix, money, normalizarDocumento } from '../../shared';
 import { origemApiPublica } from '../../common/api-prefix';
 import { extrairValorDePayload } from '../valor-remoto.util';
 
@@ -34,8 +34,24 @@ export function recusaDefinitivaNoAuth(erro: RecusaAdquirenteError): boolean {
     m.includes('cash-out desabilitado') ||
     m.includes('x-pix-key inválida') ||
     m.includes('x-pix-key invalida') ||
+    m.includes('não pertence a este usuário') ||
+    m.includes('nao pertence a este usuario') ||
     m.includes('acesso bloqueado')
   );
+}
+
+/**
+ * Chave de destino no formato da VALORION — que NÃO é o E.164 dos callers:
+ * a doc deles pede "apenas números para CPF/CNPJ/PHONE", e o `/auth` recusa
+ * `+5562…`/`5562…` com 401 "X-Pix-Key inválida" (confirmado em produção,
+ * ago/2026). TELEFONE sai como DDD+número (`62981809423`); os demais tipos
+ * seguem o valor recebido. Idempotente: aceita tanto o valor gravado quanto
+ * o E.164 que o processor/tesouraria já montam.
+ */
+export function chavePixParaValorion(tipo: string, chave: string): string {
+  if ((tipo ?? '').toUpperCase() !== 'TELEFONE') return (chave ?? '').trim();
+  const dddNumero = digitosTelefoneChavePix(chave);
+  return dddNumero.length >= 10 ? dddNumero : (chave ?? '').trim();
 }
 
 /**
@@ -44,8 +60,9 @@ export function recusaDefinitivaNoAuth(erro: RecusaAdquirenteError): boolean {
  * Dois hosts: o painel (`app.valorion.com.br`, autenticação Basic) responde
  * consulta de status, saldo e devolução; a fila de cash-in/out
  * (`api-fila-cash-in-out.onrender.com`) cria cobrança (`x-api-key`) e saque
- * (`x-api-key` + `X-Pix-Key` = chave de **destino** — conta com chave livre,
- * sem chave pré-cadastrada na Valorion).
+ * (`x-api-key` + `X-Pix-Key` = chave de **destino**, que precisa estar
+ * AUTORIZADA na conta Valorion — cadastro prévio com o time deles; telefone
+ * em dígitos DDD+número, ver `chavePixParaValorion`).
  *
  * Credenciais: `contas_provedor.credenciaisCriptografadas` com fallback
  * `VALORION_API_KEY` / `VALORION_02_API_KEY` … `VALORION_05_API_KEY` conforme
@@ -352,16 +369,16 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
 
   async createCashOut(input: CreateCashOutInput): Promise<CreateCashOutResult> {
     const c = input.credenciais;
-    // Conta com chave livre: não há chave pré-cadastrada na Valorion. O header
-    // `X-Pix-Key` leva a chave de DESTINO deste saque (body `pixKey` = mesma).
+    // O header `X-Pix-Key` leva a chave de DESTINO deste saque (body `pixKey`
+    // = mesma) — e a Valorion só autoriza chave PRÉ-CADASTRADA na conta
+    // (cadastro via time deles); chave fora da lista volta 401 "não pertence
+    // a este usuário", tratado como recusa definitiva.
     if (!input.chavePix?.trim()) {
       throw new ErroAntesDoEnvioError(
         'Valorion cash-out: chave PIX de destino ausente',
       );
     }
-    // TELEFONE no cadastro é DDD+número; a Valorion espera E.164 (+55…).
-    // Idempotente se o caller já tiver montado o destino da liquidante.
-    const chaveDestino = chavePixParaLiquidante(
+    const chaveDestino = chavePixParaValorion(
       input.tipoChavePix,
       input.chavePix,
     );
