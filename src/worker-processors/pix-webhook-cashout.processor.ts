@@ -47,8 +47,21 @@ export class PixWebhookCashoutProcessor extends WorkerHost {
     if (!tentativa) throw new Error('Tx cash-out não encontrada');
     const tx = tentativa.transacao;
 
-    // Recupera o vínculo se o worker morreu entre o aceite e o update.
-    if (liquidanteId && !tentativa.idTransacaoLiquidante) {
+    /**
+     * Amarra o id de LIQUIDAÇÃO à tentativa. Dois casos:
+     *
+     * - tentativa sem id: o worker morreu entre o aceite e o update;
+     * - id gravado DIFERENTE do que veio no webhook: liquidante cujo create
+     *   devolve id de ORDEM e não de liquidação (Valorion). Quem vale para
+     *   consulta de status e reconciliação é o do webhook — o da ordem
+     *   continua guardado em `dadosResposta` (a resposta do create, que o
+     *   admin vê no botão "Resposta do banco"), então nada se perde.
+     *
+     * O webhook já passou pela Camada 2 e só chegou aqui porque casou com um
+     * id que só nós e a liquidante conhecemos; a Camada 1 logo abaixo ainda
+     * confirma esse id na API deles antes de qualquer efeito em dinheiro.
+     */
+    if (liquidanteId && tentativa.idTransacaoLiquidante !== liquidanteId) {
       await this.prisma.tentativaTransacao.update({
         where: { id: tentativa.id },
         data: {
@@ -202,18 +215,50 @@ export class PixWebhookCashoutProcessor extends WorkerHost {
       }
     }
 
-    const refPrivada = String(
+    const ref = String(
       body.externaRef ??
         body.externalRef ??
         body.externa_ref ??
+        body.externalreference ??
         body.metadata ??
         '',
     ).trim();
-    if (!refPrivada) return null;
+    if (!ref) return null;
+
+    /**
+     * A referência ecoada pode ser DE DOIS DONOS, e as duas são id exato
+     * (nunca heurística):
+     *
+     * 1. **Da liquidante** — é o caso da Valorion, que tem DOIS ids no saque:
+     *    o `create` devolve o id da ORDEM (que ela também chama de
+     *    `externalreference`) e só o webhook traz o id da LIQUIDAÇÃO
+     *    (`idtransaction`), único que a consulta de status aceita. Como
+     *    guardamos o que o create deu, o casamento tem que ser
+     *    `externalreference` do webhook × `idTransacaoLiquidante` gravado —
+     *    senão o saque é pago, o webhook não acha a transação e ela morre em
+     *    PROCESSANDO com o dinheiro já debitado (visto em produção,
+     *    ago/2026).
+     * 2. **Nossa** — liquidante que ecoa a referência que mandamos no create
+     *    (a Valorion NÃO aceita esse campo no saque; vale para as demais).
+     */
+    const porIdDaOrdem = await this.prisma.tentativaTransacao.findFirst({
+      where: {
+        idTransacaoLiquidante: ref,
+        transacao: { direcao: 'SAIDA' },
+      },
+      include,
+      orderBy: { id: 'desc' },
+    });
+    if (porIdDaOrdem) {
+      if (porIdDaOrdem.transacao.contaProvedor?.provedor.codigo !== provider) {
+        throw new Error('Mismatch provedor cash-out');
+      }
+      return porIdDaOrdem;
+    }
 
     const porRef = await this.prisma.tentativaTransacao.findFirst({
       where: {
-        transacao: { idTransacaoPrivado: refPrivada, direcao: 'SAIDA' },
+        transacao: { idTransacaoPrivado: ref, direcao: 'SAIDA' },
         situacao: { in: [SITUACAO_TENTATIVA.ENVIANDO, SITUACAO_TENTATIVA.SUCESSO] },
       },
       include,

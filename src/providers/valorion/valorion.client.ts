@@ -440,11 +440,20 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
      * sem confirmar na doc deles.
      *
      * Consequência aceita: **não há como plantar referência nossa no saque**.
-     * O `externalreference` do postback é gerado por ELES, então a correlação
-     * do webhook depende do `idTransaction` da resposta abaixo (matcher
-     * primário do `PixWebhookCashOutProcessor`) — o fallback por referência
-     * nossa não vale para a Valorion. Crash entre o POST e a gravação do
-     * `idTransacaoLiquidante` = reconciliação manual, por limitação da API.
+     * Crash entre o POST e a gravação da resposta = reconciliação manual.
+     *
+     * ⚠️ **O `idTransaction` devolvido aqui NÃO é o id da liquidação.** É o id
+     * da ORDEM — a Valorion repete o mesmo valor em `externalreference` — e
+     * ele responde **404 na consulta de status**. O id consultável
+     * (`idtransaction`) só existe depois, no postback. Por isso:
+     *
+     * - o webhook casa por `externalreference` × este id
+     *   (`PixWebhookCashOutProcessor.resolverTentativa`) e, ao casar, grava o
+     *   id da liquidação por cima — é ele que serve para consultar depois;
+     * - saque cujo postback NUNCA chegue fica sem recuperação automática: a
+     *   conciliação consultaria este id e levaria 404. Some em
+     *   `/admin/dinheiro-parado` para conferência humana, que é o certo —
+     *   melhor parar à vista do que decidir dinheiro com id errado.
      */
     const resp = await this.request({
       method: 'POST',
