@@ -56,6 +56,7 @@ describe('conta padrão da adquirente', () => {
       {} as unknown as ReenvioWebhookService,
       {} as never,
       {} as never,
+      {} as never,
     );
 
     const sufixo = String(Date.now()).slice(-9);

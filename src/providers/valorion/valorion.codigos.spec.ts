@@ -257,8 +257,10 @@ describe('Valorion cash-out — formato da chave de destino', () => {
         headers: init.headers,
         body: init.body ? (JSON.parse(init.body) as Record<string, unknown>) : undefined,
       });
+      // Forma REAL da resposta do auth (produção, ago/2026): o campo é
+      // `token`, não `access_token`.
       const corpo = String(url).includes('/auth')
-        ? { access_token: 'bearer-teste' }
+        ? { token: 'bearer-teste', expires_in: 180, token_type: 'Bearer' }
         : { status: 'success', idTransaction: 'liq-out' };
       return { ok: true, status: 200, text: async () => JSON.stringify(corpo) };
     }) as unknown as typeof fetch;
@@ -282,6 +284,7 @@ describe('Valorion cash-out — formato da chave de destino', () => {
     expect(auth.headers['X-Pix-Key']).toBe('62981809423');
     expect(create.url).toContain('/v2/pix/transaction/create');
     expect(create.headers['X-Pix-Key']).toBe('62981809423');
+    expect(create.headers['Authorization']).toBe('Bearer bearer-teste');
     expect(create.body?.pixKey).toBe('62981809423');
     expect(create.body?.pixType).toBe('PHONE');
   });

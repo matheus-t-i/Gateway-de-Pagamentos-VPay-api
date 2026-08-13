@@ -413,10 +413,12 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         e,
       );
     }
-    const token = String(auth.access_token ?? '');
+    // O campo real da resposta é `token` (visto em produção, ago/2026);
+    // `access_token` fica como fallback caso eles migrem para o nome OAuth.
+    const token = String(auth.token ?? auth.access_token ?? '');
     if (!token) {
       throw new ErroAntesDoEnvioError(
-        `Valorion cash-out auth sem access_token: ${JSON.stringify(auth).slice(0, 300)}`,
+        `Valorion cash-out auth sem token: ${JSON.stringify(auth).slice(0, 300)}`,
       );
     }
 

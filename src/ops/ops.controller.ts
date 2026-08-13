@@ -47,6 +47,7 @@ import {
 } from '../common/step-up-totp';
 import { CashInCreditoService } from '../retencao/cashin-credito.service';
 import { RelatorioMetodoService } from './relatorio-metodo.service';
+import { RelatorioResultadoService } from './relatorio-resultado.service';
 
 /**
  * Valida um IP ou CIDR (IPv4 e IPv6, ex.: `2804:14c::/64`) e devolve a forma
@@ -167,6 +168,7 @@ export class AdminOpsController {
     private readonly reenvioWebhook: ReenvioWebhookService,
     private readonly cashInCredito: CashInCreditoService,
     private readonly relatorioMetodo: RelatorioMetodoService,
+    private readonly apuracaoResultado: RelatorioResultadoService,
   ) {}
 
   /**
@@ -250,255 +252,21 @@ export class AdminOpsController {
 
   /**
    * Relatório "Apuração de Resultado (Lucro × Custo)": confronta a receita
-   * efetivamente cobrada do cliente (tarifa persistida na operação) com o custo
-   * configurado da adquirente. Usa valores PERSISTIDOS na transação, então
-   * mudanças posteriores de config não reescrevem o histórico.
+   * efetivamente cobrada do cliente (tarifa persistida em venda PAGA) com o
+   * custo persistido da adquirente. Mudanças posteriores de config não
+   * reescrevem o histórico.
    */
   @Get('relatorios/resultado')
   @RequerPermissao(PERMISSOES.ADMIN_RELATORIOS_VER)
   async relatorioResultado(@Query() q: Record<string, string>) {
-    const hoje = new Date();
-    const inicio = q.dataInicial
-      ? new Date(q.dataInicial + 'T00:00:00')
-      : new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
-    const fim = q.dataFinal
-      ? new Date(q.dataFinal + 'T23:59:59.999')
-      : new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate(), 23, 59, 59, 999);
-    const tipo =
-      q.tipo === 'cash-in' || q.tipo === 'cash-out' ? q.tipo : undefined;
-    const buscaCliente = (q.cliente ?? '').trim().toLowerCase();
-    const filtroAdq = (q.adquirente ?? '').trim();
-    const filtroResultado = q.resultado;
-
-    const CONCLUIDA = SITUACAO_TRANSACAO.CONCLUIDA;
-    const LIQ = SITUACAO_TRANSACAO.LIQUIDADA;
-    const AG = SITUACAO_TRANSACAO.AGUARDANDO_PAGAMENTO;
-
-    const cond: Array<Record<string, unknown>> = [];
-    if (!tipo || tipo === 'cash-in') {
-      cond.push({ direcao: 'ENTRADA', situacao: { in: [CONCLUIDA, LIQ] as never } });
-      cond.push({ direcao: 'ENTRADA', situacao: AG }); // vendas retidas
-    }
-    if (!tipo || tipo === 'cash-out') {
-      cond.push({ direcao: 'SAIDA', situacao: CONCLUIDA });
-    }
-
-    const txs = await this.prisma.transacao.findMany({
-      where: { criadoEm: { gte: inicio, lte: fim }, OR: cond as never },
-      select: {
-        usuarioId: true,
-        direcao: true,
-        situacao: true,
-        valorBruto: true,
-        valorTarifaPix: true,
-        valorCustoPixProvedor: true,
-        valorMargemBruta: true,
-        contaProvedorId: true,
-      },
-      take: 200000,
+    return this.apuracaoResultado.gerar({
+      dataInicial: q.dataInicial,
+      dataFinal: q.dataFinal,
+      tipo: q.tipo,
+      cliente: q.cliente,
+      adquirente: q.adquirente,
+      resultado: q.resultado,
     });
-
-    const usuarioIds = [...new Set(txs.map((t) => t.usuarioId))];
-    const contaIds = [
-      ...new Set(txs.map((t) => t.contaProvedorId).filter(Boolean)),
-    ] as bigint[];
-    const [donos, contas] = await Promise.all([
-      this.prisma.usuario.findMany({
-        where: { id: { in: usuarioIds } },
-        select: {
-          id: true,
-          idPublico: true,
-          nomeRazaoSocial: true,
-          email: true,
-        },
-      }),
-      this.prisma.contaProvedor.findMany({
-        where: { id: { in: contaIds } },
-        select: { id: true, provedor: { select: { codigo: true, nome: true } } },
-      }),
-    ]);
-    const donoMap = new Map(donos.map((u) => [u.id.toString(), u]));
-    const contaMap = new Map(contas.map((c) => [c.id.toString(), c.provedor]));
-
-    const num = (d: unknown) => Number((d as { toString(): string })?.toString?.() ?? 0);
-    const f2 = (n: number) => n.toFixed(2);
-    const statusDe = (r: number) =>
-      r > 0.0001 ? 'Lucro' : r < -0.0001 ? 'Prejuízo' : 'Neutro';
-
-    type Det = {
-      tipo: string;
-      adquirente: string;
-      operacoes: number;
-      volume: number;
-      receita: number;
-      custo: number;
-      resultado: number;
-    };
-    type Cli = {
-      idPublico: string;
-      nome: string;
-      email: string;
-      operacoes: number;
-      volume: number;
-      receita: number;
-      custo: number;
-      resultado: number;
-      retido: number;
-      retidoOps: number;
-      custoAusente: boolean;
-      adqSet: Set<string>;
-      dets: Map<string, Det>;
-    };
-    const clientes = new Map<string, Cli>();
-
-    for (const t of txs) {
-      const dono = donoMap.get(t.usuarioId.toString());
-      if (!dono) continue;
-      const nome = dono.nomeRazaoSocial;
-      const email = dono.email;
-      if (
-        buscaCliente &&
-        !(
-          nome.toLowerCase().includes(buscaCliente) ||
-          email.toLowerCase().includes(buscaCliente) ||
-          dono.idPublico.toLowerCase().includes(buscaCliente)
-        )
-      )
-        continue;
-      const prov = t.contaProvedorId
-        ? contaMap.get(t.contaProvedorId.toString())
-        : null;
-      const adqCodigo = prov?.codigo ?? '—';
-      if (filtroAdq && adqCodigo !== filtroAdq) continue;
-
-      const retida = t.direcao === 'ENTRADA' && t.situacao === AG;
-      const volume = num(t.valorBruto);
-      const receita = retida ? volume : num(t.valorTarifaPix);
-      const custo = retida ? 0 : num(t.valorCustoPixProvedor);
-      const resultado = retida ? volume : num(t.valorMargemBruta);
-      const tipoLabel = t.direcao === 'ENTRADA' ? 'Cash-in' : 'Cash-out';
-
-      let cli = clientes.get(t.usuarioId.toString());
-      if (!cli) {
-        cli = {
-          idPublico: dono.idPublico,
-          nome,
-          email,
-          operacoes: 0,
-          volume: 0,
-          receita: 0,
-          custo: 0,
-          resultado: 0,
-          retido: 0,
-          retidoOps: 0,
-          custoAusente: false,
-          adqSet: new Set(),
-          dets: new Map(),
-        };
-        clientes.set(t.usuarioId.toString(), cli);
-      }
-      cli.operacoes++;
-      cli.volume += volume;
-      cli.receita += receita;
-      cli.custo += custo;
-      cli.resultado += resultado;
-      cli.adqSet.add(adqCodigo);
-      if (retida) {
-        cli.retido += volume;
-        cli.retidoOps++;
-      } else if (custo === 0) {
-        cli.custoAusente = true;
-      }
-      const dk = `${tipoLabel}|${adqCodigo}`;
-      let det = cli.dets.get(dk);
-      if (!det) {
-        det = {
-          tipo: tipoLabel,
-          adquirente: adqCodigo,
-          operacoes: 0,
-          volume: 0,
-          receita: 0,
-          custo: 0,
-          resultado: 0,
-        };
-        cli.dets.set(dk, det);
-      }
-      det.operacoes++;
-      det.volume += volume;
-      det.receita += receita;
-      det.custo += custo;
-      det.resultado += resultado;
-    }
-
-    let lista = [...clientes.values()];
-    if (filtroResultado === 'lucro') lista = lista.filter((c) => c.resultado > 0.0001);
-    else if (filtroResultado === 'prejuizo')
-      lista = lista.filter((c) => c.resultado < -0.0001);
-    else if (filtroResultado === 'neutro')
-      lista = lista.filter((c) => Math.abs(c.resultado) <= 0.0001);
-    lista.sort((a, b) => b.resultado - a.resultado);
-
-    const volumeTotal = lista.reduce((s, c) => s + c.volume, 0);
-    const receitaTotal = lista.reduce((s, c) => s + c.receita, 0);
-    const custoTotal = lista.reduce((s, c) => s + c.custo, 0);
-    const resultadoTotal = receitaTotal - custoTotal;
-    const retidasTotal = lista.reduce((s, c) => s + c.retido, 0);
-    const retidasOps = lista.reduce((s, c) => s + c.retidoOps, 0);
-
-    return {
-      filtros: {
-        dataInicial: inicio.toISOString().slice(0, 10),
-        dataFinal: fim.toISOString().slice(0, 10),
-        tipo: tipo ?? 'todos',
-        adquirente: filtroAdq || 'todas',
-        resultado: filtroResultado ?? 'todos',
-      },
-      kpis: {
-        volumeProcessado: f2(volumeTotal),
-        receitaCobrada: f2(receitaTotal),
-        custoAdquirentes: f2(custoTotal),
-        resultadoLiquido: f2(resultadoTotal),
-        vendasRetidas: f2(retidasTotal),
-        vendasRetidasOps: retidasOps,
-        margemSobreVolume: f2(volumeTotal > 0 ? (resultadoTotal / volumeTotal) * 100 : 0),
-        operacoes: lista.reduce((s, c) => s + c.operacoes, 0),
-        clientesLucrativos: lista.filter((c) => c.resultado > 0.0001).length,
-        clientesPrejuizo: lista.filter((c) => c.resultado < -0.0001).length,
-        clientesNeutros: lista.filter((c) => Math.abs(c.resultado) <= 0.0001).length,
-        clientesCustoAusente: lista.filter((c) => c.custoAusente).length,
-      },
-      clientes: lista.map((c) => ({
-        idPublico: c.idPublico,
-        nome: c.nome,
-        email: c.email,
-        operacoes: c.operacoes,
-        volume: f2(c.volume),
-        receita: f2(c.receita),
-        custo: f2(c.custo),
-        resultado: f2(c.resultado),
-        margem: f2(c.volume > 0 ? (c.resultado / c.volume) * 100 : 0),
-        status: statusDe(c.resultado),
-        adquirentes: c.adqSet.size,
-        retido: f2(c.retido),
-        retidoOps: c.retidoOps,
-        custoAusente: c.custoAusente,
-        detalhes: [...c.dets.values()]
-          .map((d) => ({
-            tipo: d.tipo,
-            adquirente: d.adquirente,
-            operacoes: d.operacoes,
-            volume: f2(d.volume),
-            receita: f2(d.receita),
-            custo: f2(d.custo),
-            resultado: f2(d.resultado),
-            margem: f2(d.volume > 0 ? (d.resultado / d.volume) * 100 : 0),
-            taxaCliente: f2(d.volume > 0 ? (d.receita / d.volume) * 100 : 0),
-            status: statusDe(d.resultado),
-          }))
-          .sort((a, b) => Number(b.resultado) - Number(a.resultado)),
-      })),
-      total: lista.length,
-    };
   }
 
   /**
@@ -540,10 +308,22 @@ export class AdminOpsController {
       ];
 
       /**
-       * `id_transacao_publico` é coluna UUID: o Postgres não faz LIKE em uuid e
-       * o Prisma recusa `contains` nesse tipo. Só que a tabela mostra o id
-       * ABREVIADO (#6147dbe2), então o que o admin copia da tela é um PREFIXO —
-       * comparar por igualdade nunca acha. Resolve com cast em SQL cru.
+       * Correlação com o Redis/Bull: o job de saque/webhook carrega
+       * `transacaoId` (id interno, que também é o sufixo do jobId `saque-7`)
+       * e `idTransacaoPrivado` — os dois têm que achar a transação aqui,
+       * senão o operador vê o job na fila e não encontra a linha no relatório.
+       * Aceita o jobId colado inteiro (`saque-7`, `webhook-out-7`).
+       */
+      const idInterno = /^(?:saque-|webhook-(?:in|out)-)?(\d{1,18})$/i.exec(busca);
+      if (idInterno) orBusca.push({ id: BigInt(idInterno[1]) });
+
+      /**
+       * `id_transacao_publico` e `id_transacao_privado` são colunas UUID: o
+       * Postgres não faz LIKE em uuid e o Prisma recusa `contains` nesse tipo.
+       * Só que a tabela mostra o id ABREVIADO (#6147dbe2), então o que o admin
+       * copia da tela é um PREFIXO — comparar por igualdade nunca acha.
+       * Resolve com cast em SQL cru, nas DUAS colunas (o privado é o que o
+       * job da fila mostra).
        *
        * O termo é reduzido a [0-9a-f-], o que também elimina os curingas `%`/`_`
        * do LIKE. Mínimo de 4 caracteres: com menos, o prefixo é genérico demais
@@ -554,6 +334,7 @@ export class AdminOpsController {
         const achados = await this.prisma.$queryRaw<Array<{ id: bigint }>>`
           SELECT id FROM transacoes
           WHERE id_transacao_publico::text LIKE ${prefixo + '%'}
+             OR id_transacao_privado::text LIKE ${prefixo + '%'}
           LIMIT 5000
         `;
         if (achados.length) orBusca.push({ id: { in: achados.map((r) => r.id) } });

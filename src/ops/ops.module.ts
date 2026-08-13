@@ -10,6 +10,7 @@ import {
   WebhooksClienteController,
 } from './ops.controller';
 import { RelatorioMetodoService } from './relatorio-metodo.service';
+import { RelatorioResultadoService } from './relatorio-resultado.service';
 
 @Module({
   imports: [AuthModule, TesourariaModule, ProvidersModule, RetencaoModule],
@@ -19,6 +20,6 @@ import { RelatorioMetodoService } from './relatorio-metodo.service';
     PainelDashboardController,
     WebhooksClienteController,
   ],
-  providers: [RelatorioMetodoService],
+  providers: [RelatorioMetodoService, RelatorioResultadoService],
 })
 export class OpsModule {}
