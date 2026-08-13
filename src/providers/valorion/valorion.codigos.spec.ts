@@ -287,5 +287,19 @@ describe('Valorion cash-out — formato da chave de destino', () => {
     expect(create.headers['Authorization']).toBe('Bearer bearer-teste');
     expect(create.body?.pixKey).toBe('62981809423');
     expect(create.body?.pixType).toBe('PHONE');
+
+    /**
+     * O body do cash-out é WHITELIST: campo extra volta 400
+     * `VALIDATION_ERROR`. Foi assim que o `externaRef` derrubou o saque em
+     * produção (ago/2026). Este assert falha se alguém acrescentar campo.
+     */
+    expect(Object.keys(create.body ?? {}).sort()).toEqual([
+      'amount',
+      'beneficiaryDocument',
+      'beneficiaryName',
+      'pixKey',
+      'pixType',
+      'postbackUrl',
+    ]);
   });
 });

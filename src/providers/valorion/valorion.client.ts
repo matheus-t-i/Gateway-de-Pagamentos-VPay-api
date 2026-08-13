@@ -430,9 +430,22 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
       ALEATORIA: 'RANDOM',
     };
 
-    // Etapa 2 — criação do saque.
-    // `externaRef` = id nosso: se o worker morrer entre o aceite e gravar
-    // `idTransacaoLiquidante`, o postback ainda pode correlacionar pela ref.
+    /**
+     * Etapa 2 — criação do saque.
+     *
+     * ⚠️ O body do cash-out é uma WHITELIST de 6 campos: qualquer extra volta
+     * 400 `VALIDATION_ERROR` ("property X should not exist"). Foi o que
+     * derrubou o `externaRef` com o nosso `idTransacaoPrivado` (ago/2026) —
+     * diferente da COBRANÇA, que aceita o campo. Não acrescentar campo aqui
+     * sem confirmar na doc deles.
+     *
+     * Consequência aceita: **não há como plantar referência nossa no saque**.
+     * O `externalreference` do postback é gerado por ELES, então a correlação
+     * do webhook depende do `idTransaction` da resposta abaixo (matcher
+     * primário do `PixWebhookCashOutProcessor`) — o fallback por referência
+     * nossa não vale para a Valorion. Crash entre o POST e a gravação do
+     * `idTransacaoLiquidante` = reconciliação manual, por limitação da API.
+     */
     const resp = await this.request({
       method: 'POST',
       url: `${this.filaUrl()}/v2/pix/transaction/create`,
@@ -445,7 +458,6 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
         // `normalizarDocumento` pelo mesmo motivo do cash-in: `replace(/\D/g,'')`
         // apagaria as letras de um CNPJ alfanumérico e o DICT nunca casaria.
         beneficiaryDocument: normalizarDocumento(input.documentoBeneficiario ?? ''),
-        externaRef: input.idTransacaoPrivado,
         postbackUrl: this.postbackUrl('pix-out'),
       },
     });
