@@ -3,7 +3,9 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job, UnrecoverableError } from 'bullmq';
 import { Prisma } from '@prisma/client';
 import {
+  checarLimiteValor,
   ESCOPOS_API,
+  OPERACAO_LIMITE,
   PixJobPayload,
   QUEUE_NAMES,
   SITUACAO_CHAVE_PIX,
@@ -202,12 +204,19 @@ export class PixCashOutProcessor extends WorkerHost {
     // ── 6. Limites e permissão de saque ───────────────────────────────────
     const cfg = await this.configPix.resolverEfetiva(tx.usuarioId);
     const valor = money(tx.valorBruto.toString());
-    if (valor.lt(cfg.ticketMinimoPixSaida)) {
-      throw new SaqueBloqueadoError('valor abaixo do mínimo vigente');
-    }
-    if (cfg.ticketMaximoPixSaida && valor.gt(cfg.ticketMaximoPixSaida)) {
-      throw new SaqueBloqueadoError('valor acima do máximo vigente');
-    }
+    /**
+     * Mesma frase da criação: este bloqueio vira FALHA + estorno e o motivo
+     * chega ao lojista no histórico e no callback. "valor abaixo do mínimo"
+     * sem número não explica nada a quem já viu o saque ser aceito — aqui a
+     * regra pode ter MUDADO depois da criação (limite editado pelo admin com
+     * a ordem já na fila), então dizer a faixa vigente é o que faz sentido.
+     */
+    const foraDaFaixa = checarLimiteValor(
+      valor,
+      { minimo: cfg.ticketMinimoPixSaida, maximo: cfg.ticketMaximoPixSaida },
+      OPERACAO_LIMITE.SAQUE,
+    );
+    if (foraDaFaixa) throw new SaqueBloqueadoError(foraDaFaixa.message);
     try {
       await this.saqueProtecao.assertSaquePermitido({
         usuarioId: tx.usuarioId,

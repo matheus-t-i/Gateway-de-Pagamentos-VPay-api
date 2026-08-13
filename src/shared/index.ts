@@ -1,5 +1,7 @@
 export * from './queues';
 export * from './money';
+export * from './limites-valor';
+export * from './fuso-brasilia';
 export * from './enums';
 export * from './permissoes';
 export * from './situacoes';

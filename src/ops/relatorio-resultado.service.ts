@@ -1,6 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { money, moneyToString, SITUACAO_TRANSACAO } from '../shared';
+import {
+  diaCivilBrasilia,
+  fimDoDiaBrasilia,
+  inicioDoDiaBrasilia,
+  inicioDoDiaCivil,
+  fimDoDiaCivil,
+  money,
+  moneyToString,
+  SITUACAO_TRANSACAO,
+} from '../shared';
 
 type FiltrosResultado = {
   dataInicial?: string;
@@ -31,24 +40,6 @@ const SITUACOES_CASH_IN_PAGO: string[] = [
 
 /** Cash-out que de fato saiu. PROCESSANDO ainda pode falhar na liquidante. */
 const SITUACOES_CASH_OUT_PAGO: string[] = [SITUACAO_TRANSACAO.CONCLUIDA];
-
-function hojeInicio(): Date {
-  const hoje = new Date();
-  return new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
-}
-
-function hojeFim(): Date {
-  const hoje = new Date();
-  return new Date(
-    hoje.getFullYear(),
-    hoje.getMonth(),
-    hoje.getDate(),
-    23,
-    59,
-    59,
-    999,
-  );
-}
 
 function statusDe(r: ReturnType<typeof money>): 'Lucro' | 'Prejuízo' | 'Neutro' {
   if (r.gt('0.0001')) return 'Lucro';
@@ -81,11 +72,11 @@ export class RelatorioResultadoService {
    */
   async gerar(q: FiltrosResultado) {
     const inicio = q.dataInicial
-      ? new Date(q.dataInicial + 'T00:00:00')
-      : hojeInicio();
+      ? (inicioDoDiaCivil(q.dataInicial) ?? inicioDoDiaBrasilia())
+      : inicioDoDiaBrasilia();
     const fim = q.dataFinal
-      ? new Date(q.dataFinal + 'T23:59:59.999')
-      : hojeFim();
+      ? (fimDoDiaCivil(q.dataFinal) ?? fimDoDiaBrasilia())
+      : fimDoDiaBrasilia();
     const tipo =
       q.tipo === 'cash-in' || q.tipo === 'cash-out' ? q.tipo : undefined;
     const buscaCliente = (q.cliente ?? '').trim().toLowerCase();
@@ -289,8 +280,8 @@ export class RelatorioResultadoService {
 
     return {
       filtros: {
-        dataInicial: inicio.toISOString().slice(0, 10),
-        dataFinal: fim.toISOString().slice(0, 10),
+        dataInicial: diaCivilBrasilia(inicio),
+        dataFinal: diaCivilBrasilia(fim),
         tipo: tipo ?? 'todos',
         adquirente: filtroAdq || 'todas',
         resultado: filtroResultado ?? 'todos',

@@ -15,6 +15,7 @@ import {
   mensagemChavePixInvalida,
   normalizarChavePixCadastro,
   PERMISSOES,
+  recorteFiltroData,
   SITUACAO_EXECUCAO_SAQUE,
   SITUACAO_PROVEDOR,
   SITUACAO_TRANSACAO,
@@ -270,11 +271,8 @@ export class AdminTesourariaController {
     if (q.origem) where.origem = q.origem;
     if (q.gatilho) where.gatilho = { idPublico: q.gatilho };
     if (q.adquirente) where.contaProvedor = { provedor: { codigo: q.adquirente } };
-    if (q.dataInicial || q.dataFinal) {
-      const gte = q.dataInicial ? new Date(q.dataInicial + 'T00:00:00') : undefined;
-      const lte = q.dataFinal ? new Date(q.dataFinal + 'T23:59:59.999') : undefined;
-      where.criadoEm = { ...(gte ? { gte } : {}), ...(lte ? { lte } : {}) };
-    }
+    const periodoExec = recorteFiltroData(q.dataInicial, q.dataFinal);
+    if (periodoExec) where.criadoEm = periodoExec;
 
     const [total, itens] = await Promise.all([
       this.prisma.execucaoGatilhoSaque.count({ where: where as never }),
@@ -324,11 +322,8 @@ export class AdminTesourariaController {
   @RequerPermissao(PERMISSOES.ADMIN_TESOURARIA_VER)
   async resumoSaques(@Query() q: Record<string, string>) {
     const where: Record<string, unknown> = { direcao: 'SAIDA' };
-    if (q.dataInicial || q.dataFinal) {
-      const gte = q.dataInicial ? new Date(q.dataInicial + 'T00:00:00') : undefined;
-      const lte = q.dataFinal ? new Date(q.dataFinal + 'T23:59:59.999') : undefined;
-      where.criadoEm = { ...(gte ? { gte } : {}), ...(lte ? { lte } : {}) };
-    }
+    const periodoExec = recorteFiltroData(q.dataInicial, q.dataFinal);
+    if (periodoExec) where.criadoEm = periodoExec;
     if (q.adquirente) {
       const contas = await this.prisma.contaProvedor.findMany({
         where: { provedor: { codigo: q.adquirente } },

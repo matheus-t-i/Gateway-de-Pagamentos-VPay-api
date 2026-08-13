@@ -17,8 +17,10 @@ import {
   configuracaoWebhookSchema,
   EVENTOS_LOJISTA,
   MODO_TRATAMENTO_MED,
+  inicioDoMesBrasilia,
   money,
   PERMISSOES,
+  recorteFiltroData,
   resumoProduto,
   DISPONIBILIDADE_ADQUIRENTE,
   SITUACAO_DEVOLUCAO,
@@ -48,6 +50,11 @@ import {
 import { CashInCreditoService } from '../retencao/cashin-credito.service';
 import { RelatorioMetodoService } from './relatorio-metodo.service';
 import { RelatorioResultadoService } from './relatorio-resultado.service';
+import {
+  montarSerieDashboard,
+  resolverIntervaloSerie,
+  SITUACOES_APROVADAS_SERIE,
+} from './dashboard-serie';
 
 /**
  * Valida um IP ou CIDR (IPv4 e IPv6, ex.: `2804:14c::/64`) e devolve a forma
@@ -210,7 +217,8 @@ export class AdminOpsController {
     const porDia = await this.prisma.$queryRaw<
       Array<{ dia: Date; volume: string; margem: string; qtd: bigint }>
     >`
-      SELECT date_trunc('day', criado_em) AS dia,
+      SELECT (date_trunc('day', criado_em AT TIME ZONE 'America/Sao_Paulo')
+                AT TIME ZONE 'America/Sao_Paulo') AS dia,
              COALESCE(SUM(valor_bruto),0)::text AS volume,
              COALESCE(SUM(valor_margem_bruta),0)::text AS margem,
              COUNT(*)::bigint AS qtd
@@ -282,11 +290,8 @@ export class AdminOpsController {
     const limite = Math.min(100, Math.max(5, Number(q.limit) || 25));
 
     const where: Record<string, unknown> = { direcao };
-    if (q.dataInicial || q.dataFinal) {
-      const gte = q.dataInicial ? new Date(q.dataInicial + 'T00:00:00') : undefined;
-      const lte = q.dataFinal ? new Date(q.dataFinal + 'T23:59:59.999') : undefined;
-      where.criadoEm = { ...(gte ? { gte } : {}), ...(lte ? { lte } : {}) };
-    }
+    const periodoTx = recorteFiltroData(q.dataInicial, q.dataFinal);
+    if (periodoTx) where.criadoEm = periodoTx;
     if (q.situacao) where.situacao = q.situacao;
 
     // Cada filtro de texto vira um grupo `OR` próprio; os grupos se combinam
@@ -753,11 +758,7 @@ export class AdminOpsController {
     const pagina = Math.max(1, Number(q.page) || 1);
     const limite = Math.min(100, Math.max(5, Number(q.limit) || 25));
     const skip = (pagina - 1) * limite;
-    const periodo = () => {
-      const gte = q.dataInicial ? new Date(q.dataInicial + 'T00:00:00') : undefined;
-      const lte = q.dataFinal ? new Date(q.dataFinal + 'T23:59:59.999') : undefined;
-      return gte || lte ? { ...(gte ? { gte } : {}), ...(lte ? { lte } : {}) } : undefined;
-    };
+    const periodo = () => recorteFiltroData(q.dataInicial, q.dataFinal);
 
     if (fonte === 'acesso') {
       const where: Record<string, unknown> = {};
@@ -1419,10 +1420,7 @@ export class AdminOpsController {
 }
 
 /** Situações que contam como venda "aprovada" (dinheiro que entrou). */
-const SITUACOES_APROVADAS: string[] = [
-  SITUACAO_TRANSACAO.LIQUIDADA,
-  SITUACAO_TRANSACAO.CONCLUIDA,
-];
+const SITUACOES_APROVADAS: string[] = [...SITUACOES_APROVADAS_SERIE];
 
 /**
  * Converte `?range=` na janela + granularidade do gráfico.
@@ -1453,11 +1451,7 @@ function resolverJanela(range?: string): {
     case '7d':
       return janela(new Date(agora.getTime() - 7 * dia), '7d', false);
     case 'mes':
-      return janela(
-        new Date(agora.getFullYear(), agora.getMonth(), 1),
-        'mes',
-        false,
-      );
+      return janela(inicioDoMesBrasilia(agora), 'mes', false);
     default:
       // 1 dia: últimas 24h por hora.
       return janela(new Date(agora.getTime() - dia), '1d', true);
@@ -1474,6 +1468,7 @@ export class PainelDashboardController {
   async meu(
     @Req() req: { user: { id: string } },
     @Query('range') range?: string,
+    @Query('intervalo') intervalo?: string,
   ) {
     const usuarioId = BigInt(req.user.id);
     const usuario = await this.prisma.usuario.findUniqueOrThrow({
@@ -1481,6 +1476,7 @@ export class PainelDashboardController {
       include: { saldo: true, configuracaoPix: true },
     });
     const janela = resolverJanela(range);
+    const intervaloSerie = resolverIntervaloSerie(intervalo);
 
     const saldoDisponivel = (usuario.saldo?.saldoDisponivel ?? 0).toString();
     const bloqueadoMed = (usuario.saldo?.saldoBloqueadoMed ?? 0).toString();
@@ -1585,26 +1581,15 @@ export class PainelDashboardController {
       }),
     ]);
 
-    // Série agrupada por hora (1d) ou por dia (7d/30d/mês), em JS.
-    const baldes = new Map<string, { geradas: number; aprovadas: number }>();
-    for (const l of linhas) {
-      const d = l.criadoEm;
-      const chave = janela.porHora
-        ? `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}T${d.getHours()}`
-        : `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-      const b = baldes.get(chave) ?? { geradas: 0, aprovadas: 0 };
-      const v = Number(l.valorBruto);
-      b.geradas += v;
-      if (SITUACOES_APROVADAS.includes(l.situacao)) b.aprovadas += v;
-      baldes.set(chave, b);
-    }
-    const serie = Array.from(baldes.entries())
-      .sort(([a], [b]) => (a < b ? -1 : 1))
-      .map(([chave, b]) => ({
-        ts: chave,
-        geradas: b.geradas.toFixed(2),
-        aprovadas: b.aprovadas.toFixed(2),
-      }));
+    // Série contínua: um ponto por balde da janela, zeros inclusive.
+    // 1d honra `intervalo` (1h/30m/15m); 7d/30d/mês ignoram e vão por dia.
+    const serie = montarSerieDashboard({
+      desde: janela.desde,
+      ate: janela.ate,
+      porHora: janela.porHora,
+      intervalo: intervaloSerie,
+      linhas,
+    });
 
     const geradasQtd = Number(geradas._count ?? 0);
     const aprovadasQtd = Number(aprovadas._count ?? 0);
@@ -1623,6 +1608,7 @@ export class PainelDashboardController {
     return {
       conta,
       range: janela.range,
+      intervalo: janela.porHora ? intervaloSerie : '1d',
       periodo,
       saldoDisponivel,
       // Compatibilidade com a versão anterior do dashboard.

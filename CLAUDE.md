@@ -600,6 +600,19 @@ call site) e o MED automático. Quem nunca pode ficar negativo: **saque** (`cria
 fixo). Regressão coberta por `src/ledger/saldo-negativo.spec.ts` — os 5 casos falham se a trava
 voltar a olhar o estado da conta.
 
+## Fuso horário (BRT)
+
+Produto = Brasília (`America/Sao_Paulo`). Banco/`timestamptz`/JSON ISO = UTC. O que o
+humano vê e o recorte de “dia” (filtro, gráfico, “hoje”, limite diário de saque,
+`dataHoraBr` do callback) = BRT. Helper canônico: `src/shared/fuso-brasilia.ts`
+(`recorteFiltroData`, `inicioDoDiaBrasilia`, `partesBrasilia`, `dataHoraBr`).
+Painel espelha em `../Gateway-de-Pagamentos-VPay-web/src/lib/fuso.ts`.
+
+**Exceção:** Utmify `createdAt` fica UTC (`UtmifyClient.utc`) — contrato deles.
+Logs pino ISO UTC são infra. Não copiar OFFSET; não `getUTCHours` no rótulo;
+não `new Date(ymd + 'T00:00:00')` no Render. Detalhe na rule `fuso-brasilia` e
+no `CLAUDE.md` da raiz.
+
 ## Deploy
 
 API + Worker separados (Render); web na Vercel; Postgres + Redis privados.

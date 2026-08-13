@@ -8,12 +8,11 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { z } from 'zod';
-import { money, PERMISSOES } from '../shared';
+import { diaCivilBrasilia, money, PERMISSOES } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard, type UsuarioAutenticado } from '../auth/jwt-auth.guard';
 import { RequerPermissao } from '../auth/permissoes.decorator';
 import { assertStepUpTotp } from '../common/step-up-totp';
-import { diaCivilSaoPaulo } from './retencao-metodo.service';
 
 const putSchema = z.object({
   ativo: z.boolean(),
@@ -52,7 +51,7 @@ export class AdminRetencaoController {
       orderBy: [{ provedor: { nome: 'asc' } }, { nome: 'asc' }],
     });
 
-    const hoje = diaCivilSaoPaulo();
+    const hoje = diaCivilBrasilia();
     const dataRef = params.dataReferenciaDia.toISOString().slice(0, 10);
     const mesmoDia = dataRef === hoje;
 

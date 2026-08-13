@@ -1,7 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { money, moneyToString, SITUACAO_TRANSACAO } from '../shared';
+import {
+  diaCivilBrasilia,
+  FUSO_BRASILIA,
+  money,
+  moneyToString,
+  SITUACAO_TRANSACAO,
+} from '../shared';
 
 /** Limite da tabela "Por usuário" (ordenado por pagas DESC). */
 const LIMITE_POR_USUARIO = 300;
@@ -43,12 +49,7 @@ type LinhaUsuario = TotaisBrutos & {
 };
 
 function hojeSp(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Sao_Paulo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
+  return diaCivilBrasilia();
 }
 
 function diasPeriodo(inicio: string, fim: string): number {
@@ -795,12 +796,17 @@ export class RelatorioMetodoService {
     }
 
     // date_trunc com intervalo dinâmico via literal seguro (só 3 valores fixos).
+    // date_trunc em timestamp naive (BRT) + AT TIME ZONE de volta = timestamptz
+    // da meia-noite/hora BRT. Sem o round-trip o node-pg lê naive como UTC e o
+    // rótulo com America/Sao_Paulo atraso 3h (13/08 vira 12/08).
     const bucketExpr =
       trunc === '30 minutes'
-        ? Prisma.sql`date_trunc('hour', ts) + INTERVAL '30 minutes' * FLOOR(EXTRACT(MINUTE FROM ts) / 30)`
+        ? Prisma.sql`(date_trunc('hour', ts AT TIME ZONE 'America/Sao_Paulo')
+            + INTERVAL '30 minutes' * FLOOR(EXTRACT(MINUTE FROM (ts AT TIME ZONE 'America/Sao_Paulo')) / 30)
+          ) AT TIME ZONE 'America/Sao_Paulo'`
         : trunc === 'day'
-          ? Prisma.sql`date_trunc('day', ts AT TIME ZONE 'America/Sao_Paulo')`
-          : Prisma.sql`date_trunc('month', ts AT TIME ZONE 'America/Sao_Paulo')`;
+          ? Prisma.sql`(date_trunc('day', ts AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')`
+          : Prisma.sql`(date_trunc('month', ts AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')`;
 
     const rows = await this.prisma.$queryRaw<
       Array<{ bucket: Date; faturamento: string; med: string }>
@@ -862,20 +868,20 @@ export class RelatorioMetodoService {
 function formatarLabelBucket(d: Date, trunc: string): string {
   if (trunc === '30 minutes') {
     return d.toLocaleString('pt-BR', {
-      timeZone: 'America/Sao_Paulo',
+      timeZone: FUSO_BRASILIA,
       hour: '2-digit',
       minute: '2-digit',
     });
   }
   if (trunc === 'day') {
     return d.toLocaleString('pt-BR', {
-      timeZone: 'America/Sao_Paulo',
+      timeZone: FUSO_BRASILIA,
       day: '2-digit',
       month: '2-digit',
     });
   }
   return d.toLocaleString('pt-BR', {
-    timeZone: 'America/Sao_Paulo',
+    timeZone: FUSO_BRASILIA,
     month: 'short',
     year: 'numeric',
   });

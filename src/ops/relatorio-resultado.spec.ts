@@ -242,4 +242,14 @@ describe('RelatorioResultadoService — receita só de venda paga', () => {
     });
     expect(JSON.stringify(where.OR)).not.toContain(SITUACAO_TRANSACAO.FALHA);
   });
+
+  it('filtro de um dia é [00:00, 23:59:59.999] BRT — no Render UTC não corta 21h–23h59', async () => {
+    const { prisma, svc } = servico([]);
+    await svc.gerar(periodo);
+    const where = prisma.transacao.findMany.mock.calls[0][0].where as {
+      criadoEm: { gte: Date; lte: Date };
+    };
+    expect(where.criadoEm.gte.toISOString()).toBe('2026-08-13T03:00:00.000Z');
+    expect(where.criadoEm.lte.toISOString()).toBe('2026-08-14T02:59:59.999Z');
+  });
 });

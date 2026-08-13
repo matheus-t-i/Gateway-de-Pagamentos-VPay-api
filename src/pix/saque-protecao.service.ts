@@ -1,6 +1,11 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { Decimal, money, SITUACAO_TRANSACAO } from '../shared';
+import {
+  Decimal,
+  inicioDoDiaBrasilia as meiaNoiteBrasilia,
+  money,
+  SITUACAO_TRANSACAO,
+} from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfigPixEfetiva } from '../ledger/ledger.service';
 
@@ -26,19 +31,10 @@ export class SaqueProtecaoService {
   /**
    * Início do dia civil em America/Sao_Paulo (gateway BR).
    * Usado no limite diário — UTC meia-noite cortaria o expediente do lojista.
+   * Fonte única: `src/shared/fuso-brasilia.ts`.
    */
   inicioDoDiaBrasilia(agora = new Date()): Date {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Sao_Paulo',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).formatToParts(agora);
-    const y = parts.find((p) => p.type === 'year')!.value;
-    const m = parts.find((p) => p.type === 'month')!.value;
-    const d = parts.find((p) => p.type === 'day')!.value;
-    // Meia-noite BRT = 03:00 UTC (sem horário de verão desde 2019).
-    return new Date(`${y}-${m}-${d}T03:00:00.000Z`);
+    return meiaNoiteBrasilia(agora);
   }
 
   /**

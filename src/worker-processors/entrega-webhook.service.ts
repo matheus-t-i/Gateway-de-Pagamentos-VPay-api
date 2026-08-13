@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
+  dataHoraBr,
   operacaoCallback,
   SITUACAO_ENTREGA_WEBHOOK,
   SITUACAO_USUARIO,
@@ -7,15 +8,6 @@ import {
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { decryptText } from '../common/crypto.util';
-
-/**
- * `2026-08-03 11:40:04` no fuso de Brasília — é o horário que o lojista vê no
- * painel e no extrato do banco. `sv-SE` é usado só porque produz exatamente
- * `YYYY-MM-DD HH:mm:ss`, sem depender de biblioteca de data.
- */
-function dataHoraBr(data: Date): string {
-  return data.toLocaleString('sv-SE', { timeZone: 'America/Sao_Paulo' });
-}
 
 /** Um lugar para onde este evento deve ser entregue. */
 export type Destino = {

@@ -1,16 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
-  EVENTOS_LOJISTA,
-  money,
+  diaCivilBrasilia,
   Decimal,
+  EVENTOS_LOJISTA,
+  intervaloDiaCivilBrasilia,
+  money,
   SITUACAO_CASO_MED,
   SITUACAO_TRANSACAO,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfigPixService, LedgerService } from '../ledger/ledger.service';
 import { QueuesService } from '../queues/queues.service';
-import { diaCivilSaoPaulo } from '../retencao/retencao-metodo.service';
 
 function sortearOffset(min: number, max: number): number {
   const a = Math.min(min, max);
@@ -18,18 +19,9 @@ function sortearOffset(min: number, max: number): number {
   return a + Math.floor(Math.random() * (b - a + 1));
 }
 
-/** Início/fim do dia civil SP como Date para filtrar Timestamptz. */
-function intervaloDiaCivilSp(diaYmd: string): { inicio: Date; fim: Date } {
-  return {
-    inicio: new Date(`${diaYmd}T00:00:00-03:00`),
-    fim: new Date(`${diaYmd}T23:59:59.999-03:00`),
-  };
-}
-
 function diaAnteriorSp(hojeYmd: string): string {
-  const meioDia = new Date(`${hojeYmd}T12:00:00-03:00`);
-  const ontem = new Date(meioDia.getTime() - 24 * 60 * 60 * 1000);
-  return diaCivilSaoPaulo(ontem);
+  const inicioHoje = intervaloDiaCivilBrasilia(hojeYmd).inicio;
+  return diaCivilBrasilia(new Date(inicioHoje.getTime() - 1));
 }
 
 type EstadoRow = {
@@ -91,7 +83,7 @@ export class MedAutomaticoService {
       return { aplicado: false, motivo: 'percentual_zero' };
     }
 
-    const hoje = diaCivilSaoPaulo();
+    const hoje = diaCivilBrasilia();
     const ontem = diaAnteriorSp(hoje);
 
     const decisao = await this.prisma.$transaction(async (tx) => {
@@ -138,7 +130,7 @@ export class MedAutomaticoService {
         return { acao: 'noop', motivo: 'offset' } satisfies Decisao;
       }
 
-      const { inicio: iniOntem, fim: fimOntem } = intervaloDiaCivilSp(ontem);
+      const { inicio: iniOntem, fim: fimOntem } = intervaloDiaCivilBrasilia(ontem);
       const agg = await tx.transacao.aggregate({
         where: {
           usuarioId: input.usuarioId,

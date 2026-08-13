@@ -21,12 +21,15 @@ import { ProviderRegistry } from '../providers/provider.registry';
 import { QueuesService } from '../queues/queues.service';
 import { SaqueProtecaoService } from './saque-protecao.service';
 import {
+  checarLimiteValor,
   CriarCobrancaPixInput,
   CriarSaquePixInput,
   Decimal,
   EVENTOS_INTEGRACAO,
   ItemCobrancaInput,
   money,
+  OPERACAO_LIMITE,
+  recorteFiltroData,
   resumoProduto,
   SITUACAO_CHAVE_PIX,
   SITUACAO_PROVEDOR,
@@ -345,9 +348,17 @@ export class PixService {
     const cfg = await this.configPix.resolverEfetiva(params.usuarioId);
     await this.ledger.garantirCarteira(params.usuarioId);
 
-    if (valor.lt(cfg.ticketMinimoPixEntrada) || valor.gt(cfg.ticketMaximoPixEntrada)) {
-      throw new BadRequestException('Valor fora do ticket permitido');
-    }
+    // A recusa diz o valor, o lado do erro e a faixa aceita — o lojista corrige
+    // sozinho em vez de descobrir o limite por tentativa.
+    const foraDaFaixaEntrada = checarLimiteValor(
+      valor,
+      {
+        minimo: cfg.ticketMinimoPixEntrada,
+        maximo: cfg.ticketMaximoPixEntrada,
+      },
+      OPERACAO_LIMITE.COBRANCA,
+    );
+    if (foraDaFaixaEntrada) throw new BadRequestException(foraDaFaixaEntrada);
 
     const conta = await this.prisma.contaProvedor.findUniqueOrThrow({
       where: { id: cfg.contaProvedorPixEntradaId },
@@ -749,12 +760,12 @@ export class PixService {
       }
     }
 
-    if (valor.lt(cfg.ticketMinimoPixSaida)) {
-      throw new BadRequestException('Valor abaixo do mínimo');
-    }
-    if (cfg.ticketMaximoPixSaida && valor.gt(cfg.ticketMaximoPixSaida)) {
-      throw new BadRequestException('Valor acima do máximo');
-    }
+    const foraDaFaixaSaida = checarLimiteValor(
+      valor,
+      { minimo: cfg.ticketMinimoPixSaida, maximo: cfg.ticketMaximoPixSaida },
+      OPERACAO_LIMITE.SAQUE,
+    );
+    if (foraDaFaixaSaida) throw new BadRequestException(foraDaFaixaSaida);
 
     try {
       await this.saqueProtecao.assertSaquePermitido({
@@ -954,11 +965,8 @@ export class PixService {
     // Situação só entra se for do vocabulário oficial — valor inventado na query
     // string devolveria lista vazia sem explicação.
     if (q.situacao && q.situacao in SITUACAO_TRANSACAO) where.situacao = q.situacao;
-    if (q.dataInicial || q.dataFinal) {
-      const gte = q.dataInicial ? new Date(q.dataInicial + 'T00:00:00') : undefined;
-      const lte = q.dataFinal ? new Date(q.dataFinal + 'T23:59:59.999') : undefined;
-      where.criadoEm = { ...(gte ? { gte } : {}), ...(lte ? { lte } : {}) };
-    }
+    const periodo = recorteFiltroData(q.dataInicial, q.dataFinal);
+    if (periodo) where.criadoEm = periodo;
 
     const busca = (q.busca ?? '').trim();
     if (busca) {

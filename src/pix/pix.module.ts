@@ -10,6 +10,8 @@ import {
   AdminChavesPixController,
   ChavesPixController,
 } from './chaves-pix.controller';
+import { SaldoApiController } from './saldo.controller';
+import { PainelCondicoesController } from './condicoes.controller';
 import { PixService } from './pix.service';
 
 @Module({
@@ -24,6 +26,8 @@ import { PixService } from './pix.service';
   controllers: [
     PixApiController,
     PixPainelController,
+    SaldoApiController,
+    PainelCondicoesController,
     ChavesPixController,
     AdminChavesPixController,
   ],

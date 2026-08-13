@@ -319,6 +319,7 @@ export const ESCOPOS_API = {
   PIX_COBRANCA_CRIAR: 'pix.cobranca.criar',
   PIX_SAQUE_CRIAR: 'pix.saque.criar',
   TRANSACOES_LER: 'transacoes.ler',
+  SALDO_LER: 'saldo.ler',
 } as const;
 
 export const atualizarPerfilSchema = z.object({
@@ -326,6 +327,22 @@ export const atualizarPerfilSchema = z.object({
   nomeFantasia: z.string().max(255).optional(),
   temaPreferido: z.enum([TEMAS.PADRAO, TEMAS.CLARO, TEMAS.ESCURO]).optional(),
   codigoTotp: z.string().regex(/^\d{6}$/),
+});
+
+/**
+ * Tema do painel — rota PRÓPRIA, sem `codigoTotp`.
+ *
+ * Claro/escuro é preferência visual: não move dinheiro, não muda acesso e não
+ * vaza nada. Exigir o código do autenticador para alternar o tema fazia a
+ * pessoa abrir o app do 2FA para uma decisão estética, e quem não tem o
+ * celular à mão simplesmente não conseguia trocar.
+ *
+ * É um schema separado (e não `codigoTotp` opcional no perfil) porque assim é
+ * impossível um telefone ou nome fantasia entrar por aqui sem step-up: esta
+ * rota não aceita outro campo.
+ */
+export const atualizarTemaSchema = z.object({
+  temaPreferido: z.enum([TEMAS.PADRAO, TEMAS.CLARO, TEMAS.ESCURO]),
 });
 
 /**

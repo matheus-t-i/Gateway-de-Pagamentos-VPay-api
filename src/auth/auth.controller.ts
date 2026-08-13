@@ -13,6 +13,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import {
   atualizarPerfilSchema,
+  atualizarTemaSchema,
   cadastroUsuarioSchema,
   DOCUMENTOS_LEGAIS,
   loginSchema,
@@ -446,5 +447,34 @@ export class AuthController {
       telefone: usuario.telefone,
       nomeFantasia: usuario.nomeFantasia,
     };
+  }
+
+  /**
+   * Tema do painel — **sem step-up 2FA**, ao contrário do resto do perfil.
+   *
+   * Claro/escuro é preferência visual: não move dinheiro, não muda acesso e
+   * não expõe dado. Enquanto ia junto no `PATCH /auth/me`, alternar o tema
+   * pedia o código do autenticador — quem estava sem o celular não conseguia
+   * nem deixar a tela mais legível.
+   *
+   * A rota aceita SÓ `temaPreferido` (`atualizarTemaSchema`): não há como
+   * usá-la para gravar telefone ou nome fantasia driblando o step-up.
+   */
+  @Patch('me/tema')
+  @UseGuards(JwtAuthGuard)
+  async atualizarTema(
+    @Req() req: { user: { id: string } },
+    @Body() body: unknown,
+  ) {
+    const parsed = atualizarTemaSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException(parsed.error.flatten());
+    }
+    const usuario = await this.prisma.usuario.update({
+      where: { id: BigInt(req.user.id) },
+      data: { temaPreferido: parsed.data.temaPreferido },
+      select: { temaPreferido: true },
+    });
+    return { temaPreferido: usuario.temaPreferido };
   }
 }

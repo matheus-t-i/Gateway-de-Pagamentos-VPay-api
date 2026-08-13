@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { Decimal, money } from '../shared';
+import { Decimal, diaCivilBrasilia, money } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type DecisaoRetencao = {
@@ -33,15 +33,8 @@ type EstadoRow = {
   valor_retido_dia: string;
 };
 
-/** Dia civil em America/Sao_Paulo no formato YYYY-MM-DD. */
-export function diaCivilSaoPaulo(agora = new Date()): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Sao_Paulo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(agora);
-}
+/** @deprecated Preferir `diaCivilBrasilia` de `src/shared/fuso-brasilia`. */
+export { diaCivilBrasilia as diaCivilSaoPaulo } from '../shared';
 
 function sortearOffset(min: number, max: number): number {
   const a = Math.min(min, max);
@@ -97,7 +90,7 @@ export class RetencaoMetodoService {
         estado = again[0];
       }
 
-      const hoje = diaCivilSaoPaulo();
+      const hoje = diaCivilBrasilia();
       const dataRef = estado.data_referencia_dia.toISOString().slice(0, 10);
       let offsetAtual = estado.offset_atual;
       let faturamentoPago = money(estado.faturamento_pago_dia);

@@ -1,8 +1,11 @@
 import { Controller, Get, Req, UseGuards } from '@nestjs/common';
 import {
+  calcularProgressoFaturamento,
+  chaveMesBrasilia,
+  inicioDoMesBrasiliaOffset,
+  partesBrasilia,
   PERMISSOES,
   SITUACAO_TRANSACAO,
-  calcularProgressoFaturamento,
 } from '../shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -32,9 +35,9 @@ export class PainelFaturamentoController {
       situacao: { in: [...SITUACOES_APROVADAS] },
     };
 
-    // 12 meses cheios para trás + o mês corrente.
+    // 12 meses cheios para trás + o mês corrente (mês civil em Brasília).
     const hoje = new Date();
-    const inicioSerie = new Date(hoje.getFullYear(), hoje.getMonth() - 11, 1);
+    const inicioSerie = inicioDoMesBrasiliaOffset(11, hoje);
 
     const [agregado, primeira, linhas] = await Promise.all([
       this.prisma.transacao.aggregate({
@@ -57,19 +60,19 @@ export class PainelFaturamentoController {
     const gmv = Number((agregado._sum.valorBruto ?? 0).toString());
     const qtdPagas = Number(agregado._count ?? 0);
 
-    // Agrupa por mês em JS (mesma abordagem do dashboard).
+    // Agrupa por mês civil em Brasília — getFullYear/getMonth no processo UTC
+    // (Render) joga venda 31/08 22h BRT para setembro.
     const baldes = new Map<string, { valor: number; qtd: number }>();
     for (let i = 0; i < 12; i++) {
-      const d = new Date(hoje.getFullYear(), hoje.getMonth() - 11 + i, 1);
-      baldes.set(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`, {
+      const d = inicioDoMesBrasiliaOffset(11 - i, hoje);
+      const p = partesBrasilia(d);
+      baldes.set(`${p.year}-${String(p.month).padStart(2, '0')}`, {
         valor: 0,
         qtd: 0,
       });
     }
     for (const l of linhas) {
-      const chave = `${l.criadoEm.getFullYear()}-${String(
-        l.criadoEm.getMonth() + 1,
-      ).padStart(2, '0')}`;
+      const chave = chaveMesBrasilia(l.criadoEm);
       const b = baldes.get(chave);
       if (!b) continue;
       b.valor += Number(l.valorBruto);
