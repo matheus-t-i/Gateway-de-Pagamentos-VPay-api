@@ -12,7 +12,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ApiTokenGuard } from './api-token.guard';
 import { CredencialAuthService } from './credencial-auth.service';
 import { RateLimitService } from './rate-limit.service';
-import { TIPO_TOKEN_API } from './token.controller';
+import { TIPO_TOKEN_API, TokenApiController } from './token.controller';
 import { BullBoardAuthMiddleware } from '../queues/bull-board.middleware';
 
 /**
@@ -45,9 +45,12 @@ describe('token da API pública (Bearer)', () => {
     get: jest.fn().mockReturnValue('false'),
   } as unknown as ConfigService;
 
-  function contexto(authorization?: string) {
+  function contexto(
+    authorization?: string,
+    headersExtras: Record<string, string> = {},
+  ) {
     const req: Record<string, unknown> = {
-      headers: authorization ? { authorization } : {},
+      headers: authorization ? { authorization, ...headersExtras } : headersExtras,
       ip: '127.0.0.1',
       path: '/v1/pix/cobrancas',
       method: 'POST',
@@ -92,6 +95,51 @@ describe('token da API pública (Bearer)', () => {
       ip: '127.0.0.1',
       path: '/v1/pix/cobrancas',
     });
+  });
+
+  /**
+   * Regressão: atrás de Cloudflare+Render, `req.ip` é o edge da CF — a allowlist
+   * da credencial comparava com ele e recusava o IP real do lojista com
+   * "IP não permitido". O IP tem que vir de `extrairIpCliente` (cf-connecting-ip)
+   * nos DOIS pontos: guard Bearer e emissão do token.
+   */
+  it('guard Bearer valida allowlist pelo cf-connecting-ip, não pelo req.ip', async () => {
+    const token = await signApi({ sub: '42', tipo: TIPO_TOKEN_API });
+    const { ctx } = contexto(`Bearer ${token}`, {
+      'cf-connecting-ip': '179.51.222.151',
+    });
+
+    await expect(guard().canActivate(ctx)).resolves.toBe(true);
+    expect(credAuth.carregarCredencialAtiva).toHaveBeenCalledWith(BigInt(42), {
+      ip: '179.51.222.151',
+      path: '/v1/pix/cobrancas',
+    });
+  });
+
+  it('emissão do token valida allowlist pelo cf-connecting-ip, não pelo req.ip', async () => {
+    const credAuthEmissao = {
+      autenticarPorChaveSegredo: jest.fn().mockResolvedValue(credencial),
+    } as unknown as CredencialAuthService;
+    const configEmissao = {
+      get: jest.fn().mockReturnValue(undefined),
+    } as unknown as ConfigService;
+    const controller = new TokenApiController(credAuthEmissao, jwt, configEmissao);
+
+    await controller.emitir({
+      headers: {
+        'x-api-key': 'vp_chave',
+        'x-api-secret': 'segredo',
+        'cf-connecting-ip': '179.51.222.151',
+      },
+      ip: '104.23.1.1',
+      path: '/v1/auth/token',
+    });
+
+    expect(credAuthEmissao.autenticarPorChaveSegredo).toHaveBeenCalledWith(
+      'vp_chave',
+      'segredo',
+      { ip: '179.51.222.151', path: '/v1/auth/token' },
+    );
   });
 
   it('recusa requisição sem Authorization', async () => {

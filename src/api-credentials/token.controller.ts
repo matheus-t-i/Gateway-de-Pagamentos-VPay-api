@@ -5,6 +5,7 @@ import {
   JWT_AUDIENCE_API,
   JWT_ISSUER,
 } from '../common/jwt-claims';
+import { extrairIpCliente } from '../common/client-ip.util';
 import { CredencialAuthService } from './credencial-auth.service';
 
 /**
@@ -51,8 +52,10 @@ export class TokenApiController {
       throw new UnauthorizedException('Credenciais API ausentes');
     }
 
+    // extrairIpCliente, não req.ip: atrás de Cloudflare+Render req.ip é o edge
+    // CF — a allowlist da credencial nunca casava com o IP real do lojista.
     const cred = await this.credAuth.autenticarPorChaveSegredo(publicKey, secret, {
-      ip: req.ip,
+      ip: extrairIpCliente(req),
       path: req.path,
     });
 

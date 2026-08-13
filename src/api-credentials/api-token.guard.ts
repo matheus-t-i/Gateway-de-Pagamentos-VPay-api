@@ -12,6 +12,7 @@ import {
   JWT_AUDIENCE_API,
   JWT_ISSUER,
 } from '../common/jwt-claims';
+import { extrairIpCliente } from '../common/client-ip.util';
 import { CredencialAuthService } from './credencial-auth.service';
 import { RateLimitService } from './rate-limit.service';
 import {
@@ -77,9 +78,11 @@ export class ApiTokenGuard implements CanActivate {
       throw new UnauthorizedException('Token de acesso inválido');
     }
 
+    // extrairIpCliente, não req.ip: atrás de Cloudflare+Render req.ip é o edge
+    // CF — a allowlist da credencial nunca casava com o IP real do lojista.
     const cred = await this.credAuth.carregarCredencialAtiva(
       BigInt(payload.sub),
-      { ip: req.ip, path: req.path },
+      { ip: extrairIpCliente(req), path: req.path },
     );
     req.apiCredential = cred;
 
