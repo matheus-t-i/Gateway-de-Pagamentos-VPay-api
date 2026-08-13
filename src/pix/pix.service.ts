@@ -357,6 +357,11 @@ export class PixService {
       conta.situacao !== SITUACAO_PROVEDOR.ATIVO ||
       conta.provedor.situacao !== SITUACAO_PROVEDOR.ATIVO
     ) {
+      this.log.warn(
+        `Cash-in recusado: adquirente indisponível provedor=${conta.provedor.codigo} ` +
+          `situacaoProvedor=${conta.provedor.situacao} contaSituacao=${conta.situacao} ` +
+          `rastreio=${getRastreio()}`,
+      );
       throw new BadRequestException('Provedor/conta indisponível');
     }
     if (!conta.provedor.permitePixEntrada || !conta.pixEntradaHabilitado) {
@@ -776,7 +781,22 @@ export class PixService {
       conta.situacao !== SITUACAO_PROVEDOR.ATIVO ||
       conta.provedor.situacao !== SITUACAO_PROVEDOR.ATIVO
     ) {
+      // Esta recusa acontece ANTES do débito no ledger — saldo insuficiente
+      // nem chega a ser avaliado. Mensagem pública genérica (não vaza código
+      // interno da adquirente); o warn abaixo é o que aparece no Render.
+      this.log.warn(
+        `Cash-out recusado: adquirente indisponível provedor=${conta.provedor.codigo} ` +
+          `situacaoProvedor=${conta.provedor.situacao} contaSituacao=${conta.situacao} ` +
+          `rastreio=${getRastreio()}`,
+      );
       throw new BadRequestException('Provedor/conta indisponível');
+    }
+    if (!conta.provedor.permitePixSaida || !conta.pixSaidaHabilitado) {
+      this.log.warn(
+        `Cash-out recusado: PIX saída desabilitado provedor=${conta.provedor.codigo} ` +
+          `rastreio=${getRastreio()}`,
+      );
+      throw new BadRequestException('PIX saída desabilitado nesta conta');
     }
 
     const custoPct = money(conta.custoPix?.custoPixSaidaPercentual?.toString() ?? '0');

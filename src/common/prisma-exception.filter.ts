@@ -6,7 +6,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
+import { caminhoSemQuery, deveLogarErroHttp } from './pino.config';
 
 /**
  * Converte erros conhecidos do Prisma em respostas HTTP legíveis.
@@ -18,40 +19,53 @@ export class PrismaExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(PrismaExceptionFilter.name);
 
   catch(exception: Prisma.PrismaClientKnownRequestError, host: ArgumentsHost) {
-    const res = host.switchToHttp().getResponse<Response>();
+    const ctx = host.switchToHttp();
+    const req = ctx.getRequest<
+      Request & { identificadorRastreio?: string; mensagemErroHttp?: string }
+    >();
+    const res = ctx.getResponse<Response>();
+
+    const responder = (status: number, error: string, message: string) => {
+      req.mensagemErroHttp = message;
+      const path = caminhoSemQuery(req);
+      if (deveLogarErroHttp(status, path)) {
+        const linha = req.identificadorRastreio
+          ? `${req.method} ${path} ${status} ${message} rastreio=${req.identificadorRastreio}`
+          : `${req.method} ${path} ${status} ${message}`;
+        if (status >= 500) this.logger.error(linha);
+        else this.logger.warn(linha);
+      }
+      res.status(status).json({ statusCode: status, error, message });
+    };
 
     switch (exception.code) {
       case 'P2002': {
         // Não expor meta.target (nomes de colunas/índices) ao cliente.
-        res.status(HttpStatus.CONFLICT).json({
-          statusCode: HttpStatus.CONFLICT,
-          error: 'Conflict',
-          message: 'Já existe um registro com estes valores.',
-        });
+        responder(
+          HttpStatus.CONFLICT,
+          'Conflict',
+          'Já existe um registro com estes valores.',
+        );
         return;
       }
       case 'P2025':
-        res.status(HttpStatus.NOT_FOUND).json({
-          statusCode: HttpStatus.NOT_FOUND,
-          error: 'Not Found',
-          message: 'Registro não encontrado.',
-        });
+        responder(HttpStatus.NOT_FOUND, 'Not Found', 'Registro não encontrado.');
         return;
       case 'P2003':
-        res.status(HttpStatus.BAD_REQUEST).json({
-          statusCode: HttpStatus.BAD_REQUEST,
-          error: 'Bad Request',
-          message: 'Referência inválida (registro relacionado inexistente).',
-        });
+        responder(
+          HttpStatus.BAD_REQUEST,
+          'Bad Request',
+          'Referência inválida (registro relacionado inexistente).',
+        );
         return;
       default:
-        // Não expor detalhes internos do banco ao cliente.
+        // Código Prisma no log interno; cliente só vê mensagem genérica.
         this.logger.error(`Prisma ${exception.code}: ${exception.message}`);
-        res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
-          error: 'Internal Server Error',
-          message: 'Erro ao processar a requisição.',
-        });
+        responder(
+          HttpStatus.INTERNAL_SERVER_ERROR,
+          'Internal Server Error',
+          'Erro ao processar a requisição.',
+        );
     }
   }
 }

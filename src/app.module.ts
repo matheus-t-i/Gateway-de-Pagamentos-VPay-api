@@ -4,7 +4,9 @@ import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { LoggerModule } from 'nestjs-pino';
 import { PrismaModule } from './prisma/prisma.module';
 import { TracingInterceptor } from './common/tracing.interceptor';
+import { HttpExceptionLogFilter } from './common/http-exception-log.filter';
 import { PrismaExceptionFilter } from './common/prisma-exception.filter';
+import { pinoHttpOptions } from './common/pino.config';
 import { IpThrottleGuard } from './common/ip-throttle.guard';
 import { AuthModule } from './auth/auth.module';
 import { ApiCredentialsModule } from './api-credentials/api-credentials.module';
@@ -27,43 +29,7 @@ import { HealthController } from './health.controller';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     LoggerModule.forRoot({
-      pinoHttp: {
-        transport:
-          process.env.NODE_ENV !== 'production'
-            ? { target: 'pino-pretty', options: { singleLine: true } }
-            : undefined,
-        quietReqLogger: true,
-        // Em produção, polling do painel (dashboard/pendências) inundava o
-        // Render com access log 2xx+headers — erros sumiam. Sucesso fica
-        // silencioso; 4xx/5xx e falhas de negócio continuam visíveis.
-        customLogLevel: (_req, res, err) => {
-          if (err || res.statusCode >= 500) return 'error';
-          if (res.statusCode >= 400) return 'warn';
-          if (process.env.NODE_ENV === 'production') return 'silent';
-          return 'info';
-        },
-        // O serializer padrão do pino copia req.headers inteiro: sem isto,
-        // token JWT, segredo de API e x-key do provedor vão em texto claro
-        // para o log de TODA requisição.
-        redact: {
-          paths: [
-            'req.headers.authorization',
-            'req.headers.cookie',
-            'req.headers["x-api-secret"]',
-            'req.headers["x-secret-key"]',
-            'req.headers["x-api-key"]',
-            'req.headers["x-key"]',
-            'req.headers["x-vpay-signature"]',
-            'res.headers["set-cookie"]',
-            'req.body.senha',
-            'req.body.password',
-            'req.body.codigoTotp',
-            'req.body.segredo',
-            'req.body.xApiSecret',
-          ],
-          censor: '[REDACTED]',
-        },
-      },
+      pinoHttp: pinoHttpOptions(),
     }),
     PrismaModule,
     EmailModule,
@@ -91,6 +57,10 @@ import { HealthController } from './health.controller';
     {
       provide: APP_FILTER,
       useClass: PrismaExceptionFilter,
+    },
+    {
+      provide: APP_FILTER,
+      useClass: HttpExceptionLogFilter,
     },
     // Teto anti-flood por IP em TODA rota; rotas públicas apertam via @Throttle.
     {

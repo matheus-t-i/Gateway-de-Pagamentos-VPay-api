@@ -70,6 +70,9 @@ envVarGroups:
       # ── Fixos de produção (o fail-fast do boot confere todos) ──────────
       - key: NODE_ENV
         value: production
+      # info (não error): 400 de negócio vai em warn e precisa aparecer no stdout.
+      - key: LOG_LEVEL
+        value: info
       - key: TRUST_PROXY
         value: "1"
       - key: STORAGE_DRIVER

@@ -1730,6 +1730,8 @@ export class PainelDashboardController {
         medBloqueiaSaldo:
           (cfg?.modoTratamentoMed ?? MODO_TRATAMENTO_MED.BLOQUEAR_SALDO) ===
           MODO_TRATAMENTO_MED.BLOQUEAR_SALDO,
+        ticketMinimoPixSaida: (cfg?.ticketMinimoPixSaida ?? 0).toString(),
+        ticketMaximoPixSaida: cfg?.ticketMaximoPixSaida?.toString() ?? null,
       },
     };
 

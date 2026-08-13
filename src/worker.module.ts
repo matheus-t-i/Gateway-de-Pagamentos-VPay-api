@@ -1,6 +1,7 @@
 import { Module, OnModuleInit } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
+import { pinoHttpOptions } from './common/pino.config';
 import { PrismaModule } from './prisma/prisma.module';
 import { LedgerModule } from './ledger/ledger.module';
 import { QueuesModule } from './queues/queues.module';
@@ -32,12 +33,7 @@ import { TesourariaModule } from './tesouraria/tesouraria.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     LoggerModule.forRoot({
-      pinoHttp: {
-        transport:
-          process.env.NODE_ENV !== 'production'
-            ? { target: 'pino-pretty', options: { singleLine: true } }
-            : undefined,
-      },
+      pinoHttp: pinoHttpOptions(),
     }),
     PrismaModule,
     LedgerModule,
