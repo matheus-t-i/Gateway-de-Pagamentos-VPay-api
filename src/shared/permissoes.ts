@@ -119,6 +119,9 @@ export const PERMISSOES = {
 
   ADMIN_AUDITORIA_VER: 'admin.auditoria.ver',
 
+  /** Trilha das rotas sensíveis da API pública (`/v1/*`). */
+  ADMIN_SEGURANCA_VER: 'admin.seguranca.ver',
+
   /** Parâmetros globais do método de retenção (Plataforma). */
   ADMIN_RETENCAO_VER: 'admin.retencao.ver',
   ADMIN_RETENCAO_EDITAR: 'admin.retencao.editar',
@@ -599,6 +602,21 @@ export const CATALOGO_PERMISSOES: RecursoCatalogo[] = [
         acao: ACOES.VER,
         codigo: PERMISSOES.ADMIN_AUDITORIA_VER,
         descricao: 'Consultar registros de auditoria e acessos',
+      },
+    ],
+  },
+  {
+    chave: 'admin.seguranca',
+    rotulo: 'Segurança',
+    grupo: 'Administração',
+    telas: ['/admin/seguranca'],
+    acoes: [
+      {
+        acao: ACOES.VER,
+        codigo: PERMISSOES.ADMIN_SEGURANCA_VER,
+        descricao:
+          'Monitorar as rotas sensíveis da API pública: quem chamou, de onde, ' +
+          'o que falhou e por quê',
       },
     ],
   },

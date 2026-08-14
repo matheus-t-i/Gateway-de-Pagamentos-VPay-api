@@ -211,6 +211,7 @@ model Usuario {
   papeis                     UsuarioPapel[]
   tokensRedefinicao          TokenRedefinicaoSenha[]
   auditoriasAcesso           AuditoriaAcesso[]
+  registrosAcessoApi         RegistroAcessoApi[]
   credenciaisApi             CredencialApi[] @relation("CredencialTitular")
   configuracaoPix            ConfiguracaoPixUsuario?
   contasProvedor             ContaProvedor[]
@@ -528,20 +529,50 @@ model IpPermitidoApi {
   @@map("ips_permitidos_api")
 }
 
+/// Trilha das rotas SENSÍVEIS (`/v1/*`): toda chamada à API pública, com
+/// sucesso ou não. É a fonte da tela `/admin/seguranca`.
+///
+/// Grava tentativa RECUSADA também — é justamente ela que interessa em
+/// segurança: 401 em rajada, 403 de escopo, IP fora da allowlist. Por isso
+/// `chavePublica` existe separada de `credencialApiId`: quando a autenticação
+/// falha não há credencial resolvida, e sem guardar a chave TENTADA não se
+/// descobre quem (ou o quê) está batendo na porta.
+///
+/// NUNCA guardar segredo, token ou corpo da requisição aqui: a tela é de
+/// leitura ampla e viraria um vazamento com carimbo de auditoria.
 model RegistroAcessoApi {
   id                   BigInt   @id @default(autoincrement())
   usuarioId            BigInt?  @map("usuario_id")
   credencialApiId      BigInt?  @map("credencial_api_id")
+  /// Chave PÚBLICA apresentada na tentativa (nunca o segredo). Preenchida
+  /// mesmo quando a autenticação falha e não há credencial vinculada.
+  chavePublica         String?  @map("chave_publica") @db.VarChar(120)
   enderecoIp           String?  @map("endereco_ip") @db.VarChar(45)
+  agenteUsuario        String?  @map("agente_usuario")
   metodo               String   @db.VarChar(10)
   caminho              String   @db.VarChar(500)
   statusHttp           Int      @map("status_http")
+  /// Redundante com `statusHttp < 400`, mas indexado: a tela abre filtrando
+  /// falhas, e varrer milhões de linhas por comparação não usaria índice.
+  sucesso              Boolean  @default(true)
+  /// Código estável do erro quando a API devolve um (ex.: VALOR_FORA_DO_LIMITE).
+  codigoErro           String?  @map("codigo_erro") @db.VarChar(80)
+  /// Mensagem já legível — o "qual erro" da tela, sem precisar decifrar status.
+  mensagemErro         String?  @map("mensagem_erro")
   latenciaMs           Int?     @map("latencia_ms")
   identificadorRastreio String? @map("identificador_rastreio") @db.VarChar(100)
   criadoEm             DateTime @default(now()) @map("criado_em") @db.Timestamptz
 
   credencial           CredencialApi? @relation(fields: [credencialApiId], references: [id])
+  usuario              Usuario?       @relation(fields: [usuarioId], references: [id])
 
+  // Um índice por eixo de investigação da tela: linha do tempo, só falhas,
+  // por IP suspeito, por credencial e por cliente.
+  @@index([criadoEm])
+  @@index([sucesso, criadoEm])
+  @@index([enderecoIp, criadoEm])
+  @@index([credencialApiId, criadoEm])
+  @@index([usuarioId, criadoEm])
   @@map("registros_acesso_api")
 }
 

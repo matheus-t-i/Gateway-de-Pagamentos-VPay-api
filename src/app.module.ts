@@ -22,6 +22,7 @@ import { MedModule } from './med/med.module';
 import { OpsModule } from './ops/ops.module';
 import { PerfisModule } from './perfis/perfis.module';
 import { FaturamentoModule } from './faturamento/faturamento.module';
+import { SegurancaModule } from './seguranca/seguranca.module';
 import { RetencaoModule } from './retencao/retencao.module';
 import { HealthController } from './health.controller';
 
@@ -47,6 +48,7 @@ import { HealthController } from './health.controller';
     OpsModule,
     PerfisModule,
     FaturamentoModule,
+    SegurancaModule,
   ],
   controllers: [HealthController],
   providers: [

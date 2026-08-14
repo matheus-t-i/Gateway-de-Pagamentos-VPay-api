@@ -28,7 +28,11 @@ export class HttpExceptionLogFilter implements ExceptionFilter {
   catch(exception: HttpException, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const req = ctx.getRequest<
-      Request & { identificadorRastreio?: string; mensagemErroHttp?: string }
+      Request & {
+        identificadorRastreio?: string;
+        mensagemErroHttp?: string;
+        codigoErroHttp?: string;
+      }
     >();
     const res = ctx.getResponse<Response>();
     const status = exception.getStatus();
@@ -36,6 +40,23 @@ export class HttpExceptionLogFilter implements ExceptionFilter {
     const message = mensagemDeHttpException(exception.getResponse());
     const rastreio = req.identificadorRastreio;
     req.mensagemErroHttp = message;
+    /**
+     * Código estável do erro, para a trilha de `/admin/seguranca` poder
+     * agrupar sem depender da frase (que muda com a redação). Prioriza o
+     * `erro` dos nossos corpos estruturados (ex.: VALOR_FORA_DO_LIMITE) e cai
+     * no `error` padrão do Nest ("Unauthorized", "Bad Request").
+     */
+    const corpoErro = exception.getResponse();
+    if (corpoErro && typeof corpoErro === 'object') {
+      const c = corpoErro as { erro?: unknown; error?: unknown };
+      const codigo =
+        (typeof c.erro === 'string' && c.erro) ||
+        (typeof c.error === 'string' && c.error) ||
+        undefined;
+      if (codigo) req.codigoErroHttp = codigo;
+    } else if (typeof corpoErro === 'string') {
+      req.codigoErroHttp = exception.name;
+    }
 
     if (deveLogarErroHttp(status, path)) {
       const linha = rastreio

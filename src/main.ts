@@ -5,6 +5,7 @@ import { json, urlencoded } from 'express';
 import { AppModule } from './app.module';
 import { validarAmbiente } from './common/env.validation';
 import { API_GLOBAL_PREFIX } from './common/api-prefix';
+import { RegistroAcessoApiMiddleware } from './seguranca/registro-acesso-api.middleware';
 
 // Rede de segurança: ids do Prisma são BigInt e JSON.stringify lança
 // "Do not know how to serialize a BigInt" (vira 500). Controllers devem mapear
@@ -79,6 +80,19 @@ async function bootstrap() {
   app.setGlobalPrefix(API_GLOBAL_PREFIX, {
     exclude: ['health', 'health/(.*)', 'admin/queues', 'admin/queues/(.*)'],
   });
+
+  /**
+   * Trilha de segurança das rotas `/v1/*` (tela `/admin/seguranca`).
+   *
+   * Registrado aqui, e não por `MiddlewareConsumer.forRoutes('*')`, porque
+   * este projeto roda **Express 5**: o `'*'` deixou de ser rota válida
+   * (path-to-regexp v8) e o middleware simplesmente NÃO era executado — sem
+   * erro, sem log, silencioso. Foi pego medindo: 6 chamadas recusadas, 0
+   * gravadas. Aqui é `app.use` cru, imune a mudança de sintaxe de rota; o
+   * próprio middleware decide o que é rota sensível.
+   */
+  const trilhaApi = app.get(RegistroAcessoApiMiddleware);
+  app.use((req: never, res: never, next: never) => trilhaApi.use(req, res, next));
 
   // SIGTERM do Render precisa fechar Prisma e Workers BullMQ; sem isto jobs em
   // voo morrem no meio a cada deploy.
