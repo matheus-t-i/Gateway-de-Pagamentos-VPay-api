@@ -4,7 +4,12 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  // Runtime (API/Worker): usuário de APLICAÇÃO, membro de `vpay_aplicacao` —
+  // só DML, sem DDL (migration 20260814100000_role_aplicacao).
   url      = env("DATABASE_URL")
+  // Migrations/introspecção (CLI): OWNER do banco. É o que o `migrate deploy`
+  // do preDeployCommand usa — sem owner não há DDL.
+  directUrl = env("DIRECT_DATABASE_URL")
 }
 
 // =========================================================

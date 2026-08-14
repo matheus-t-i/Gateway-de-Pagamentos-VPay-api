@@ -18,6 +18,19 @@ ambíguo e cobrança fantasma de cash-in. Complementa o fail-fast de código
   extra — mas `NEXT_PUBLIC_API_URL` é OBRIGATÓRIA no ambiente de build: sem
   ela o `next build` agora **falha de propósito** (antes publicava um painel
   chamando localhost e o erro só aparecia no browser do cliente).
+- **Banco — dois usuários (least privilege):** o runtime (API/Worker) conecta
+  com um usuário de APLICAÇÃO, membro do role `vpay_aplicacao` (só DML — a
+  migration `20260814100000_role_aplicacao` cria o role e os grants); o OWNER
+  fica exclusivo do `migrate deploy` (`DIRECT_DATABASE_URL`, que o blueprint já
+  aponta para a connection string do Render). Passo a passo no primeiro deploy:
+  1. Deploy inicial com `DATABASE_URL` = connection string do owner (a migração
+     ainda não rodou, o role não existe).
+  2. Depois da migração, no psql do banco (dashboard do Render → Connect):
+     `CREATE USER vpay_app LOGIN PASSWORD '<segredo forte>' IN ROLE vpay_aplicacao;`
+  3. Trocar `DATABASE_URL` da vpay-api e do vpay-worker para a mesma connection
+     string substituindo `user:senha` por `vpay_app:<segredo>` e redeploy.
+  4. Conferir no boot: `/health/ready` verde e nenhuma query com erro de
+     permissão nos logs. Rollback = voltar `DATABASE_URL` para o owner.
 - Smoke local da imagem: `docker build -t vpay-api .` na raiz da API.
 
 ---
@@ -30,6 +43,9 @@ ambíguo e cobrança fantasma de cash-in. Complementa o fail-fast de código
 4. `VALORION_WEBHOOK_TOKEN` forte; `TRUST_PROXY=1`; `WEB_URL` e `API_PUBLIC_URL` HTTPS.
 5. Allowlist IP Valorion cadastrada em `ips_permitidos_webhook_provedor` **antes** do boot
    (produção não sobe com lista vazia).
+5b. `DATABASE_URL` do runtime aponta para o usuário de APLICAÇÃO (`vpay_app`,
+   membro de `vpay_aplicacao`) e `DIRECT_DATABASE_URL` para o owner (§0) —
+   runtime rodando como owner anula o least privilege e bypassaria uma RLS futura.
 6. Release: `prisma migrate deploy` (ou `npm run release` / `scripts/release.sh`).
 7. Probes: `GET /health` (liveness) e `GET /health/ready` (Postgres + Redis).
 8. Worker saudável; pager/alerta em logs `ALERTA_FILA` (filas vermelhas / depth).

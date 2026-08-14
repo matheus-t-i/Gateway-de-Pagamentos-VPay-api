@@ -24,7 +24,14 @@ services:
     dockerCommand: node dist/main.js
     envVars:
       - fromGroup: vpay-backend
+      # Runtime conecta como o usuário de APLICAÇÃO (membro de `vpay_aplicacao`,
+      # só DML — RUNBOOK-GOLIVE.md §0): mesma host/porta/banco do owner, com
+      # user:senha próprios. No PRIMEIRO deploy pode receber a connection string
+      # do owner; trocar assim que a migração criar o role.
       - key: DATABASE_URL
+        sync: false
+      # OWNER do banco — usado SÓ pelo `migrate deploy` (directUrl do Prisma).
+      - key: DIRECT_DATABASE_URL
         fromDatabase:
           name: vpay-postgres
           property: connectionString
@@ -41,7 +48,10 @@ services:
     dockerCommand: node dist/worker.js
     envVars:
       - fromGroup: vpay-backend
+      # Mesmo par da vpay-api: runtime = usuário de aplicação, owner só p/ CLI.
       - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_DATABASE_URL
         fromDatabase:
           name: vpay-postgres
           property: connectionString

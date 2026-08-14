@@ -30,6 +30,14 @@ export function validarAmbiente(env: Record<string, string | undefined>) {
   }
 
   if (producao) {
+    // Owner do banco fica SÓ no `migrate deploy` (directUrl); o runtime usa o
+    // usuário de aplicação. Sem a variável, a migração do preDeploy não roda —
+    // melhor recusar o boot com o motivo do que falhar o deploy sem contexto.
+    if (!env.DIRECT_DATABASE_URL) {
+      erros.push(
+        'DIRECT_DATABASE_URL é obrigatória em produção (owner do banco, usada só pelas migrations — o runtime conecta com o usuário de aplicação em DATABASE_URL).',
+      );
+    }
     // Segredos de exemplo derrubam o boot.
     for (const nome of [
       'JWT_SECRET',
