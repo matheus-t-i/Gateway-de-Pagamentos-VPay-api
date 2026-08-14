@@ -121,6 +121,18 @@ export type GetStatusResult = {
   valor?: Decimal;
   endToEndId?: string;
   paidAt?: Date;
+  /**
+   * A liquidante respondeu, de forma DEFINITIVA, que não conhece este id
+   * (404 "não encontrada") — diferente de "não sei agora" (timeout/5xx, que
+   * continua sendo erro e retenta).
+   *
+   * Existe porque há liquidante SEM consulta de status para cash-out: a
+   * Valorion documenta o postback como o mecanismo de acompanhamento do saque,
+   * e o endpoint de consulta é de cash-in (responde para alguns ids de saque
+   * por acidente, não por contrato). Quem decide o que fazer com isso é o
+   * processor — nunca o client.
+   */
+  naoEncontradaNaLiquidante?: boolean;
   raw: unknown;
 };
 

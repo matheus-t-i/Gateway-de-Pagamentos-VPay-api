@@ -90,6 +90,41 @@ export class PixWebhookCashoutProcessor extends WorkerHost {
     });
 
     /**
+     * CASH-OUT SEM CONSULTA POSSÍVEL — o postback autenticado é a evidência.
+     *
+     * A Valorion **não tem** consulta de status para saque: a doc dela
+     * documenta o postback como o mecanismo de acompanhamento do cash-out, e o
+     * endpoint que usamos é o de cash-in (responde para alguns ids de saque,
+     * 404 para outros — inclusive para o id que o PAINEL deles mostra como
+     * "Aprovado", e para o endToEnd).
+     *
+     * Só entra aqui com 404 DEFINITIVO. Timeout e 5xx continuam sendo erro: a
+     * dúvida tem que retentar, e nunca virar saque concluído.
+     *
+     * O que sustenta a decisão é a Camada 2, fail-closed em produção
+     * (`ipAllowed`): o postback chegou com o TOKEN secreto do `postbackUrl` e
+     * de IP na allowlist cadastrada — allowlist vazia ou CIDR aberto são
+     * recusados fora de dev. Sem isto, um saque JÁ PAGO ficava preso em
+     * PROCESSANDO com o saldo do lojista debitado, sem nenhum caminho
+     * automático de saída. Decisão do dono do produto, ago/2026.
+     *
+     * ⚠️ Restrito a CASH-OUT. Nunca estender ao cash-in: lá a consulta existe,
+     * é documentada e funciona — creditar venda por aviso não verificado é o
+     * caminho clássico do crédito forjado.
+     */
+    if (
+      remote.naoEncontradaNaLiquidante === true &&
+      ['PAID', 'COMPLETED', 'CONCLUIDO'].includes(statusEvent)
+    ) {
+      this.logger.warn(
+        `cash-out tx=${tx.id} sem consulta possível na liquidante ` +
+          `(id=${liquidanteId} desconhecido) — concluindo pelo postback ` +
+          `AUTENTICADO (token + IP allowlist), status=${statusEvent}`,
+      );
+      remote.status = 'COMPLETED';
+    }
+
+    /**
      * Máquina de estados — estados terminais não mudam de direção.
      * FALHA→CONCLUIDA sem re-débito = perda da VPay; CONCLUIDA→FALHA+estorno
      * = crédito indevido ao lojista.

@@ -5,6 +5,19 @@ Dois repositórios: `Gateway-de-Pagamentos-VPay-api` (Nest API + Worker + Prisma
 ## Webhook security (inegociável)
 
 1. **Camada 1:** antes de creditar/terminal, consultar status na liquidante; se não confirmar → throw (job failed).
+   ⚠️ **Única exceção, e só em CASH-OUT da Valorion:** a doc deles **não tem
+   consulta de status para saque** — aponta o postback como o mecanismo de
+   acompanhamento do cash-out. O endpoint que usamos (`getTransactionStatus.php`)
+   é de cash-in: responde para ALGUNS ids de saque e 404 para outros, inclusive
+   para o id que o painel deles mostra como "Aprovado" (o endToEnd também 404).
+   Quando ele responde **404 definitivo**, o postback JÁ AUTENTICADO pela Camada 2
+   (token do `postbackUrl` + IP na allowlist, fail-closed em produção) vira a
+   evidência e o saque conclui. Sem isso, saque pago ficava preso em
+   `PROCESSANDO` com o saldo do lojista debitado e sem saída automática.
+   Timeout/5xx **não** entram: dúvida continua sendo erro e retenta. Decisão do
+   dono do produto, ago/2026. **Nunca estender ao cash-in** — lá a consulta
+   existe, é documentada e funciona. Specs:
+   `src/providers/valorion/cashout-sem-consulta.spec.ts`.
 2. **Camada 2:** IP allowlist e/ou `x-key`/token conforme a adquirente.
    **Valorion:** não manda token no header — embute `VALORION_WEBHOOK_TOKEN` no
    `postbackUrl` do create (`?token=`) e confere na query (rule `valorion-webhook`).

@@ -41,6 +41,18 @@ export function recusaDefinitivaNoAuth(erro: RecusaAdquirenteError): boolean {
 }
 
 /**
+ * A liquidante disse, em DEFINITIVO, que não conhece o id consultado.
+ *
+ * Só o 404 "Transação não encontrada" conta. Timeout, 5xx e erro de rede ficam
+ * de fora de propósito: ali não se sabe nada, e tratar dúvida como
+ * "não existe" abriria a porta para concluir saque sem evidência.
+ */
+export function ehTransacaoNaoEncontrada(erro: unknown): boolean {
+  const m = erro instanceof Error ? erro.message : String(erro ?? '');
+  return /HTTP 404/.test(m) && /n[ãa]o encontrada/i.test(m);
+}
+
+/**
  * Chave de destino no formato da VALORION — que NÃO é o E.164 dos callers:
  * a doc deles pede "apenas números para CPF/CNPJ/PHONE", e o `/auth` recusa
  * `+5562…`/`5562…` com 401 "X-Pix-Key inválida" (confirmado em produção,
@@ -492,14 +504,53 @@ export class ValorionPaymentProvider implements PaymentProviderPort {
       // não confirmar às cegas.
       return { status: 'PENDING', raw: { erro: 'sem idTransacaoLiquidante' } };
     }
-    const resp = await this.request({
+    /**
+     * ⚠️ Este endpoint é o de CASH-IN. A doc da Valorion não tem consulta de
+     * status para saque — ela documenta o postback como o mecanismo de
+     * acompanhamento do cash-out. Na prática ele responde para ALGUNS ids de
+     * saque e 404 para outros (medido: um saque responde `tipo: CASH OUT`,
+     * outro responde 404 mesmo com o id que o painel deles exibe como válido,
+     * e o endToEnd também 404).
+     *
+     * Por isso o 404 aqui não é erro de transporte: é "não tenho como
+     * responder por esta transação". Quem trata é o processor.
+     */
+    let resp: Record<string, unknown>;
+    try {
+      resp = await this.consultarStatus(params);
+    } catch (e) {
+      if (ehTransacaoNaoEncontrada(e)) {
+        return {
+          status: 'PENDING',
+          naoEncontradaNaLiquidante: true,
+          raw: {
+            erro: 'liquidante não conhece este id',
+            detalhe: String(e).slice(0, 300),
+          },
+        };
+      }
+      throw e;
+    }
+    return this.montarStatus(resp, params);
+  }
+
+  private async consultarStatus(params: {
+    idTransacaoLiquidante?: string;
+    credenciais: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> {
+    return this.request({
       method: 'GET',
       url:
         `${this.baseUrl()}/api/s1/getTransaction/api/getTransactionStatus.php` +
-        `?id_transaction=${encodeURIComponent(params.idTransacaoLiquidante)}`,
+        `?id_transaction=${encodeURIComponent(params.idTransacaoLiquidante!)}`,
       headers: { Authorization: `Basic ${this.basicKey(params.credenciais)}` },
     });
+  }
 
+  private async montarStatus(
+    resp: Record<string, unknown>,
+    params: { idTransacaoLiquidante?: string },
+  ): Promise<GetStatusResult> {
     const status = ValorionPaymentProvider.mapStatus(resp.situacao ?? resp.status, resp.tipo);
 
     // O endToEnd não vem na consulta — vem no webhook; recuperar de lá quando
