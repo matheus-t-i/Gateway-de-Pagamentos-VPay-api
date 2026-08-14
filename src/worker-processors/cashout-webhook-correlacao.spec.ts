@@ -68,6 +68,7 @@ describe('PixWebhookCashoutProcessor — id de ordem × id de liquidação', () 
       },
       tentativaTransacao: { findFirst, update: jest.fn() },
       transacao: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      transacaoPix: { updateMany: jest.fn() },
       historicoSituacaoTransacao: { create: jest.fn() },
       eventoOutbox: { create: jest.fn() },
       webhookRecebidoProvedor: { update: jest.fn() },
@@ -139,6 +140,21 @@ describe('PixWebhookCashoutProcessor — id de ordem × id de liquidação', () 
     tentativa.idTransacaoLiquidante = idDaLiquidacao;
     await processor.process(job());
     expect(prisma.tentativaTransacao.update).not.toHaveBeenCalled();
+  });
+
+  /**
+   * O endToEnd é o identificador do PIX no SPI — é com ele que o lojista prova
+   * o pagamento no banco. Só o cash-in gravava; no saque ele chegava no
+   * postback e era jogado fora, deixando a coluna Transação com "—" e a busca
+   * por endToEnd sem resultado em TODO saque.
+   */
+  it('grava o endToEnd do postback na transação', async () => {
+    const { processor, prisma } = montar();
+    await processor.process(job());
+    expect(prisma.transacaoPix.updateMany).toHaveBeenCalledWith({
+      where: { transacaoId: 9n },
+      data: { identificadorFimAFim: 'E38297374202608132009TGYHXPXVOW9' },
+    });
   });
 
   it('transação já CONCLUIDA não é reprocessada', async () => {

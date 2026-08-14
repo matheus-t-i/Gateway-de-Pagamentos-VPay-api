@@ -163,6 +163,16 @@ export class PixWebhookCashoutProcessor extends WorkerHost {
       throw new Error(`Camada1 cash-out não confirmou: ${remote.status}`);
     }
 
+    /**
+     * Fontes do endToEnd, nesta ordem: o que a consulta devolveu e, se ela não
+     * trouxe (é o caso do cash-out da Valorion), o do próprio postback.
+     */
+    const endToEndDoSaque =
+      remote.endToEndId ??
+      (typeof body.endToEnd === 'string' && body.endToEnd.trim()
+        ? body.endToEnd.trim()
+        : undefined);
+
     const atualizado = await this.prisma.transacao.updateMany({
       where: {
         id: tx.id,
@@ -216,6 +226,27 @@ export class PixWebhookCashoutProcessor extends WorkerHost {
                 processadoEm: new Date(),
                 usuarioId: tx.usuarioId,
               },
+            }),
+          ]
+        : []),
+      /**
+       * endToEnd do SAQUE — o identificador do PIX no SPI.
+       *
+       * Só o cash-in gravava isto (`CashinCreditoService`); no cash-out ele
+       * chegava no postback e era descartado. Resultado: a coluna Transação do
+       * relatório mostrava "—" em TODO saque e a busca por endToEnd não
+       * achava nada, mesmo em saque concluído sem problema nenhum.
+       *
+       * É o identificador que o lojista leva ao banco para provar o
+       * pagamento, então some do sistema justamente quando mais importa.
+       * `updateMany` sem `where` de valor: se já houver um gravado, o
+       * `?? undefined` abaixo evita sobrescrever com nulo.
+       */
+      ...(endToEndDoSaque
+        ? [
+            this.prisma.transacaoPix.updateMany({
+              where: { transacaoId: tx.id },
+              data: { identificadorFimAFim: endToEndDoSaque },
             }),
           ]
         : []),
