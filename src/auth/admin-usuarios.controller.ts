@@ -103,6 +103,7 @@ export class AdminUsuariosController {
       idPublico: u.idPublico,
       nomeRazaoSocial: u.nomeRazaoSocial,
       email: u.email,
+      telefone: u.telefone,
       cpfCnpj: u.cpfCnpj,
       tipoPessoa: u.tipoPessoa,
       // Para PJ, é o CPF/nome de quem responde pela pessoa jurídica — o analista compara
