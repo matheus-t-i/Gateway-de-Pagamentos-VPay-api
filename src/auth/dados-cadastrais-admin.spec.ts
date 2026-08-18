@@ -17,6 +17,24 @@ jest.mock('../common/step-up-totp', () => {
 });
 
 /**
+ * CPF de teste com dígitos verificadores corretos a partir de 9 dígitos de
+ * base — a ficha cadastral exige DV válido, então o CPF gerado no `beforeAll`
+ * precisa fechar o módulo 11 para atravessar o schema.
+ */
+function cpfDeTeste(base9: string): string {
+  const base = base9.replace(/\D/g, '').slice(0, 9).padEnd(9, '0');
+  const dv = (s: string) => {
+    let soma = 0;
+    for (let i = 0; i < s.length; i++) soma += Number(s[i]) * (s.length + 1 - i);
+    const r = (soma * 10) % 11;
+    return r === 10 ? 0 : r;
+  };
+  const d1 = dv(base);
+  const d2 = dv(base + d1);
+  return `${base}${d1}${d2}`;
+}
+
+/**
  * Admin corrige ficha cadastral (nome, documento, endereço). E-mail é o
  * identificador único — mesmo se o body mandar outro, a conta não troca.
  */
@@ -44,10 +62,11 @@ describe('editar dados cadastrais (admin)', () => {
     tipoPessoa?: 'PF' | 'PJ';
   }) {
     seq += 1;
+    const cpf = extra?.cpfCnpj ?? cpfDeTeste(`7${seq}${sufixo}`);
     return prisma.usuario.create({
       data: {
         tipoPessoa: extra?.tipoPessoa ?? 'PF',
-        cpfCnpj: extra?.cpfCnpj ?? `7${seq}${sufixo}`.slice(0, 11).padEnd(11, '0'),
+        cpfCnpj: cpf,
         nomeRazaoSocial: 'Nome Errado',
         email: extra?.email ?? `cliente-ficha-${seq}-${sufixo}@teste.local`,
         senhaHash: 'x',
@@ -55,7 +74,7 @@ describe('editar dados cadastrais (admin)', () => {
         endereco,
         faturamentoMensalMedio: '10000.00',
         nomeResponsavel: 'Nome Errado',
-        cpfResponsavel: extra?.cpfCnpj ?? `7${seq}${sufixo}`.slice(0, 11).padEnd(11, '0'),
+        cpfResponsavel: cpf,
         situacao: SITUACAO_USUARIO.ATIVO,
       },
     });
@@ -223,6 +242,47 @@ describe('editar dados cadastrais (admin)', () => {
     ).rejects.toThrow(BadRequestException);
   });
 
+  it('recusa CPF com dígito verificador errado e telefone inventado', async () => {
+    const alvo = await criarUsuario();
+    // Troca o último dígito: mesmo tamanho, DV não fecha.
+    const cpfErrado =
+      alvo.cpfCnpj.slice(0, 10) + String((Number(alvo.cpfCnpj[10]) + 1) % 10);
+
+    await expect(
+      controller.editarDadosCadastrais(
+        alvo.idPublico,
+        {
+          tipoPessoa: 'PF',
+          cpfCnpj: cpfErrado,
+          nomeRazaoSocial: alvo.nomeRazaoSocial,
+          telefone: '11988887777',
+          endereco,
+          codigoTotp: totp(),
+        },
+        { user: { id: adminId.toString() } },
+      ),
+    ).rejects.toThrow(BadRequestException);
+
+    await expect(
+      controller.editarDadosCadastrais(
+        alvo.idPublico,
+        {
+          tipoPessoa: 'PF',
+          cpfCnpj: alvo.cpfCnpj,
+          nomeRazaoSocial: alvo.nomeRazaoSocial,
+          telefone: '(00) 00000-0000',
+          endereco,
+          codigoTotp: totp(),
+        },
+        { user: { id: adminId.toString() } },
+      ),
+    ).rejects.toThrow(BadRequestException);
+
+    const depois = await prisma.usuario.findUniqueOrThrow({ where: { id: alvo.id } });
+    expect(depois.cpfCnpj).toBe(alvo.cpfCnpj);
+    expect(depois.telefone).toBe('11988887777');
+  });
+
   it('PJ sem responsável é recusado', async () => {
     const alvo = await criarUsuario();
 
@@ -231,7 +291,7 @@ describe('editar dados cadastrais (admin)', () => {
         alvo.idPublico,
         {
           tipoPessoa: 'PJ',
-          cpfCnpj: '12345678000199',
+          cpfCnpj: '11444777000161',
           nomeRazaoSocial: 'Empresa Sem Responsavel LTDA',
           telefone: '11988887777',
           endereco,

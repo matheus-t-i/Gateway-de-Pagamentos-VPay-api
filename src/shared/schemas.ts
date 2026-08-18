@@ -3,11 +3,12 @@ import { TEMAS } from './enums';
 import { appIntegracao, EVENTOS_INTEGRACAO, TIPO_INTEGRACAO } from './integracoes';
 import { normalizarIpOuCidr } from './rede';
 import {
-  documentoValidoPara,
   isCnpj,
   isCpf,
+  motivoDocumentoInvalido,
   normalizarDocumento,
 } from './documento';
+import { motivoTelefoneInvalido, normalizarTelefone } from './telefone';
 import {
   chavePixValida,
   mensagemChavePixInvalida,
@@ -39,8 +40,12 @@ export const enderecoSchema = z.object({
 });
 
 /**
- * Telefone BR com DDD. Aceita máscara; grava só dígitos.
- * 10 = fixo, 11 = celular; 12–13 cobrem +55.
+ * Telefone do PAGADOR da cobrança (API pública / depósito). Aceita máscara;
+ * grava só dígitos. 10 = fixo, 11 = celular; 12–13 cobrem +55.
+ *
+ * De propósito mais FROUXO que o `telefoneContaSchema`: o dado vem do checkout
+ * do lojista e a liquidante só exige que exista — recusar a venda por causa de
+ * um telefone estranho é pior do que aceitá-lo ("nunca perder venda").
  */
 export const telefoneObrigatorioSchema = z
   .string({ required_error: 'Informe o telefone' })
@@ -51,6 +56,57 @@ export const telefoneObrigatorioSchema = z
     message: 'Telefone deve ter DDD e número (10 ou 11 dígitos).',
   });
 
+/**
+ * Telefone de CONTATO da conta (cadastro, ficha do admin, perfil): DDD real,
+ * celular com 9 / fixo com 2–5, sem sequência repetida (`src/shared/telefone.ts`).
+ * Aceita máscara e `+55`; grava DDD + número em dígitos.
+ */
+export const telefoneContaSchema = z
+  .string({ required_error: 'Informe o telefone' })
+  .max(30)
+  .superRefine((valor, ctx) => {
+    const motivo = motivoTelefoneInvalido(valor);
+    if (motivo) ctx.addIssue({ code: z.ZodIssueCode.custom, message: motivo });
+  })
+  .transform(normalizarTelefone);
+
+/**
+ * `cpfCnpj` e `responsavel.cpf` do cadastro e da ficha cadastral: aceita
+ * máscara, normaliza e exige DÍGITOS VERIFICADORES (não só o tamanho) —
+ * `documentoValidoPara` em `src/shared/documento.ts`.
+ */
+function validarDocumentosDaConta(
+  data: {
+    tipoPessoa: 'PF' | 'PJ';
+    cpfCnpj: string;
+    responsavel?: { cpf: string; nome: string };
+  },
+  ctx: z.RefinementCtx,
+) {
+  const motivoDoc = motivoDocumentoInvalido(data.tipoPessoa, data.cpfCnpj);
+  if (motivoDoc) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['cpfCnpj'], message: motivoDoc });
+  }
+  if (data.tipoPessoa === 'PJ') {
+    if (!data.responsavel) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['responsavel'],
+        message: 'Informe o CPF e o nome do responsável pela empresa.',
+      });
+    } else {
+      const motivoResp = motivoDocumentoInvalido('PF', data.responsavel.cpf);
+      if (motivoResp) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['responsavel', 'cpf'],
+          message: `CPF do responsável — ${motivoResp}`,
+        });
+      }
+    }
+  }
+}
+
 export const cadastroUsuarioSchema = z
   .object({
     tipoPessoa: z.enum(['PF', 'PJ']),
@@ -59,7 +115,7 @@ export const cadastroUsuarioSchema = z
     nomeRazaoSocial: z.string().min(2).max(255),
     nomeFantasia: z.string().max(255).optional(),
     email: z.string().email(),
-    telefone: telefoneObrigatorioSchema,
+    telefone: telefoneContaSchema,
     senha: z
       .string()
       .min(8)
@@ -102,33 +158,7 @@ export const cadastroUsuarioSchema = z
       { required_error: 'Marque o aceite dos dois documentos para concluir o cadastro' },
     ),
   })
-  .superRefine((data, ctx) => {
-    if (!documentoValidoPara(data.tipoPessoa, data.cpfCnpj)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['cpfCnpj'],
-        message:
-          data.tipoPessoa === 'PF'
-            ? 'CPF inválido (11 dígitos).'
-            : 'CNPJ inválido (14 caracteres; o novo padrão aceita letras nas 12 primeiras posições).',
-      });
-    }
-    if (data.tipoPessoa === 'PJ') {
-      if (!data.responsavel) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['responsavel'],
-          message: 'Informe o CPF e o nome do responsável pela empresa.',
-        });
-      } else if (!isCpf(data.responsavel.cpf)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['responsavel', 'cpf'],
-          message: 'CPF do responsável inválido (11 dígitos).',
-        });
-      }
-    }
-  });
+  .superRefine(validarDocumentosDaConta);
 
 /**
  * Correção cadastral pelo admin. E-mail NÃO entra: é o identificador único da
@@ -141,7 +171,7 @@ export const editarDadosCadastraisAdminSchema = z
     cpfCnpj: z.string().transform(normalizarDocumento),
     nomeRazaoSocial: z.string().trim().min(2).max(255),
     nomeFantasia: z.string().trim().max(255).optional().nullable(),
-    telefone: telefoneObrigatorioSchema,
+    telefone: telefoneContaSchema,
     endereco: z.object({
       cep: z
         .string()
@@ -171,33 +201,7 @@ export const editarDadosCadastraisAdminSchema = z
       .optional(),
     codigoTotp: z.string().regex(/^\d{6}$/),
   })
-  .superRefine((data, ctx) => {
-    if (!documentoValidoPara(data.tipoPessoa, data.cpfCnpj)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['cpfCnpj'],
-        message:
-          data.tipoPessoa === 'PF'
-            ? 'CPF inválido (11 dígitos).'
-            : 'CNPJ inválido (14 caracteres; o novo padrão aceita letras nas 12 primeiras posições).',
-      });
-    }
-    if (data.tipoPessoa === 'PJ') {
-      if (!data.responsavel) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['responsavel'],
-          message: 'Informe o CPF e o nome do responsável pela empresa.',
-        });
-      } else if (!isCpf(data.responsavel.cpf)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['responsavel', 'cpf'],
-          message: 'CPF do responsável inválido (11 dígitos).',
-        });
-      }
-    }
-  });
+  .superRefine(validarDocumentosDaConta);
 
 /** Reverificação de credenciais no onboarding público (sem JWT). */
 export const onboardingCredenciaisSchema = z.object({
@@ -323,7 +327,8 @@ export const ESCOPOS_API = {
 } as const;
 
 export const atualizarPerfilSchema = z.object({
-  telefone: z.string().max(20).optional(),
+  /** Mesma regra do cadastro: o telefone da conta é canal de contato real. */
+  telefone: telefoneContaSchema.optional(),
   nomeFantasia: z.string().max(255).optional(),
   temaPreferido: z.enum([TEMAS.PADRAO, TEMAS.CLARO, TEMAS.ESCURO]).optional(),
   codigoTotp: z.string().regex(/^\d{6}$/),
