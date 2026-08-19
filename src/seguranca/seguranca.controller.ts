@@ -14,6 +14,18 @@ const ROTAS_SENSIVEIS = [
 ] as const;
 
 /**
+ * Assinatura de varredura: 404 do ROTEADOR (rota que não existe), distinto do
+ * 404 de negócio. Rota desconhecida responde com a mensagem fixa do Nest
+ * ("Cannot GET /api/…") — nenhuma mensagem nossa começa assim (erro de negócio
+ * é redigido em português). Classificado na LEITURA de propósito: vale
+ * igualmente para as linhas gravadas antes desta mudança, sem migration.
+ */
+const ROTA_INEXISTENTE = {
+  statusHttp: 404,
+  mensagemErro: { startsWith: 'Cannot ' },
+} as const;
+
+/**
  * Trilha de segurança da API pública.
  *
  * Leitura pura sobre `registros_acesso_api` — nada aqui altera estado. O
@@ -40,9 +52,12 @@ export class SegurancaController {
   async resumo(@Query() q: Record<string, string>) {
     const where = this.montarWhere(q);
 
-    const [total, falhas, porStatus, ipsTop, naoAutorizados] = await Promise.all([
+    const [total, falhas, varredura, porStatus, ipsTop, naoAutorizados] = await Promise.all([
       this.prisma.registroAcessoApi.count({ where }),
       this.prisma.registroAcessoApi.count({ where: { ...where, sucesso: false } }),
+      // AND, e não spread: um filtro de status vindo da querystring não pode
+      // ser sobrescrito pelo 404 da assinatura.
+      this.prisma.registroAcessoApi.count({ where: { AND: [where, ROTA_INEXISTENTE] } }),
       this.prisma.registroAcessoApi.groupBy({
         by: ['statusHttp'],
         where,
@@ -67,11 +82,21 @@ export class SegurancaController {
       }),
     ]);
 
+    /**
+     * Varredura fora da conta de recusa: 404 de rota que nem existe não diz
+     * nada sobre a saúde das integrações — é scanner batendo na porta. Sem a
+     * separação, 4 minutos de varredura jogaram a taxa a 38% e o número parou
+     * de servir para o que existe: denunciar integração doente.
+     */
+    const recusadas = falhas - varredura;
+    const chamadasReais = total - varredura;
+
     return {
       total,
-      falhas,
+      falhas: recusadas,
+      rotasInexistentes: varredura,
       naoAutorizados,
-      taxaFalha: total > 0 ? Number((falhas / total).toFixed(4)) : 0,
+      taxaFalha: chamadasReais > 0 ? Number((recusadas / chamadasReais).toFixed(4)) : 0,
       porStatus: porStatus.map((s) => ({
         status: s.statusHttp,
         quantidade: s._count._all,
@@ -136,12 +161,23 @@ export class SegurancaController {
     const periodo = recorteFiltroData(q.dataInicial, q.dataFinal);
     if (periodo) where.criadoEm = periodo;
 
-    // "Só falhas" é o modo de trabalho normal desta tela.
-    if (q.resultado === 'falha') where.sucesso = false;
-    if (q.resultado === 'sucesso') where.sucesso = true;
-
+    // Status ANTES do resultado: `varredura` fixa statusHttp:404 e precisa ser
+    // a última palavra sobre o status, senão `?resultado=varredura&status=401`
+    // montava um where impossível (404 da assinatura sobrescrito por 401) e a
+    // tela vinha vazia sem explicar por quê.
     const status = Number(q.status);
     if (Number.isFinite(status) && status > 0) where.statusHttp = status;
+
+    // "Só recusadas" é o modo de trabalho normal desta tela — e mostra recusa
+    // de INTEGRAÇÃO: varredura (rota inexistente) tem filtro próprio, como nos
+    // cartões, senão o ruído do scanner soterra o erro de cliente real.
+    if (q.resultado === 'falha') {
+      where.sucesso = false;
+      where.NOT = ROTA_INEXISTENTE;
+    }
+    if (q.resultado === 'sucesso') where.sucesso = true;
+    // `varredura` é 404 por definição — vence um `status` conflitante da query.
+    if (q.resultado === 'varredura') Object.assign(where, ROTA_INEXISTENTE);
 
     // `startsWith` porque a consulta de transação carrega o id no caminho.
     if (q.rota) where.caminho = { startsWith: q.rota };

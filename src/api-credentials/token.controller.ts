@@ -43,6 +43,7 @@ export class TokenApiController {
     headers: Record<string, string | undefined>;
     ip?: string;
     path?: string;
+    apiCredential?: { id: string; usuarioId: string };
   }) {
     const publicKey =
       req.headers['x-api-key'] || (req.headers['x-public-key'] as string | undefined);
@@ -58,6 +59,16 @@ export class TokenApiController {
       ip: extrairIpCliente(req),
       path: req.path,
     });
+
+    /**
+     * A trilha de `/admin/seguranca` identifica o autor por `req.apiCredential`
+     * — nas rotas de negócio é o ApiTokenGuard quem o seta, mas aqui a
+     * autenticação acontece no controller. Sem esta linha, TODA emissão de
+     * token — justamente o evento em que alguém prova posse do segredo —
+     * entrava anônima na auditoria ("não identificado" na tela, usuarioId
+     * nulo na linha).
+     */
+    req.apiCredential = { id: cred.id, usuarioId: cred.usuarioId };
 
     const ttlSegundos = Number(this.config.get('API_TOKEN_TTL_SEGUNDOS') ?? 3600);
     const payload: TokenApiPayload = { sub: cred.id, tipo: TIPO_TOKEN_API };

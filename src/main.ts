@@ -6,6 +6,7 @@ import { AppModule } from './app.module';
 import { validarAmbiente } from './common/env.validation';
 import { API_GLOBAL_PREFIX } from './common/api-prefix';
 import { RegistroAcessoApiMiddleware } from './seguranca/registro-acesso-api.middleware';
+import { FloodV1Middleware } from './seguranca/flood-v1.middleware';
 
 // Rede de segurança: ids do Prisma são BigInt e JSON.stringify lança
 // "Do not know how to serialize a BigInt" (vira 500). Controllers devem mapear
@@ -91,6 +92,16 @@ async function bootstrap() {
    * gravadas. Aqui é `app.use` cru, imune a mudança de sintaxe de rota; o
    * próprio middleware decide o que é rota sensível.
    */
+  /**
+   * Teto de flood por IP em `/v1/*` ANTES do roteamento e ANTES da trilha.
+   * O IpThrottleGuard global só roda quando um handler casa — 404 de rota
+   * inexistente não passa por guard nenhum, e cada um virava um INSERT sem
+   * limite na trilha (a varredura de 17/08 fez exatamente isso). Acima do
+   * teto o 429 sai daqui, sem registrar o gancho de gravação.
+   */
+  const floodV1 = app.get(FloodV1Middleware);
+  app.use((req: never, res: never, next: never) => floodV1.use(req, res, next));
+
   const trilhaApi = app.get(RegistroAcessoApiMiddleware);
   app.use((req: never, res: never, next: never) => trilhaApi.use(req, res, next));
 

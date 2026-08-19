@@ -14,6 +14,7 @@ import { CredencialAuthService } from './credencial-auth.service';
 import { RateLimitService } from './rate-limit.service';
 import { TIPO_TOKEN_API, TokenApiController } from './token.controller';
 import { BullBoardAuthMiddleware } from '../queues/bull-board.middleware';
+import { RegistroAcessoApiMiddleware } from '../seguranca/registro-acesso-api.middleware';
 
 /**
  * O token da API pública e o JWT de sessão do painel são assinados com o MESMO
@@ -140,6 +141,85 @@ describe('token da API pública (Bearer)', () => {
       'segredo',
       { ip: '179.51.222.151', path: '/v1/auth/token' },
     );
+  });
+
+  /**
+   * Regressão da tela /admin/seguranca: a trilha identifica o autor por
+   * `req.apiCredential`, que nas rotas de negócio é setado pelo guard. Na
+   * emissão a autenticação acontece no controller — sem repassar a credencial
+   * para a request, o evento mais sensível da API pública (alguém provou posse
+   * do segredo) era gravado como "não identificado".
+   */
+  it('emissão popula req.apiCredential para a trilha de segurança', async () => {
+    const credAuthEmissao = {
+      autenticarPorChaveSegredo: jest.fn().mockResolvedValue(credencial),
+    } as unknown as CredencialAuthService;
+    const configEmissao = {
+      get: jest.fn().mockReturnValue(undefined),
+    } as unknown as ConfigService;
+    const controller = new TokenApiController(credAuthEmissao, jwt, configEmissao);
+
+    const req: {
+      headers: Record<string, string | undefined>;
+      apiCredential?: { id: string; usuarioId: string };
+    } = { headers: { 'x-api-key': 'vp_chave', 'x-api-secret': 'segredo' } };
+
+    await controller.emitir(req);
+
+    expect(req.apiCredential).toMatchObject({ id: '42', usuarioId: '7' });
+  });
+
+  /**
+   * Fecha o buraco que o teste acima sozinho não fecha: prova que a TRILHA
+   * grava a emissão IDENTIFICADA. A trilha registra `res.on('finish')` no
+   * início do `use()` — ANTES de o controller mutar `req.apiCredential` — e só
+   * lê a credencial quando o finish dispara. Compor os dois sobre o MESMO `req`
+   * (use → emitir → finish) mata a regressão de "capturar a credencial no
+   * início do use()", que passaria nos dois specs isolados e ressuscitaria o
+   * usuarioId nulo na auditoria.
+   */
+  it('a trilha grava a emissão com usuarioId, lendo a credencial APÓS o emitir', async () => {
+    const credAuthEmissao = {
+      autenticarPorChaveSegredo: jest.fn().mockResolvedValue(credencial),
+    } as unknown as CredencialAuthService;
+    const configEmissao = {
+      get: jest.fn().mockReturnValue(undefined),
+    } as unknown as ConfigService;
+    const controller = new TokenApiController(credAuthEmissao, jwt, configEmissao);
+
+    const create = jest.fn((_arg: { data: Record<string, unknown> }) =>
+      Promise.resolve({}),
+    );
+    const trilha = new RegistroAcessoApiMiddleware({
+      registroAcessoApi: { create },
+    } as never);
+
+    const ouvintes: Array<() => void> = [];
+    const res = {
+      statusCode: 201,
+      on: (evento: string, cb: () => void) => {
+        if (evento === 'finish') ouvintes.push(cb);
+      },
+    };
+    const req: Record<string, unknown> = {
+      method: 'POST',
+      path: '/api/v1/auth/token',
+      ip: '203.0.113.9',
+      headers: { 'x-api-key': 'vp_chave', 'x-api-secret': 'segredo' },
+    };
+
+    // Ordem real do main.ts: trilha registra o finish, DEPOIS o handler roda.
+    trilha.use(req as never, res as never, () => {});
+    await controller.emitir(req as never);
+    ouvintes.forEach((cb) => cb());
+    await new Promise((r) => setImmediate(r));
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].data).toMatchObject({
+      usuarioId: BigInt(7),
+      credencialApiId: BigInt(42),
+      statusHttp: 201,
+    });
   });
 
   it('recusa requisição sem Authorization', async () => {

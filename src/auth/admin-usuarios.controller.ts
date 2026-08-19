@@ -144,6 +144,101 @@ export class AdminUsuariosController {
   }
 
   /**
+   * Conta APTA a operar um sentido: conta ATIVA com o sentido habilitado, de
+   * adquirente ATIVA que permite aquele sentido.
+   *
+   * É o mesmo filtro em toda decisão de roteamento do padrão (sugestão de
+   * fábrica, vitrine do modal e validação da gravação) — separá-los deixaria a
+   * tela oferecer uma adquirente que o PUT recusa.
+   */
+  private filtroContaApta(direcao: 'entrada' | 'saida') {
+    return direcao === 'entrada'
+      ? {
+          situacao: SITUACAO_PROVEDOR.ATIVO,
+          pixEntradaHabilitado: true,
+          provedor: {
+            situacao: SITUACAO_PROVEDOR.ATIVO,
+            permitePixEntrada: true,
+          },
+        }
+      : {
+          situacao: SITUACAO_PROVEDOR.ATIVO,
+          pixSaidaHabilitado: true,
+          provedor: {
+            situacao: SITUACAO_PROVEDOR.ATIVO,
+            permitePixSaida: true,
+          },
+        };
+  }
+
+  /**
+   * Adquirentes que o padrão pode apontar naquele sentido.
+   *
+   * `restrita` marca a adquirente de PIX in de vitrine fechada
+   * (`ESPECIFICOS`): escolhê-la como padrão é legítimo, mas a ativação precisa
+   * liberá-la para a conta nova — senão o cliente nasce roteado para uma
+   * adquirente que a vitrine dele não mostra e a primeira cobrança é recusada.
+   */
+  private async adquirentesAptas(direcao: 'entrada' | 'saida') {
+    const contas = await this.prisma.contaProvedor.findMany({
+      where: this.filtroContaApta(direcao),
+      include: { provedor: true },
+      orderBy: { id: 'asc' },
+    });
+    const vistos = new Set<string>();
+    const opcoes: Array<{
+      codigo: string;
+      nome: string;
+      restrita: boolean;
+      inapta?: boolean;
+    }> = [];
+    for (const conta of contas) {
+      // Uma adquirente pode ter várias contas aptas — na vitrine ela é uma só.
+      if (vistos.has(conta.provedor.codigo)) continue;
+      vistos.add(conta.provedor.codigo);
+      opcoes.push({
+        codigo: conta.provedor.codigo,
+        nome: conta.provedor.nome,
+        restrita:
+          direcao === 'entrada' &&
+          conta.provedor.disponibilidadePixEntrada ===
+            DISPONIBILIDADE_ADQUIRENTE.ESPECIFICOS,
+      });
+    }
+    return opcoes.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  }
+
+  /** Garante que a adquirente EM USO apareça na lista, mesmo inapta hoje. */
+  private comAtual(
+    opcoes: Array<{ codigo: string; nome: string; restrita: boolean; inapta?: boolean }>,
+    codigo: string,
+    nome: string,
+  ) {
+    if (opcoes.some((o) => o.codigo === codigo)) return opcoes;
+    return [...opcoes, { codigo, nome, restrita: false, inapta: true }];
+  }
+
+  /**
+   * Conta da adquirente escolhida para o padrão. Recusa código que não esteja
+   * apto AGORA: gravar o padrão apontando para adquirente inativa só adiaria o
+   * erro para a ativação da próxima conta.
+   */
+  private async resolverContaPadrao(codigo: string, direcao: 'entrada' | 'saida') {
+    const filtro = this.filtroContaApta(direcao);
+    const conta = await this.prisma.contaProvedor.findFirst({
+      where: { ...filtro, provedor: { ...filtro.provedor, codigo } },
+      orderBy: { id: 'asc' },
+    });
+    if (!conta) {
+      throw new BadRequestException(
+        `Adquirente ${codigo} não está apta a operar PIX ${direcao === 'entrada' ? 'in' : 'out'} ` +
+          '(precisa estar ATIVA, permitir o sentido e ter conta ativa habilitada).',
+      );
+    }
+    return conta;
+  }
+
+  /**
    * Condições comerciais aplicadas a TODO cliente novo na ativação
    * (`configuracoes_padrao_pix_usuarios`, linha `padraoSistema`).
    *
@@ -156,7 +251,15 @@ export class AdminUsuariosController {
   async configPadrao() {
     const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
       where: { padraoSistema: true },
+      include: {
+        contaEntrada: { include: { provedor: true } },
+        contaSaida: { include: { provedor: true } },
+      },
     });
+    const [adquirentesEntrada, adquirentesSaida] = await Promise.all([
+      this.adquirentesAptas('entrada'),
+      this.adquirentesAptas('saida'),
+    ]);
     if (!c) {
       // Instalação nova, sem seed (produção não roda seed): a linha ainda não
       // existe. 404 aqui travava a tela exatamente na primeira configuração —
@@ -170,6 +273,8 @@ export class AdminUsuariosController {
         taxaPixSaidaFixa: '0',
         ticketMinimoPixEntrada: '0',
         ticketMaximoPixEntrada: '50000',
+        ticketMinimoPixSaida: '0',
+        ticketMaximoPixSaida: '',
         limiteDiarioPixSaida: '',
         maxSaquesPorHora: '',
         diasLiberacaoSaldo: 0,
@@ -180,8 +285,19 @@ export class AdminUsuariosController {
         permiteSaldoNegativo: false,
         origemSaquePermitida: ORIGEM_SAQUE_PADRAO,
         exigirChavePixCadastrada: true,
+        // Sem linha ainda: já vem pré-selecionado o que o PUT usaria de fábrica,
+        // para o admin conferir por onde a primeira conta vai rotear em vez de
+        // descobrir depois. Entrada prefere adquirente aberta a todos.
+        adquirenteEntrada:
+          (adquirentesEntrada.find((a) => !a.restrita) ?? adquirentesEntrada[0])
+            ?.codigo ?? null,
+        adquirenteSaida: adquirentesSaida[0]?.codigo ?? null,
+        adquirentesEntrada,
+        adquirentesSaida,
       };
     }
+    const codigoEntrada = c.contaEntrada.provedor.codigo;
+    const codigoSaida = c.contaSaida.provedor.codigo;
     return {
       primeiraConfiguracao: false,
       taxaPixEntradaPercentual: c.taxaPixEntradaPercentual.toString(),
@@ -190,6 +306,8 @@ export class AdminUsuariosController {
       taxaPixSaidaFixa: c.taxaPixSaidaFixa.toString(),
       ticketMinimoPixEntrada: c.ticketMinimoPixEntrada.toString(),
       ticketMaximoPixEntrada: c.ticketMaximoPixEntrada.toString(),
+      ticketMinimoPixSaida: c.ticketMinimoPixSaida.toString(),
+      ticketMaximoPixSaida: c.ticketMaximoPixSaida?.toString() ?? '',
       limiteDiarioPixSaida: c.limiteDiarioPixSaida?.toString() ?? '',
       maxSaquesPorHora: c.maxSaquesPorHora?.toString() ?? '',
       diasLiberacaoSaldo: c.diasLiberacaoSaldo,
@@ -203,6 +321,22 @@ export class AdminUsuariosController {
       ),
       origemSaquePermitida: c.origemSaquePermitida,
       exigirChavePixCadastrada: c.exigirChavePixCadastrada,
+      adquirenteEntrada: codigoEntrada,
+      adquirenteSaida: codigoSaida,
+      // A adquirente em uso entra na lista mesmo se hoje estiver inapta (ficou
+      // inativa, perdeu o sentido habilitado): sem ela o <select> abriria em
+      // outra opção e uma gravação de taxa trocaria o roteamento sem ninguém
+      // pedir. Vem marcada para a tela avisar.
+      adquirentesEntrada: this.comAtual(
+        adquirentesEntrada,
+        codigoEntrada,
+        c.contaEntrada.provedor.nome,
+      ),
+      adquirentesSaida: this.comAtual(
+        adquirentesSaida,
+        codigoSaida,
+        c.contaSaida.provedor.nome,
+      ),
     };
   }
 
@@ -216,39 +350,42 @@ export class AdminUsuariosController {
     const regras = regrasComerciais(body);
     const c = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
       where: { padraoSistema: true },
+      include: {
+        contaEntrada: { include: { provedor: true } },
+        contaSaida: { include: { provedor: true } },
+      },
     });
+    // Adquirente escolhida no modal. Ausente = mantém a que está gravada (o
+    // corpo antigo, sem os campos, não pode remanejar o roteamento sozinho).
+    const [escolhidaEntrada, escolhidaSaida] = await Promise.all([
+      body.adquirenteEntrada
+        ? this.resolverContaPadrao(body.adquirenteEntrada, 'entrada')
+        : null,
+      body.adquirenteSaida
+        ? this.resolverContaPadrao(body.adquirenteSaida, 'saida')
+        : null,
+    ]);
     if (!c) {
       // Primeira gravação (instalação sem seed): cria a linha do padrão. As
-      // contas de liquidante são obrigatórias no modelo — usa a primeira conta
-      // apta de adquirente ATIVA em cada sentido; /admin/adquirentes troca
-      // depois. Sem adquirente cadastrada não há o que apontar: erro claro.
+      // contas de liquidante são obrigatórias no modelo — usa a adquirente
+      // escolhida no modal e, se ele não mandou nenhuma, a primeira conta apta
+      // de adquirente ATIVA em cada sentido. Sem adquirente cadastrada não há o
+      // que apontar: erro claro.
       // Mesmos filtros do `acharConta` do alternar-em-massa + aptidão do
       // provedor no sentido: conta ATIVA habilitada, de adquirente ATIVA que
       // permite aquele sentido. (Sem `usuarioId: null`: subconta por cliente é
       // conceito que nenhum outro seletor do sistema exclui.)
       const [contaEntrada, contaSaida] = await Promise.all([
-        this.prisma.contaProvedor.findFirst({
-          where: {
-            situacao: SITUACAO_PROVEDOR.ATIVO,
-            pixEntradaHabilitado: true,
-            provedor: {
-              situacao: SITUACAO_PROVEDOR.ATIVO,
-              permitePixEntrada: true,
-            },
-          },
-          orderBy: { id: 'asc' },
-        }),
-        this.prisma.contaProvedor.findFirst({
-          where: {
-            situacao: SITUACAO_PROVEDOR.ATIVO,
-            pixSaidaHabilitado: true,
-            provedor: {
-              situacao: SITUACAO_PROVEDOR.ATIVO,
-              permitePixSaida: true,
-            },
-          },
-          orderBy: { id: 'asc' },
-        }),
+        escolhidaEntrada ??
+          this.prisma.contaProvedor.findFirst({
+            where: this.filtroContaApta('entrada'),
+            orderBy: { id: 'asc' },
+          }),
+        escolhidaSaida ??
+          this.prisma.contaProvedor.findFirst({
+            where: this.filtroContaApta('saida'),
+            orderBy: { id: 'asc' },
+          }),
       ]);
       if (!contaEntrada || !contaSaida) {
         const faltando = [
@@ -275,7 +412,20 @@ export class AdminUsuariosController {
           contaProvedorPixSaidaId: contaSaida.id,
           ...regras,
         },
-        update: { padraoSistema: true, ativo: true, ...regras },
+        // Ressuscitando a linha: só remaneja se o admin escolheu. O fallback
+        // "primeira conta apta" existe para a linha que NASCE agora — aplicá-lo
+        // aqui trocaria em silêncio o roteamento que a linha já tinha.
+        update: {
+          padraoSistema: true,
+          ativo: true,
+          ...(escolhidaEntrada
+            ? { contaProvedorPixEntradaId: escolhidaEntrada.id }
+            : {}),
+          ...(escolhidaSaida
+            ? { contaProvedorPixSaidaId: escolhidaSaida.id }
+            : {}),
+          ...regras,
+        },
       });
       await this.prisma.registroAuditoria.create({
         data: {
@@ -286,7 +436,11 @@ export class AdminUsuariosController {
           nomeTabela: 'configuracoes_padrao_pix_usuarios',
           chaveRegistro: criada.id.toString(),
           enderecoIp: req.ip,
-          dadosNovos: regras as never,
+          dadosNovos: {
+            ...regras,
+            contaProvedorPixEntradaId: contaEntrada.id.toString(),
+            contaProvedorPixSaidaId: contaSaida.id.toString(),
+          } as never,
         },
       });
       return { ok: true, criada: true };
@@ -296,15 +450,29 @@ export class AdminUsuariosController {
       taxaPixEntradaFixa: c.taxaPixEntradaFixa.toString(),
       taxaPixSaidaPercentual: c.taxaPixSaidaPercentual.toString(),
       taxaPixSaidaFixa: c.taxaPixSaidaFixa.toString(),
+      ticketMinimoPixSaida: c.ticketMinimoPixSaida.toString(),
+      ticketMaximoPixSaida: c.ticketMaximoPixSaida?.toString() ?? null,
+      limiteDiarioPixSaida: c.limiteDiarioPixSaida?.toString() ?? null,
+      maxSaquesPorHora: c.maxSaquesPorHora,
       diasLiberacaoSaldo: c.diasLiberacaoSaldo,
       percentualReserva: c.percentualReserva.toString(),
       diasRetencaoReserva: c.diasRetencaoReserva,
       baseCalculoReserva: c.baseCalculoReserva,
       modoTratamentoMed: c.modoTratamentoMed,
+      // Roteamento é dado de auditoria como qualquer outro: quem trocou a
+      // adquirente das contas novas precisa ficar registrado.
+      adquirenteEntrada: c.contaEntrada.provedor.codigo,
+      adquirenteSaida: c.contaSaida.provedor.codigo,
+    };
+    const roteamento = {
+      ...(escolhidaEntrada
+        ? { contaProvedorPixEntradaId: escolhidaEntrada.id }
+        : {}),
+      ...(escolhidaSaida ? { contaProvedorPixSaidaId: escolhidaSaida.id } : {}),
     };
     await this.prisma.configuracaoPadraoPixUsuario.update({
       where: { id: c.id },
-      data: regras,
+      data: { ...regras, ...roteamento },
     });
     await this.prisma.registroAuditoria.create({
       data: {
@@ -316,7 +484,12 @@ export class AdminUsuariosController {
         chaveRegistro: c.id.toString(),
         enderecoIp: req.ip,
         dadosAnteriores: antes as never,
-        dadosNovos: regras as never,
+        dadosNovos: {
+          ...regras,
+          adquirenteEntrada:
+            body.adquirenteEntrada || c.contaEntrada.provedor.codigo,
+          adquirenteSaida: body.adquirenteSaida || c.contaSaida.provedor.codigo,
+        } as never,
       },
     });
     // Vale para cadastro novo: quem já tem configuração própria não é tocado.
@@ -921,6 +1094,7 @@ export class AdminUsuariosController {
 
     const padrao = await this.prisma.configuracaoPadraoPixUsuario.findFirst({
       where: { padraoSistema: true, ativo: true },
+      include: { contaEntrada: { include: { provedor: true } } },
     });
     if (!padrao) {
       throw new BadRequestException(
@@ -1012,6 +1186,31 @@ export class AdminUsuariosController {
         },
         update: {},
       });
+      // Apontar a conta nova para uma adquirente de PIX in de vitrine fechada
+      // (`ESPECIFICOS`) IMPLICA liberá-la para ela — mesma regra do admin
+      // escolher a adquirente na ficha do cliente e do remanejamento em massa.
+      // Sem isto a conta nasce roteada para uma adquirente que a vitrine dela
+      // não mostra e a PRIMEIRA cobrança é recusada por
+      // `estaLiberada` ("Adquirente de PIX in indisponível para esta conta").
+      if (
+        padrao.contaEntrada.provedor.disponibilidadePixEntrada ===
+        DISPONIBILIDADE_ADQUIRENTE.ESPECIFICOS
+      ) {
+        await tx.liberacaoAdquirenteUsuario.upsert({
+          where: {
+            provedorPagamentoId_usuarioId: {
+              provedorPagamentoId: padrao.contaEntrada.provedorPagamentoId,
+              usuarioId: usuario.id,
+            },
+          },
+          create: {
+            provedorPagamentoId: padrao.contaEntrada.provedorPagamentoId,
+            usuarioId: usuario.id,
+            liberadoPorUsuarioId: BigInt(req.user.id),
+          },
+          update: {},
+        });
+      }
       // Carteira do cliente: nasce zerada junto da ativação. Sem ela o primeiro
       // crédito não tem onde cair.
       await tx.saldoUsuario.upsert({
@@ -1544,8 +1743,9 @@ function regrasComerciais(body: Record<string, string>) {
     );
   }
 
-  // Ticket de saída: a ficha do cliente envia; o modal do padrão ainda não.
-  // Ausente no corpo → não entra no retorno (Prisma não sobrescreve a coluna).
+  // Ticket de saída: enviado pela ficha do cliente e pelo modal do padrão.
+  // Ausente no corpo (corpo antigo/integração) → não entra no retorno, e o
+  // Prisma não sobrescreve a coluna.
   const editaTicketSaida =
     body.ticketMinimoPixSaida !== undefined ||
     body.ticketMaximoPixSaida !== undefined;
