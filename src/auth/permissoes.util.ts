@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PAPEIS, TODAS_PERMISSOES } from '../shared';
 
@@ -27,6 +28,31 @@ export async function permissoesEfetivas(
     JOIN papeis_permissoes pp ON pp.papel_id = p.id
     JOIN permissoes pm ON pm.id = pp.permissao_id
     WHERE up.usuario_id = ${usuarioId}
+  `;
+  return linhas.map((l) => l.codigo);
+}
+
+/**
+ * União das permissões de um CONJUNTO de perfis, por nome — sem passar por um
+ * usuário. Serve para a barreira anti-escalação no caminho de ATRIBUIÇÃO de
+ * perfil (`PUT /admin/usuarios/:id/perfis`): antes de gravar, saber o que os
+ * perfis ADICIONADOS concedem, para recusar quem tenta se dar mais poder do que
+ * tem. ADMINISTRADOR entre os nomes ⇒ catálogo inteiro (mesmo racional de
+ * `permissoesEfetivas`).
+ */
+export async function permissoesDePapeis(
+  prisma: PrismaService,
+  nomes: string[],
+): Promise<string[]> {
+  if (nomes.includes(PAPEIS.ADMINISTRADOR)) return [...TODAS_PERMISSOES];
+  if (!nomes.length) return [];
+
+  const linhas = await prisma.$queryRaw<Array<{ codigo: string }>>`
+    SELECT DISTINCT pm.codigo
+    FROM papeis p
+    JOIN papeis_permissoes pp ON pp.papel_id = p.id
+    JOIN permissoes pm ON pm.id = pp.permissao_id
+    WHERE p.ativo = TRUE AND p.nome IN (${Prisma.join(nomes)})
   `;
   return linhas.map((l) => l.codigo);
 }

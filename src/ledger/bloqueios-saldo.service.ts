@@ -169,33 +169,46 @@ export class BloqueiosSaldoService {
       });
       if (jaAplicada) continue;
 
-      await this.ledger.aplicarMovimentacoes({
-        usuarioId,
-        entries: [
+      // Débito no ledger + atualização do registro-fonte no MESMO commit. Com o
+      // ledger em transação própria (sem `db`) e o update numa escrita separada,
+      // uma falha entre os dois (deadlock/timeout/crash) deixava o saldo movido
+      // para BLOQUEADO_MANUAL mas `valorBloqueado`/`valorNaoCoberto` intactos:
+      // `liberar()` lia valor=0 e nunca soltava, o retry batia no dedupe `:deb`
+      // e pulava o update, e um `origem` novo re-capturava (double capture).
+      // Atômico, a falha do update reverte o débito junto — o dedupe `:deb`
+      // some e a próxima execução refaz tudo corretamente.
+      await this.prisma.$transaction(async (db) => {
+        await this.ledger.aplicarMovimentacoes(
           {
-            tipoSaldo: 'DISPONIVEL',
-            tipoMovimento: 'DEBITO',
-            natureza: 'BLOQUEIO_MANUAL',
-            valor: mover,
-            chaveIdempotencia: `${chave}:deb`,
-            descricao: 'Bloqueio administrativo de saldo',
+            usuarioId,
+            entries: [
+              {
+                tipoSaldo: 'DISPONIVEL',
+                tipoMovimento: 'DEBITO',
+                natureza: 'BLOQUEIO_MANUAL',
+                valor: mover,
+                chaveIdempotencia: `${chave}:deb`,
+                descricao: 'Bloqueio administrativo de saldo',
+              },
+              {
+                tipoSaldo: 'BLOQUEADO_MANUAL',
+                tipoMovimento: 'CREDITO',
+                natureza: 'BLOQUEIO_MANUAL',
+                valor: mover,
+                chaveIdempotencia: `${chave}:cred`,
+                descricao: 'Bloqueio administrativo de saldo',
+              },
+            ],
           },
-          {
-            tipoSaldo: 'BLOQUEADO_MANUAL',
-            tipoMovimento: 'CREDITO',
-            natureza: 'BLOQUEIO_MANUAL',
-            valor: mover,
-            chaveIdempotencia: `${chave}:cred`,
-            descricao: 'Bloqueio administrativo de saldo',
+          db,
+        );
+        await db.bloqueioSaldo.update({
+          where: { id: b.id },
+          data: {
+            valorBloqueado: { increment: mover.toFixed(2) as never },
+            valorNaoCoberto: { decrement: mover.toFixed(2) as never },
           },
-        ],
-      });
-      await this.prisma.bloqueioSaldo.update({
-        where: { id: b.id },
-        data: {
-          valorBloqueado: { increment: mover.toFixed(2) as never },
-          valorNaoCoberto: { decrement: mover.toFixed(2) as never },
-        },
+        });
       });
       this.logger.log(
         `bloqueio ${b.idPublico}: capturado ${mover.toFixed(2)} (${origem})`,

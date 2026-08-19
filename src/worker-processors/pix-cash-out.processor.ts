@@ -431,8 +431,15 @@ export class PixCashOutProcessor extends WorkerHost {
         // não vai sair: FALHA + estorno, senão o saldo fica em PROCESSANDO
         // e a conciliação reenfileira o mesmo erro para sempre.
         const max = job.opts?.attempts;
+        // `+ 1` porque durante o process() da tentativa em curso o BullMQ ainda
+        // NÃO incrementou `attemptsMade` (ele só sobe ao finalizar/retentar — o
+        // próprio BullMQ decide retry com `attemptsMade + 1 < opts.attempts`,
+        // classes/job.js). Na 5ª e última execução de `attempts:5`,
+        // `attemptsMade === 4`; sem o `+ 1`, `4 >= 5` era false e o ramo de
+        // estorno NUNCA rodava: o saque ficava PROCESSANDO com saldo debitado e
+        // a conciliação reenfileirava o mesmo erro para sempre.
         const ultima =
-          typeof max === 'number' && Number(job.attemptsMade ?? 0) >= max;
+          typeof max === 'number' && Number(job.attemptsMade ?? 0) + 1 >= max;
         if (ultima) {
           const desfecho = await this.encerrarPorBloqueio(tx, erro.message);
           return {

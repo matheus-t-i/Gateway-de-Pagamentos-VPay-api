@@ -1,0 +1,62 @@
+---
+description: Sistema EM PRODUÇÃO com lojistas integrados — compatibilidade do contrato é inegociável
+alwaysApply: true
+---
+
+# ⚠️ EM PRODUÇÃO — não quebrar quem já está integrado
+
+**O Gateway VPay está NO AR, com clientes reais transacionando e integrados à API.**
+Isso não é um projeto novo: toda mudança é feita sobre um sistema em uso, com dinheiro de
+terceiros em trânsito e código de lojista já escrito contra o nosso contrato.
+
+## O que isso muda na prática
+
+**1. Contrato público é imutável na prática — só ACRESCENTA.**
+Vale para o corpo do callback (`src/shared/callback-lojista.ts`), a API pública `/v1/*`
+(rotas, nomes de campo, formato de erro, códigos de status) e os valores de enum que saem
+para fora (`SITUACAO_TRANSACAO` no callback, `EVENTOS_LOJISTA`).
+- **PODE:** campo novo opcional, rota nova, evento novo, valor novo aceito na ENTRADA.
+- **NÃO PODE:** renomear campo, remover campo, mudar o tipo/formato de um valor, mudar o
+  significado de um status, tornar obrigatório um campo que era opcional, apertar validação
+  que hoje aceita.
+- Renomear **não gera erro em lugar nenhum**: quebra o `if` do lojista em silêncio, e a
+  primeira notícia é venda não processada do lado dele.
+- Mudança de contrato é decisão do DONO DO PRODUTO, nunca da IA — nem quando "está claramente
+  errado". Se estiver errado, aponte e proponha; não altere.
+
+**2. Migration nunca é destrutiva sem plano explícito.**
+Nada de `DROP COLUMN`/`DROP TABLE`/rename de coluna em uma tacada, nem `NOT NULL` em coluna
+existente sem default e backfill. O padrão é expand → migrate → contract, com a fase de
+contração só depois que o código antigo saiu do ar. Migration roda em banco com dados reais:
+se apagar, não volta.
+
+**3. Toda correção precisa ser compatível com o estado que JÁ existe no banco.**
+Linhas gravadas pela versão anterior continuam lá. Classificação/derivação nova deve funcionar
+sobre o dado antigo (preferir resolver na LEITURA a exigir migration de dados). Registro em
+estado intermediário no momento do deploy tem que continuar processável.
+
+**4. Deploy é com tráfego vivo.**
+As versões antiga e nova coexistem durante o rollout, e jobs enfileirados pela antiga são
+consumidos pela nova. Mudança em payload de job/fila tem que ser retrocompatível. Worker e API
+sobem separados — não presuma que os dois já estão na versão nova.
+
+**5. Aperto de validação/limite é mudança de comportamento.**
+Endurecer regra que hoje passa (rate limit, schema, teto, allowlist) pode transformar cliente
+que funciona em cliente recusado. Avalie contra o tráfego real antes; na dúvida, comece
+observando/logando em vez de recusando.
+
+**6. Nada de "arrumar de passagem" no caminho do dinheiro.**
+Refactor oportunista em ledger, saque, webhook de adquirente, MED ou callback não entra junto
+com outra mudança. Correção cirúrgica, com spec de regressão, uma coisa por vez.
+
+## Antes de entregar qualquer mudança, responder
+
+1. Isso muda algo que um lojista já integrado consegue observar? (campo, status, código de
+   erro, timing, formato) → se sim, é contrato: PARE e pergunte ao dono.
+2. Funciona com as linhas que já estão no banco hoje?
+3. Se metade da frota estiver na versão antiga durante o deploy, os dois lados convivem?
+4. Existe spec cobrindo a regressão que essa mudança poderia causar?
+5. Se der errado em produção, como se reverte?
+
+Relacionado: `contrato-callback-lojista`, `identidade-transacao`, `ledger-prisma`,
+`pix-webhook-security`.

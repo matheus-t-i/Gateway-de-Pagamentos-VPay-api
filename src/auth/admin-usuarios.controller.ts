@@ -37,6 +37,7 @@ import { QueuesService } from '../queues/queues.service';
 import { documentosFaltantes } from '../onboarding/onboarding.util';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { RequerPermissao } from './permissoes.decorator';
+import { permissoesDePapeis } from './permissoes.util';
 import {
   assertStepUpFromBody,
   assertStepUpTotp,
@@ -1339,7 +1340,8 @@ export class AdminUsuariosController {
   async definirPerfis(
     @Param('idPublico') idPublico: string,
     @Body() body: { perfis?: string[]; codigoTotp?: string },
-    @Req() req: { user: { id: string; papeis: string[] }; ip?: string },
+    @Req()
+    req: { user: { id: string; papeis: string[]; permissoes: string[] }; ip?: string },
   ) {
     await assertStepUpTotp(this.prisma, req.user.id, body?.codigoTotp);
     const nomes = Array.from(new Set(body?.perfis ?? []));
@@ -1392,6 +1394,33 @@ export class AdminUsuariosController {
       throw new BadRequestException(
         'Somente um ADMINISTRADOR pode conceder o perfil ADMINISTRADOR.',
       );
+    }
+
+    /**
+     * Barreira anti-escalação no caminho de ATRIBUIÇÃO — o mesmo princípio que
+     * `assertPodeConceder` aplica em `/admin/perfis` na criação/edição de
+     * perfil, que faltava AQUI. Sem isto, a trava acima (restrita ao nome
+     * ADMINISTRADOR) deixava passar qualquer OUTRO perfil pré-existente com
+     * permissão sensível: um operador com `admin.perfis.editar` mas sem
+     * `escopo.global`/`admin.med.decidir` atribuía a si mesmo um perfil que os
+     * carrega (ex. um perfil de MED que LIQUIDA dinheiro) e escalava na
+     * requisição seguinte, porque as permissões são reresolvidas no banco a
+     * cada request. Ninguém concede permissão que o próprio perfil não tem;
+     * ADMINISTRADOR (que carrega o catálogo inteiro) passa direto.
+     */
+    if (!req.user.papeis.includes(PAPEIS.ADMINISTRADOR)) {
+      const adicionados = nomes.filter((n) => !anteriores.includes(n));
+      const permsConcedidas = await permissoesDePapeis(this.prisma, adicionados);
+      const alem = permsConcedidas.filter(
+        (c) => !req.user.permissoes.includes(c),
+      );
+      if (alem.length) {
+        throw new BadRequestException(
+          'Você não pode conceder um perfil com permissões que o seu próprio ' +
+            'perfil não tem: ' +
+            alem.join(', '),
+        );
+      }
     }
 
     await this.prisma.$transaction(async (tx) => {

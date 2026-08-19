@@ -181,22 +181,38 @@ export class MedService {
           where: { chaveIdempotencia: chave },
         });
         if (vencedor) {
-          return {
-            idPublico: vencedor.idPublico,
-            situacao: vencedor.situacao,
-            duplicado: true,
-          };
+          // Trata igual ao `existente` detectado dentro da transação: a decisão
+          // duplicado × reprocessar é unificada logo abaixo, pelo ESTADO do caso.
+          existente = vencedor;
+          criado = null;
+        } else {
+          throw e;
         }
+      } else {
+        throw e;
       }
-      throw e;
     }
     if (existente) {
       const dup = existente as Awaited<
         ReturnType<typeof this.prisma.casoMed.create>
       >;
-      return { idPublico: dup.idPublico, situacao: dup.situacao, duplicado: true };
+      /**
+       * Reentrega de um caso que JÁ moveu dinheiro (qualquer estado além de
+       * RECEBIDO) é duplicado de verdade: descarta.
+       *
+       * Mas um caso ainda RECEBIDO significa que a movimentação — bloqueio ou
+       * débito, que roda numa transação PRÓPRIA logo adiante — NUNCA commitou
+       * (crash/falha de banco entre a criação e o movimento). Aí NÃO é
+       * duplicado: cai no ramo de movimentação abaixo e o completa (idempotente
+       * pelas chaves fixas do ledger). Sem isto, a reentrega selava o webhook
+       * como PROCESSADO sem debitar, e o dinheiro que a adquirente já levou
+       * nunca saía do lojista — perda silenciosa do nosso lado.
+       */
+      if (dup.situacao !== SITUACAO_MED.RECEBIDO) {
+        return { idPublico: dup.idPublico, situacao: dup.situacao, duplicado: true };
+      }
     }
-    const caso = criado!;
+    const caso = (criado ?? existente)!;
 
     let situacaoFinal: string = SITUACAO_MED.EM_ANALISE;
 
@@ -213,6 +229,16 @@ export class MedService {
       // o ACEITO debitava o valor cheio do disponível de novo e o bloqueado
       // ficava preso para sempre.
       await this.prisma.$transaction(async (db) => {
+        // Serializa reentregas concorrentes do MESMO caso: o retomar de um caso
+        // RECEBIDO (movimentação que não commitou) pode chegar em paralelo com
+        // a entrega original. Quem perder o lock relê e desiste.
+        await db.$queryRaw`SELECT id FROM casos_med WHERE id = ${caso.id} FOR UPDATE`;
+        const atual = await db.casoMed.findUniqueOrThrow({
+          where: { id: caso.id },
+          select: { situacao: true },
+        });
+        if (atual.situacao !== SITUACAO_MED.RECEBIDO) return;
+
         if (bloquear.gt(0)) {
           await this.ledger.aplicarMovimentacoes(
             {
@@ -279,6 +305,16 @@ export class MedService {
       // nascia uma devolucao_pix que não existe neste modo.
       const agora = new Date();
       const ledgerResult = await this.prisma.$transaction(async (db) => {
+        // Mesmo motivo do ramo BLOQUEAR_SALDO: serializa a retomada de um caso
+        // RECEBIDO contra a entrega concorrente. Perdeu o lock e o caso já saiu
+        // de RECEBIDO ⇒ o dinheiro já se moveu, não repete.
+        await db.$queryRaw`SELECT id FROM casos_med WHERE id = ${caso.id} FOR UPDATE`;
+        const atual = await db.casoMed.findUniqueOrThrow({
+          where: { id: caso.id },
+          select: { situacao: true },
+        });
+        if (atual.situacao !== SITUACAO_MED.RECEBIDO) return null;
+
         const resultado = await this.ledger.aplicarMovimentacoes(
           {
             usuarioId: tx.usuarioId,
@@ -351,7 +387,7 @@ export class MedService {
         return resultado;
       });
 
-      if (ledgerResult.outboxId) {
+      if (ledgerResult?.outboxId) {
         await this.queues.enqueueOutbox({
           eventoOutboxId: ledgerResult.outboxId.toString(),
           identificadorRastreio: getRastreio(),

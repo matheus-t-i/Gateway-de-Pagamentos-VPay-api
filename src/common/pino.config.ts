@@ -18,6 +18,48 @@ export function caminhoSemQuery(req: {
   return raw.split('?')[0] || '/';
 }
 
+/** Chaves de query cujo VALOR é segredo e não pode ir ao log em claro. */
+const QUERY_SENSIVEL = /token|secret|senha|password|assinatura|signature|apikey/i;
+
+function censurarQuery(query: unknown): Record<string, unknown> | undefined {
+  if (!query || typeof query !== 'object') return undefined;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(query as Record<string, unknown>)) {
+    out[k] = QUERY_SENSIVEL.test(k) ? '[REDACTED]' : v;
+  }
+  return out;
+}
+
+/**
+ * Serializer de request do pino-http.
+ *
+ * O serializer PADRÃO grava `req.url` COM a query string — e o postback da
+ * Valorion carrega o `VALORION_WEBHOOK_TOKEN` em `?token=` (Camada 2). Sem isto,
+ * todo postback que caísse em 4xx/5xx (ou 2xx fora de produção) gravava o token
+ * em claro no stdout do Render: segredo único das adquirentes, sem rotação,
+ * vazando com carimbo de log. O `redact` cobre só `req.headers.*`/`req.body.*`,
+ * não `req.url`/`req.query`. Aqui o `url` sai sem query e a query tem os campos
+ * sensíveis censurados; os headers seguem para o `redact` fazer o resto.
+ */
+export function serializarRequest(req: {
+  method?: string;
+  url?: string;
+  originalUrl?: string;
+  headers?: unknown;
+  query?: unknown;
+  remoteAddress?: string;
+  remotePort?: number;
+}): Record<string, unknown> {
+  return {
+    method: req.method,
+    url: caminhoSemQuery(req),
+    query: censurarQuery(req.query),
+    headers: req.headers,
+    remoteAddress: req.remoteAddress,
+    remotePort: req.remotePort,
+  };
+}
+
 /**
  * pino-http compartilhado pela API e pelo worker.
  *
@@ -62,6 +104,9 @@ export function pinoHttpOptions(): Options {
       const r = req as ReqComContexto;
       return r.identificadorRastreio ? { rastreio: r.identificadorRastreio } : {};
     },
+    // Reescreve `req` para o token do postback (`?token=`) nunca ir ao log; o
+    // `redact` abaixo continua cuidando dos headers/body.
+    serializers: { req: serializarRequest },
     redact: {
       paths: [
         'req.headers.authorization',

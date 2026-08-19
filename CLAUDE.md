@@ -1,5 +1,25 @@
 # Gateway VPay — Claude Code
 
+> ## ⚠️ SISTEMA EM PRODUÇÃO — com lojistas integrados
+>
+> API no ar, clientes reais transacionando, código de lojista já escrito contra o nosso
+> contrato. **Nenhuma mudança pode quebrar quem já está integrado.**
+>
+> - **Contrato público só ACRESCENTA** (callback, `/v1/*`, enums que saem para fora): adicionar
+>   pode; renomear/remover/mudar formato ou significado, não. Renomear quebra o `if` do lojista
+>   sem gerar erro em lugar nenhum.
+> - **Mudança de contrato é decisão do dono do produto, nunca da IA.**
+> - **Migration destrutiva, não** — expand → migrate → contract; o banco tem dados reais.
+> - **Compatível com o dado já gravado**; preferir resolver na leitura.
+> - **Deploy com tráfego vivo:** API e Worker sobem separados, versões coexistem, job
+>   enfileirado pela antiga roda na nova → payload de fila retrocompatível.
+> - **Apertar validação/limite/rate limit é mudança de comportamento** — pode recusar cliente
+>   que hoje funciona.
+> - **Nada de refactor de passagem** em ledger, saque, webhook de adquirente, MED ou callback:
+>   correção cirúrgica, com spec de regressão, uma por vez.
+>
+> Checklist completo: rule Cursor `producao-nao-quebrar` (alwaysApply).
+
 Dois repositórios: `Gateway-de-Pagamentos-VPay-api` (Nest API + Worker + Prisma) e `Gateway-de-Pagamentos-VPay-web` (Next.js).
 
 ## Webhook security (inegociável)
@@ -283,11 +303,13 @@ intermediário, senão a janela viraria acúmulo de credenciais válidas.
 
 ## Contrato do callback ao lojista (PÚBLICO — não quebrar)
 
-> **Estágio: PRÉ-PRODUÇÃO.** Sem lojista integrado ainda, então mudar o contrato
-> é decisão de produto normal — sem plano de migração nem convivência de
-> versões. No go-live, apague este aviso e as regras abaixo passam a valer na
-> forma estrita. Renomear continua sendo decisão do dono do produto: a IA nunca
-> muda contrato por conta própria, em nenhum estágio.
+> **Estágio: EM PRODUÇÃO, COM LOJISTA INTEGRADO.** As regras abaixo valem na
+> forma ESTRITA: o contrato só muda se ACRESCENTA: campo novo opcional, evento
+> novo, rota nova. Renomear, remover, mudar formato/significado ou tornar
+> obrigatório o que era opcional está fora — não gera erro em lugar nenhum e
+> quebra o `if` do lojista em silêncio. Qualquer alteração exige plano de
+> migração e convivência de versões, e é decisão do dono do produto: a IA nunca
+> muda contrato por conta própria.
 
 **Fonte única:** `src/shared/callback-lojista.ts`, espelhada em
 `Gateway-de-Pagamentos-VPay-web/src/lib/callback-lojista.ts`. O corpo é montado em

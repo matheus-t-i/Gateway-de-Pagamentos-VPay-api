@@ -533,8 +533,11 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
         ),
       );
 
+    // `attemptsMade: 4` é o valor REAL do BullMQ na 5ª e última execução de
+    // `attempts:5` (ele só incrementa ao finalizar). Com `attemptsMade: 5` (que
+    // o runtime nunca produz) o teste passava mesmo com o off-by-one no código.
     const r = (await processor.process(
-      job(transacaoId, { attemptsMade: 5, attempts: 5 }),
+      job(transacaoId, { attemptsMade: 4, attempts: 5 }),
     )) as { preEnvioEsgotado?: boolean };
     expect(r.preEnvioEsgotado).toBe(true);
 
@@ -552,6 +555,38 @@ describe('PixCashOutProcessor — nunca paga duas vezes', () => {
       where: { usuarioId },
     });
     expect(Number(saldoDepois.saldoDisponivel)).toBe(
+      Number(saldoAntes.saldoDisponivel),
+    );
+  });
+
+  it('pré-envio antes do teto (penúltima tentativa): NÃO estorna, relança para retry', async () => {
+    const saldoAntes = await prisma.saldoUsuario.findUniqueOrThrow({
+      where: { usuarioId },
+    });
+    const transacaoId = await criarSaque(`dup-preenvio-retry-${sufixo}`);
+    const processor = processorCom();
+
+    comportamento = () =>
+      Promise.reject(
+        new ErroAntesDoEnvioError('Valorion cash-out: falha ao autenticar — HTTP 401'),
+      );
+
+    // 4ª execução de attempts:5 → attemptsMade=3 → 3+1 >= 5 é false: ainda há
+    // retry, então relança (o BullMQ reagenda) em vez de encerrar/estornar.
+    await expect(
+      processor.process(job(transacaoId, { attemptsMade: 3, attempts: 5 })),
+    ).rejects.toBeInstanceOf(ErroAntesDoEnvioError);
+
+    const tx = await prisma.transacao.findUniqueOrThrow({
+      where: { id: transacaoId },
+    });
+    // Segue PROCESSANDO (não FALHA) e o saldo continua debitado — o retry ainda
+    // pode enviar; estornar aqui devolveria saldo de um saque que vai sair.
+    expect(tx.situacao).toBe(SITUACAO_TRANSACAO.PROCESSANDO);
+    const saldoDepois = await prisma.saldoUsuario.findUniqueOrThrow({
+      where: { usuarioId },
+    });
+    expect(Number(saldoDepois.saldoDisponivel)).toBeLessThan(
       Number(saldoAntes.saldoDisponivel),
     );
   });
