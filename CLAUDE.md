@@ -178,6 +178,43 @@ conseguia reenfileirar órfão. Entrou em silêncio via update de minor do bullm
 (`saque-<id>`, `webhook-in-<id>`, `webhook-out-<id>`). Regressão em
 `src/queues/job-id.spec.ts`, que reproduz a validação do BullMQ.
 
+## Testes
+
+**A suíte roda UM arquivo por vez (`maxWorkers: 1`) e isso não é negociável por
+gosto:** 15 specs batem no Postgres de DESENVOLVIMENTO de verdade, porque o que
+eles travam só existe lá (unique parcial do saque, `FOR UPDATE` do ledger, FK da
+ativação). É um banco só, e `config-padrao.spec.ts` mexe numa linha GLOBAL — a
+`padraoSistema` de `configuracoes_padrao_pix_usuarios`, que é justamente a que
+`ativar()` lê para montar a configuração de toda conta nova. Em paralelo isso
+deixava ~1 execução em 6 vermelha, em teste diferente a cada vez. O paralelismo
+não paga nada aqui (medido: serial é mais rápido, o custo é o transform do
+ts-jest). Detalhe e caminho de volta no comentário do `jest.config.js`.
+
+**Duas execuções simultâneas não se atropelam mais.** O `globalSetup` pega um
+advisory lock no Postgres (`src/testing/trava-suite.ts`) e o segura até o fim: a
+segunda execução espera a vez (até 30 s; a suíte leva ~10 s) e, se não abrir,
+falha NA HORA dizendo qual conexão segura — em vez de ficar vermelha em spec
+aleatório. A trava é da CONEXÃO (`connection_limit=1`), então morre COM o
+processo: Ctrl-C ou `kill -F` não deixam lock órfão — verificado matando o
+processo à força, e `src/testing/trava-suite.spec.ts` repete as três provas
+(segura, recusa, solta na morte) a cada execução da suíte.
+
+**Execução interrompida se conserta sozinha.** `config-padrao.spec.ts` esconde a
+linha do padrão e a devolve no `finally` — que não roda se o processo morre
+(Ctrl-C, kill). O nome temporário carrega o original (`__spec_oculto__<nome>`),
+e o `globalSetup` do jest desfaz antes da suíte seguinte
+(`src/testing/padrao-sistema-oculto.ts`). Sem isso o dev ficava sem padrão e o
+PAINEL parava de ativar conta ("Defina o Padrão de novos clientes") — mensagem de
+produto que ninguém liga a um teste interrompido dias antes.
+
+⚠️ **Teste de tempo constante não se faz com cronômetro.** O caso do
+`segredo-hash.spec.ts` media dois candidatos e exigia razão < 3; medido, um `===`
+de volta no lugar do `timingSafeEqual` dá razão **1,07** — passava verde, e ainda
+ficava instável com carga na máquina. O HMAC custa ~2,3 µs e a comparação de 32
+bytes some dentro disso. Hoje o teste ESPIA a chamada (`jest.spyOn` em
+`node:crypto.timingSafeEqual`) e verifica que ela recebe os dois buffers de 32
+bytes. Verificado: com o `===` injetado, fica vermelho.
+
 ## Deploy (empacotamento)
 
 `Dockerfile` na raiz (imagem única, node:22-slim, multi-stage; API =
@@ -229,6 +266,34 @@ extra, mas `NEXT_PUBLIC_API_URL` é obrigatória — o `next build` FALHA sem el
   inteiros (decimal.js). Só cash-in COM itens — depósito de painel não é venda.
   Sem `pagador.nome`/`pagador.email` a Utmify recusa: registramos a falha com o
   motivo em vez de inventar dado de comprador.
+
+## Sessão do painel (renovação silenciosa)
+
+`POST /auth/renovar` troca um JWT de painel **ainda válido** por outro. Não existe refresh
+token guardado: o próprio access token é a credencial da troca, e quem revalida a conta é o
+`JwtAuthGuard` — usuário, situação e perfis vêm do banco a cada requisição, então conta
+suspensa/bloqueada ou perfil inativado não renova nada. Os `papeis` do token novo saem do
+`req.user` (banco), nunca do token antigo: renovar não pode ressuscitar papel revogado.
+
+O painel pede aos **75% da validade gasta**; a API aceita a partir dos **50%**. A folga é
+margem para relógio do navegador adiantado — com os dois no mesmo ponto, um browser alguns
+minutos à frente pediria "cedo demais", levaria 403 e a sessão morreria por causa do relógio
+de quem está usando. As duas metades vivem em `src/shared/sessao-painel.ts` (espelhado no web),
+porque divergência ali não gera erro em lugar nenhum: a renovação só falha sempre.
+
+⚠️ **Recusa é 403, NUNCA 401.** O painel trata 401 de rota autenticada como sessão morta e vai
+direto para o login (`encerrarSessaoPor401` em `web/src/lib/api.ts`) — recusar renovação com 401
+derrubaria a sessão que ainda vale. O combinado com o front é: não renovou, expira normalmente.
+
+**Teto absoluto da sessão** (`SESSAO_PAINEL_MAX_HORAS`, padrão 12h, `0` = sem teto): o claim
+`inicioSessao` é carimbado no login e COPIADO em cada renovação, então limita a soma das
+renovações, não o token individual. O último token da sessão é **encurtado** para terminar junto
+com o teto — assim o contador da tela mostra o prazo real e não sobra token válido depois do fim.
+Token emitido antes desta versão não tem o claim e cai no `iat` (deploy com tráfego vivo).
+
+`/auth/renovar` fica **fora** de `ROTAS_SEM_2FA_ADMIN` de propósito: aquela allowlist é o caminho
+de ATIVAR o segundo fator, não um jeito de esticar sessão sem ele. Admin sem TOTP leva 403 do
+guard e continua entrando pelo login. Specs: `src/auth/renovacao-sessao.spec.ts`.
 
 ## Autenticação da API pública
 

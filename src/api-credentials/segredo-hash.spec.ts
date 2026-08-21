@@ -65,32 +65,49 @@ describe('segredo de credencial de API', () => {
     expect((await verificarSegredo('', SEGREDO)).ok).toBe(false);
   });
 
-  it('comparação é em tempo constante (não vaza o segredo byte a byte)', async () => {
-    const hash = hashSegredo(SEGREDO);
-    const alvo = hash.slice('hmac1$'.length);
+  /**
+   * O que garante a propriedade é `timingSafeEqual` ser CHAMADO — não o relógio.
+   *
+   * Antes este caso cronometrava dois candidatos (um que erra só nos últimos
+   * dois caracteres, outro que erra desde o primeiro) e exigia razão < 3.
+   * Medido: com `===` de volta no lugar do `timingSafeEqual`, a razão dá
+   * **1,07**. Ou seja, a regressão que este teste dizia pegar passava VERDE —
+   * e ele ainda era instável, porque o cronômetro registrava qualquer pico de
+   * carga da máquina como se fosse vazamento de tempo.
+   *
+   * O motivo é aritmético e não tem conserto por repetição: o HMAC custa
+   * ~2,3 µs por chamada e a comparação de 32 bytes desaparece dentro disso.
+   * Cronômetro é a ferramenta errada aqui; espiar a chamada é a certa.
+   */
+  it('a comparação passa por timingSafeEqual, nunca por igualdade de string', async () => {
+    const crypto = jest.requireActual('node:crypto') as typeof import('node:crypto');
+    const espiao = jest.spyOn(crypto, 'timingSafeEqual');
+    try {
+      const hash = hashSegredo(SEGREDO);
+      const alvo = hash.slice('hmac1$'.length);
+      // Erra SÓ nos dois últimos caracteres: é o candidato que um `===` faria
+      // demorar mais, e é com ele que se descobre o segredo byte a byte.
+      const quaseCerto =
+        'hmac1$' + alvo.slice(0, -2) + (alvo.endsWith('00') ? '11' : '00');
 
-    // Um candidato que acerta quase todo o hash e outro que erra desde o
-    // primeiro byte. Com `===`, o primeiro demoraria mais.
-    const quaseCerto = 'hmac1$' + alvo.slice(0, -2) + (alvo.endsWith('00') ? '11' : '00');
-    const totalmenteErrado = 'hmac1$' + 'f'.repeat(alvo.length);
+      espiao.mockClear();
+      expect((await verificarSegredo(hash, SEGREDO)).ok).toBe(true);
+      expect(espiao).toHaveBeenCalledTimes(1);
+      // Buffers do digest INTEIRO (32 bytes do sha256) — nem string, nem fatia.
+      const [a, b] = espiao.mock.calls[0];
+      expect(Buffer.isBuffer(a)).toBe(true);
+      expect(Buffer.isBuffer(b)).toBe(true);
+      expect(a.byteLength).toBe(32);
+      expect(b.byteLength).toBe(32);
 
-    const medir = async (h: string) => {
-      const t0 = process.hrtime.bigint();
-      for (let i = 0; i < 3000; i++) await verificarSegredo(h, SEGREDO);
-      return Number(process.hrtime.bigint() - t0) / 3000;
-    };
-
-    const tQuase = await medir(quaseCerto);
-    const tErrado = await medir(totalmenteErrado);
-
-    // Ambos falham...
-    expect((await verificarSegredo(quaseCerto, SEGREDO)).ok).toBe(false);
-    expect((await verificarSegredo(totalmenteErrado, SEGREDO)).ok).toBe(false);
-    // ...e em tempo equivalente. Margem larga porque é medição em máquina com
-    // ruído: o que se quer pegar é diferença de ORDEM de grandeza, sintoma de
-    // `===` ter voltado.
-    const razao = Math.max(tQuase, tErrado) / Math.min(tQuase, tErrado);
-    expect(razao).toBeLessThan(3);
+      // O quase-certo é recusado E TAMBÉM chega na comparação: não sai antes
+      // por curto-circuito de string.
+      espiao.mockClear();
+      expect((await verificarSegredo(quaseCerto, SEGREDO)).ok).toBe(false);
+      expect(espiao).toHaveBeenCalledTimes(1);
+    } finally {
+      espiao.mockRestore();
+    }
   });
 
   it('é ordens de grandeza mais barato que argon2', async () => {

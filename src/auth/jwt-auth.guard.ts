@@ -26,6 +26,15 @@ export type JwtPayload = {
   sub: string;
   email: string;
   papeis: string[];
+  /**
+   * Início da SESSÃO (epoch s), preservado a cada renovação silenciosa — é o
+   * que dá teto absoluto ao encadeamento de tokens. Opcional: token emitido
+   * antes desta versão não tem o claim e a renovação cai no `iat`.
+   */
+  inicioSessao?: number;
+  /** Emissão/expiração deste token (epoch s), postos pelo jsonwebtoken. */
+  iat?: number;
+  exp?: number;
 };
 
 /** Usuário autenticado, como fica em `req.user`. */
@@ -103,6 +112,12 @@ export class JwtAuthGuard implements CanActivate {
     if (payload.tipo) {
       throw new UnauthorizedException('Token inválido');
     }
+    /**
+     * `POST /auth/renovar` precisa do `iat`/`exp`/`inicioSessao` do token que
+     * chegou — verificar de novo dentro do handler seria repetir issuer,
+     * audience e segredo em dois lugares, com risco de divergirem.
+     */
+    req.jwtPayload = payload;
     const usuario = await this.prisma.usuario.findUnique({
       where: { id: BigInt(payload.sub) },
       include: {

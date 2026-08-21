@@ -89,6 +89,7 @@ Validadas no boot por `src/common/env.validation.ts` (fail-fast). Em produção,
 | `WEB_URL` | Origem permitida no CORS (default `http://localhost:3000`); obrigatória em produção |
 | `TRUST_PROXY` | `1` para `req.ip` real atrás de proxy — **obrigatória em produção** (as allowlists de IP dependem disso) |
 | `JWT_EXPIRES_IN` | Validade do token (default `1h`) |
+| `SESSAO_PAINEL_MAX_HORAS` | Teto absoluto da sessão do painel, contado do login — o painel renova o JWT sozinho aos 75% da validade (default `12`; `0` = sem teto) |
 | `STORAGE_DRIVER` | Em produção não pode ser ausente nem `local` (KYC em disco efêmero) |
 | `UPLOADS_DIR` | Raiz do armazenamento local de documentos (default `./uploads`) |
 

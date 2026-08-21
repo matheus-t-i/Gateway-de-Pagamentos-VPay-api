@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Patch,
   Post,
@@ -17,8 +18,10 @@ import {
   cadastroUsuarioSchema,
   DOCUMENTOS_LEGAIS,
   loginSchema,
+  MARGEM_MINIMA_RENOVACAO_MS,
   PAPEIS,
   PERMISSOES,
+  renovacaoPermitida,
   SITUACAO_ANALISE,
   SITUACAO_USUARIO,
   VERSAO_DOCUMENTOS_LEGAIS,
@@ -26,7 +29,13 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { QueuesService } from '../queues/queues.service';
 import { TIPOS_EMAIL } from '../shared';
-import { JwtAuthGuard, type UsuarioAutenticado } from './jwt-auth.guard';
+import {
+  JwtAuthGuard,
+  type JwtPayload,
+  type UsuarioAutenticado,
+} from './jwt-auth.guard';
+import { segundosDaDuracao, tetoSessaoMs } from './sessao.util';
+import { JWT_AUDIENCE_PAINEL, JWT_ISSUER } from '../common/jwt-claims';
 import { permissoesEfetivas } from './permissoes.util';
 import { validarTotp } from './totp.controller';
 import { montarStatusOnboarding } from '../onboarding/onboarding.util';
@@ -307,6 +316,13 @@ export class AuthController {
         sub: usuario.id.toString(),
         email: usuario.email,
         papeis,
+        /**
+         * Marca o início da SESSÃO. A renovação silenciosa copia este valor
+         * para todo token novo, então é ele que limita a soma das renovações
+         * (`POST /auth/renovar`) — o `iat`, que muda a cada troca, deixaria a
+         * sessão se esticar para sempre.
+         */
+        inicioSessao: Math.floor(Date.now() / 1000),
       });
 
       return {
@@ -380,6 +396,99 @@ export class AuthController {
       situacao: usuario.situacao,
       proximoPasso: 'CONTATO_SUPORTE',
       mensagem: mensagens[usuario.situacao] ?? 'Conta não habilitada para acesso.',
+    };
+  }
+
+  /**
+   * Renovação silenciosa da sessão do painel — conta própria, sem
+   * `@RequerPermissao` (mesma razão de `/auth/me`).
+   *
+   * Troca um JWT ainda VÁLIDO por outro para quem está trabalhando não ser
+   * deslogado no meio de uma tarefa. NÃO existe refresh token guardado: o
+   * próprio access token é a credencial da troca, e quem revalida a conta é o
+   * `JwtAuthGuard`, que relê usuário, situação e perfis no banco a cada
+   * requisição. Conta suspensa, bloqueada ou com perfil inativado não renova
+   * nada — mesma razão pela qual o RBAC não mora dentro do JWT.
+   *
+   * Duas travas impedem que "renovar" vire "sessão eterna":
+   *  - **janela** — só a partir de metade da validade gasta
+   *    (`renovacaoPermitida`); sem ela, um cliente em laço ganharia um token
+   *    novo por chamada;
+   *  - **teto absoluto** — `inicioSessao` viaja no token e limita a soma das
+   *    renovações a `SESSAO_PAINEL_MAX_HORAS`. Passou disso, é login de novo,
+   *    com senha e 2FA.
+   *
+   * Recusa é **403, nunca 401**: o painel trata 401 de rota autenticada como
+   * sessão morta e vai direto para o login. Aqui o token ainda vale — o
+   * combinado com o front é não renovar e deixar expirar normalmente.
+   *
+   * Admin sem 2FA leva 403 do próprio guard, porque `/auth/renovar` está fora
+   * de `ROTAS_SEM_2FA_ADMIN` de propósito: aquela allowlist é o caminho de
+   * ATIVAR o segundo fator, não um jeito de esticar sessão sem ele.
+   */
+  @Post('renovar')
+  @UseGuards(JwtAuthGuard)
+  async renovar(@Req() req: { user: UsuarioAutenticado; jwtPayload?: JwtPayload }) {
+    const payload = req.jwtPayload;
+    if (!payload?.iat || !payload?.exp) {
+      throw new ForbiddenException(
+        'Token sem janela de validade. Entre novamente para continuar.',
+      );
+    }
+
+    const agora = Date.now();
+    const janela = { emitidoEm: payload.iat * 1000, expiraEm: payload.exp * 1000 };
+    if (!renovacaoPermitida(janela, agora)) {
+      throw new ForbiddenException('Token recente demais para renovar.');
+    }
+
+    /**
+     * Token emitido ANTES desta versão não tem `inicioSessao` — a sessão dele
+     * passa a contar do próprio `iat`. Sem esse fallback, o deploy com tráfego
+     * vivo derrubaria a renovação de quem já estava logado.
+     */
+    const inicioSessao = payload.inicioSessao ?? payload.iat;
+    const duracaoPadrao = segundosDaDuracao(process.env.JWT_EXPIRES_IN);
+    const teto = tetoSessaoMs();
+    const restanteSessao = teto
+      ? Math.floor((inicioSessao * 1000 + teto - agora) / 1000)
+      : duracaoPadrao;
+    if (restanteSessao * 1000 <= MARGEM_MINIMA_RENOVACAO_MS) {
+      throw new ForbiddenException(
+        'Duração máxima da sessão atingida. Entre novamente para continuar.',
+      );
+    }
+
+    // O último token da sessão é ENCURTADO até o teto em vez de passar dele:
+    // assim o contador da tela mostra o prazo real e a sessão acaba na hora
+    // marcada, sem um token válido sobrando depois do fim.
+    const validadeSegundos = Math.min(duracaoPadrao, restanteSessao);
+
+    const accessToken = await this.jwt.signAsync(
+      {
+        sub: req.user.id,
+        email: req.user.email,
+        // Perfis do BANCO (o guard acabou de lê-los), nunca os do token antigo:
+        // renovar não pode ressuscitar papel que o admin tirou no meio da sessão.
+        papeis: req.user.papeis,
+        inicioSessao,
+      },
+      {
+        expiresIn: validadeSegundos,
+        issuer: JWT_ISSUER(),
+        audience: JWT_AUDIENCE_PAINEL(),
+      },
+    );
+
+    return {
+      accessToken,
+      expiraEm: new Date(
+        (Math.floor(agora / 1000) + validadeSegundos) * 1000,
+      ).toISOString(),
+      /** Quando a sessão acaba de vez, mesmo renovando. `null` = sem teto. */
+      sessaoExpiraEm: teto
+        ? new Date(inicioSessao * 1000 + teto).toISOString()
+        : null,
     };
   }
 

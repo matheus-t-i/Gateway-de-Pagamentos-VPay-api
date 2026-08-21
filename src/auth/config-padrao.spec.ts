@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { QueuesService } from '../queues/queues.service';
 import { AdminUsuariosController } from './admin-usuarios.controller';
 import { SITUACAO_USUARIO } from '../shared';
+import { nomeOculto } from '../testing/padrao-sistema-oculto';
 
 /** Step-up mockado pelo mesmo motivo de ativar-sem-documentacao.spec.ts. */
 jest.mock('../common/step-up-totp', () => {
@@ -83,15 +84,24 @@ describe('config-padrao — primeira configuração', () => {
     await prisma.$disconnect();
   });
 
-  /** Esconde a linha do padrão durante `fn` e SEMPRE a restaura. */
+  /**
+   * Esconde a linha do padrão durante `fn` e SEMPRE a restaura.
+   *
+   * O nome temporário CARREGA o original (`nomeOculto`), e é isso que salva o
+   * banco de dev quando a execução morre no meio e o `finally` não roda: o
+   * `globalSetup` do jest reconhece o estado e o desfaz antes da suíte
+   * seguinte. Enquanto o nome era `__spec_oculta_<timestamp>`, o original se
+   * perdia — o dev ficava sem padrão, TODA execução seguinte falhava e o
+   * painel parava de ativar conta ("Defina o Padrão de novos clientes"), sem
+   * ninguém ligar uma coisa à outra.
+   */
   async function semLinhaPadrao<T>(fn: () => Promise<T>): Promise<T> {
     const linha = await prisma.configuracaoPadraoPixUsuario.findFirstOrThrow({
       where: { padraoSistema: true },
     });
-    const nomeOculto = `__spec_oculta_${Date.now()}`;
     await prisma.configuracaoPadraoPixUsuario.update({
       where: { id: linha.id },
-      data: { padraoSistema: false, nome: nomeOculto },
+      data: { padraoSistema: false, nome: nomeOculto(linha.nome) },
     });
     try {
       return await fn();
