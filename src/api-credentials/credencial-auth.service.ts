@@ -24,7 +24,26 @@ export type CredencialAutenticada = {
 };
 
 /** Contexto da requisição que a validação precisa (auditoria + allowlist). */
-export type ContextoRequisicao = { ip?: string; path?: string };
+export type ContextoRequisicao = {
+  ip?: string;
+  path?: string;
+  /**
+   * Chamado assim que a identidade da credencial é PROVADA — segredo conferido
+   * (emissão) ou token assinado por nós (guard) — e ANTES das validações de
+   * estado que podem recusar (conta não ativa, IP fora da allowlist).
+   *
+   * Existe porque essas recusas são `throw` de dentro do `validarEstadoComum`:
+   * quem só preenchia a identidade no RETORNO deixava todo 403 cair na trilha
+   * de `/admin/seguranca` como "não identificado" — justamente as linhas que a
+   * tela existe para investigar (chave usada de um IP não liberado é o sinal
+   * de credencial vazada).
+   *
+   * ⚠️ Recebe a identidade de uma requisição que pode ser RECUSADA logo em
+   * seguida. É para AUDITORIA, nunca para autorizar — por isso o callback
+   * grava num campo separado de `req.apiCredential`.
+   */
+  aoIdentificar?: (cred: { id: string; usuarioId: string }) => void;
+};
 
 function ipMatches(clientIp: string, allowed: string): boolean {
   try {
@@ -165,6 +184,14 @@ export class CredencialAuthService {
         .catch(() => {});
     }
 
+    // O segredo conferiu: a identidade está PROVADA. Marca para a auditoria
+    // antes do `validarEstadoComum`, que pode recusar por conta/IP — assim a
+    // recusa entra na trilha com nome, e não como "não identificado".
+    ctx.aoIdentificar?.({
+      id: cred.id.toString(),
+      usuarioId: cred.usuarioId.toString(),
+    });
+
     // Só depois de o segredo conferir é que faz sentido explicar o motivo: quem
     // tem a credencial tem direito a saber que a conta está bloqueada.
     return this.validarEstadoComum(cred, ctx);
@@ -212,7 +239,31 @@ export class CredencialAuthService {
       throw new UnauthorizedException('Credencial expirada — o token não vale mais.');
     }
 
+    // Token assinado por nós ⇒ identidade provada. Mesmo motivo da emissão:
+    // marca antes das validações de estado que lançam 403.
+    ctx.aoIdentificar?.({
+      id: cred.id.toString(),
+      usuarioId: cred.usuarioId.toString(),
+    });
+
     return this.validarEstadoComum(cred, ctx);
+  }
+
+  /**
+   * Dono de uma credencial, só para a TRILHA de auditoria — sem validar estado
+   * e sem autorizar nada. Usado quando a requisição já está recusada (token
+   * expirado) mas a identidade é confiável e vale registrar quem era.
+   */
+  async donoDaCredencial(
+    credencialApiId: bigint,
+  ): Promise<{ id: string; usuarioId: string } | null> {
+    const cred = await this.prisma.credencialApi.findUnique({
+      where: { id: credencialApiId },
+      select: { id: true, usuarioId: true },
+    });
+    return cred
+      ? { id: cred.id.toString(), usuarioId: cred.usuarioId.toString() }
+      : null;
   }
 
   /** Estado da conta + IP allowlist — igual nos dois caminhos. */

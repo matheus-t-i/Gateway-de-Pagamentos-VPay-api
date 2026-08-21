@@ -145,6 +145,45 @@ describe('RegistroAcessoApiMiddleware', () => {
     });
   });
 
+  /**
+   * Requisição RECUSADA cuja identidade foi provada (403 de IP fora da
+   * allowlist, 401 de token expirado): a trilha grava o dono. Antes, toda
+   * recusa desse tipo entrava como "não identificado" na tela — justamente o
+   * sinal de credencial usada de onde não devia.
+   */
+  it('grava o dono quando a identidade foi provada mas a requisição foi RECUSADA', async () => {
+    const { mw, criados } = montar();
+    await rodar(
+      mw,
+      {
+        ...reqBase,
+        path: '/api/v1/auth/token',
+        credencialIdentificada: { id: '42', usuarioId: '7' },
+        mensagemErroHttp: 'IP não permitido',
+        codigoErroHttp: 'Forbidden',
+      },
+      403,
+    );
+
+    expect(criados[0]).toMatchObject({
+      usuarioId: BigInt(7),
+      credencialApiId: BigInt(42),
+      statusHttp: 403,
+      sucesso: false,
+    });
+  });
+
+  it('sem identidade provada, segue sem dono — só a chave apresentada', async () => {
+    const { mw, criados } = montar();
+    await rodar(mw, { ...reqBase }, 401);
+
+    expect(criados[0]).toMatchObject({
+      usuarioId: null,
+      credencialApiId: null,
+      chavePublica: 'vp_chave_publica',
+    });
+  });
+
   it('ignora rota não sensível sem sequer registrar o gancho', async () => {
     const { mw, criados, prisma } = montar();
     const { next } = await rodar(mw, { ...reqBase, path: '/api/painel/dashboard' }, 401);

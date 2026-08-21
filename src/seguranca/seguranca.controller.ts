@@ -128,6 +128,42 @@ export class SegurancaController {
       }),
     ]);
 
+    /**
+     * Dono da chave APRESENTADA, para as linhas sem identidade provada.
+     *
+     * Cobre o que o gancho de auditoria não alcança: rota inexistente (a
+     * varredura nem chega à autenticação) e segredo errado. Era o buraco que
+     * deixava a pergunta central de um incidente sem resposta — "de quem é a
+     * chave que o scanner está usando?" — - com a tela mostrando só o prefixo.
+     *
+     * ⚠️ Vai num campo SEPARADO e a tela rotula como não confirmado: a chave
+     * pública não é segredo (aparece no painel do lojista), então qualquer um
+     * pode apresentar a chave de outro. Afirmar que o dono FEZ a chamada seria
+     * atribuir a um cliente uma requisição que pode não ser dele.
+     */
+    const chavesSemDono = Array.from(
+      new Set(
+        itens
+          .filter((r) => !r.usuario && r.chavePublica)
+          .map((r) => r.chavePublica as string),
+      ),
+    );
+    const donosApresentados = new Map<string, string>();
+    if (chavesSemDono.length) {
+      const creds = await this.prisma.credencialApi.findMany({
+        where: { chavePublica: { in: chavesSemDono } },
+        select: {
+          chavePublica: true,
+          usuario: { select: { nomeRazaoSocial: true } },
+        },
+      });
+      for (const c of creds) {
+        if (c.usuario?.nomeRazaoSocial) {
+          donosApresentados.set(c.chavePublica, c.usuario.nomeRazaoSocial);
+        }
+      }
+    }
+
     return {
       pagina,
       limite,
@@ -151,6 +187,10 @@ export class SegurancaController {
         credencialNome: r.credencial?.nome ?? null,
         cliente: r.usuario?.nomeRazaoSocial ?? null,
         clienteEmail: r.usuario?.email ?? null,
+        // Só quando NÃO houve identificação provada — nunca os dois juntos.
+        donoChaveApresentada: r.usuario
+          ? null
+          : (r.chavePublica && donosApresentados.get(r.chavePublica)) || null,
       })),
     };
   }

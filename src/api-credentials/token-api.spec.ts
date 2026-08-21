@@ -1,4 +1,4 @@
-import { UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { ExecutionContext } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
@@ -92,10 +92,10 @@ describe('token da API pública (Bearer)', () => {
 
     await expect(guard().canActivate(ctx)).resolves.toBe(true);
     expect(req.apiCredential).toEqual(credencial);
-    expect(credAuth.carregarCredencialAtiva).toHaveBeenCalledWith(BigInt(42), {
-      ip: '127.0.0.1',
-      path: '/v1/pix/cobrancas',
-    });
+    expect(credAuth.carregarCredencialAtiva).toHaveBeenCalledWith(
+      BigInt(42),
+      expect.objectContaining({ ip: '127.0.0.1', path: '/v1/pix/cobrancas' }),
+    );
   });
 
   /**
@@ -111,10 +111,10 @@ describe('token da API pública (Bearer)', () => {
     });
 
     await expect(guard().canActivate(ctx)).resolves.toBe(true);
-    expect(credAuth.carregarCredencialAtiva).toHaveBeenCalledWith(BigInt(42), {
-      ip: '179.51.222.151',
-      path: '/v1/pix/cobrancas',
-    });
+    expect(credAuth.carregarCredencialAtiva).toHaveBeenCalledWith(
+      BigInt(42),
+      expect.objectContaining({ ip: '179.51.222.151', path: '/v1/pix/cobrancas' }),
+    );
   });
 
   it('emissão do token valida allowlist pelo cf-connecting-ip, não pelo req.ip', async () => {
@@ -139,7 +139,7 @@ describe('token da API pública (Bearer)', () => {
     expect(credAuthEmissao.autenticarPorChaveSegredo).toHaveBeenCalledWith(
       'vp_chave',
       'segredo',
-      { ip: '179.51.222.151', path: '/v1/auth/token' },
+      expect.objectContaining({ ip: '179.51.222.151', path: '/v1/auth/token' }),
     );
   });
 
@@ -220,6 +220,85 @@ describe('token da API pública (Bearer)', () => {
       credencialApiId: BigInt(42),
       statusHttp: 201,
     });
+  });
+
+  /**
+   * O 403 de allowlist é o sinal clássico de credencial usada de onde não
+   * devia — e era exatamente ele que chegava à trilha como "não identificado",
+   * porque a recusa é `throw` de dentro do `autenticarPorChaveSegredo` e a
+   * atribuição só acontecia no retorno.
+   */
+  it('403 de IP não permitido na emissão ENTRA identificado na trilha', async () => {
+    const credAuthRecusa = {
+      autenticarPorChaveSegredo: jest.fn(
+        async (_k: string, _s: string, ctx: { aoIdentificar?: (c: unknown) => void }) => {
+          // Espelha a ordem real: identidade provada → validação de estado recusa.
+          ctx.aoIdentificar?.({ id: '42', usuarioId: '7' });
+          throw new ForbiddenException('IP não permitido');
+        },
+      ),
+    } as unknown as CredencialAuthService;
+    const controller = new TokenApiController(
+      credAuthRecusa,
+      jwt,
+      { get: jest.fn() } as unknown as ConfigService,
+    );
+
+    const req: {
+      headers: Record<string, string | undefined>;
+      credencialIdentificada?: { id: string; usuarioId: string };
+      apiCredential?: { id: string; usuarioId: string };
+    } = { headers: { 'x-api-key': 'vp_chave', 'x-api-secret': 'segredo' } };
+
+    await expect(controller.emitir(req)).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(req.credencialIdentificada).toMatchObject({ id: '42', usuarioId: '7' });
+    // Recusada NÃO é autenticada: o campo que autoriza continua vazio.
+    expect(req.apiCredential).toBeUndefined();
+  });
+
+  it('segredo errado NÃO identifica — a chave pública não prova quem chamou', async () => {
+    const credAuthSegredoErrado = {
+      autenticarPorChaveSegredo: jest.fn(async () => {
+        // Sem `aoIdentificar`: o serviço só o dispara DEPOIS de conferir o segredo.
+        throw new UnauthorizedException('Credencial inválida');
+      }),
+    } as unknown as CredencialAuthService;
+    const controller = new TokenApiController(
+      credAuthSegredoErrado,
+      jwt,
+      { get: jest.fn() } as unknown as ConfigService,
+    );
+
+    const req: {
+      headers: Record<string, string | undefined>;
+      credencialIdentificada?: { id: string; usuarioId: string };
+    } = { headers: { 'x-api-key': 'vp_de_outro', 'x-api-secret': 'errado' } };
+
+    await expect(controller.emitir(req)).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(req.credencialIdentificada).toBeUndefined();
+  });
+
+  it('token EXPIRADO é identificado para a trilha, mas segue 401', async () => {
+    const donoDaCredencial = jest.fn().mockResolvedValue({ id: '42', usuarioId: '7' });
+    const guardExpirado = new ApiTokenGuard(
+      jwt,
+      { ...credAuth, donoDaCredencial } as unknown as CredencialAuthService,
+      rateLimit,
+      config,
+    );
+    const expirado = await jwt.signAsync(
+      { sub: '42', tipo: TIPO_TOKEN_API },
+      { expiresIn: -10, issuer: JWT_ISSUER(), audience: JWT_AUDIENCE_API() },
+    );
+    const { ctx, req } = contexto(`Bearer ${expirado}`);
+
+    await expect(guardExpirado.canActivate(ctx)).rejects.toThrow(
+      /Token de acesso expirado/,
+    );
+    expect(donoDaCredencial).toHaveBeenCalledWith(BigInt(42));
+    expect(req.credencialIdentificada).toMatchObject({ id: '42', usuarioId: '7' });
+    expect(req.apiCredential).toBeUndefined();
   });
 
   it('recusa requisição sem Authorization', async () => {

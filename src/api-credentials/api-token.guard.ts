@@ -65,6 +65,30 @@ export class ApiTokenGuard implements CanActivate {
        * normal, e a correção é do lojista (reemitir), não do suporte.
        */
       if ((e as Error).name === 'TokenExpiredError') {
+        /**
+         * Identifica para a AUDITORIA (nunca para autorizar): a assinatura
+         * continua sendo nossa e o `sub` é confiável — só o prazo venceu. Sem
+         * isto, "token expirado" é o 401 mais comum da operação e chegava à
+         * trilha sem dono, escondendo qual lojista está com a integração
+         * reemitindo token errado. `ignoreExpiration` vale SÓ aqui; o fluxo
+         * segue lançando 401 logo abaixo.
+         */
+        try {
+          const expirado = await this.jwt.verifyAsync<TokenApiPayload>(
+            header.slice(7),
+            {
+              issuer: JWT_ISSUER(),
+              audience: JWT_AUDIENCE_API(),
+              ignoreExpiration: true,
+            },
+          );
+          if (expirado.tipo === TIPO_TOKEN_API && expirado.sub) {
+            const dono = await this.credAuth.donoDaCredencial(BigInt(expirado.sub));
+            if (dono) req.credencialIdentificada = dono;
+          }
+        } catch {
+          // Identificação é acessório: nunca troca o 401 por um erro nosso.
+        }
         throw new UnauthorizedException(
           'Token de acesso expirado. Gere um novo em POST /v1/auth/token.',
         );
@@ -82,7 +106,17 @@ export class ApiTokenGuard implements CanActivate {
     // CF — a allowlist da credencial nunca casava com o IP real do lojista.
     const cred = await this.credAuth.carregarCredencialAtiva(
       BigInt(payload.sub),
-      { ip: extrairIpCliente(req), path: req.path },
+      {
+        ip: extrairIpCliente(req),
+        path: req.path,
+        // Auditoria: `req.apiCredential` só é preenchido no sucesso (abaixo), e
+        // as recusas de estado são `throw` de dentro do carregamento — sem este
+        // gancho, todo 403 (conta bloqueada, IP fora da allowlist) chegava à
+        // trilha sem dono.
+        aoIdentificar: (c) => {
+          req.credencialIdentificada = c;
+        },
+      },
     );
     req.apiCredential = cred;
 

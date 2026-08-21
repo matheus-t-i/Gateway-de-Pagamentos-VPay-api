@@ -44,6 +44,7 @@ export class TokenApiController {
     ip?: string;
     path?: string;
     apiCredential?: { id: string; usuarioId: string };
+    credencialIdentificada?: { id: string; usuarioId: string };
   }) {
     const publicKey =
       req.headers['x-api-key'] || (req.headers['x-public-key'] as string | undefined);
@@ -58,6 +59,12 @@ export class TokenApiController {
     const cred = await this.credAuth.autenticarPorChaveSegredo(publicKey, secret, {
       ip: extrairIpCliente(req),
       path: req.path,
+      // Identidade para a AUDITORIA, disparada antes das validações de estado:
+      // sem isto, o 403 de "IP não permitido" — o sinal clássico de chave usada
+      // de onde não devia — entrava na trilha sem dono.
+      aoIdentificar: (c) => {
+        req.credencialIdentificada = c;
+      },
     });
 
     /**

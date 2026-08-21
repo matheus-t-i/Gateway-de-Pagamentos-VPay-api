@@ -11,6 +11,11 @@ export function ehRotaSensivel(caminho: string): boolean {
 
 type ReqApi = Request & {
   apiCredential?: { id: string; usuarioId: string };
+  /**
+   * Identidade PROVADA de uma requisição que foi RECUSADA (403 de IP/conta, 401
+   * de token expirado). Só para auditoria — nunca significa "autenticado".
+   */
+  credencialIdentificada?: { id: string; usuarioId: string };
   identificadorRastreio?: string;
   mensagemErroHttp?: string;
   codigoErroHttp?: string;
@@ -70,16 +75,23 @@ export class RegistroAcessoApiMiddleware implements NestMiddleware {
         return typeof v === 'string' && v.trim() ? v.trim() : null;
       };
       const status = res.statusCode;
+      /**
+       * Autenticado (`apiCredential`) OU identidade provada numa requisição
+       * recusada (`credencialIdentificada`: 403 de IP/conta, 401 de token
+       * expirado). Os dois nomeiam o dono com a mesma confiança — segredo
+       * conferido ou token assinado por nós; o que muda é o desfecho, e esse
+       * já está no `statusHttp` da própria linha. Sem o segundo, toda recusa de
+       * allowlist entrava como "não identificado" na tela.
+       *
+       * Segue nulo quando a identidade NÃO foi provada (segredo errado, chave
+       * inexistente, rota inexistente) — aí só a `chavePublica` apresentada é
+       * registrada, e ela não prova quem chamou.
+       */
+      const identidade = req.apiCredential ?? req.credencialIdentificada;
       await this.prisma.registroAcessoApi.create({
         data: {
-          // Preenchidos pelo guard quando a autenticação passou; nulos no 401,
-          // que é justamente quando `chavePublica` salva a investigação.
-          usuarioId: req.apiCredential?.usuarioId
-            ? BigInt(req.apiCredential.usuarioId)
-            : null,
-          credencialApiId: req.apiCredential?.id
-            ? BigInt(req.apiCredential.id)
-            : null,
+          usuarioId: identidade?.usuarioId ? BigInt(identidade.usuarioId) : null,
+          credencialApiId: identidade?.id ? BigInt(identidade.id) : null,
           chavePublica: cabecalho('x-api-key')?.slice(0, 120) ?? null,
           enderecoIp: extrairIpCliente(req).slice(0, 45) || null,
           agenteUsuario: cabecalho('user-agent')?.slice(0, 500) ?? null,
